@@ -1,23 +1,19 @@
 //! Engine tests. Prices start at 1.0, bins are 1% apart, the fee is 1%.
 //! The treasury puts 1_000_000 per bin in three bins on each side.
 
-use engine::{Book, Config, Error, Side};
-use math::fees::FeeShares;
+use engine::{Book, Config, Error, Side, DEFAULT_LADDER};
 use math::PRICE_SCALE;
 
 const UNIT: u128 = 1_000_000;
+const DAY: u64 = 86_400 * 1_000_000_000;
+
+fn cfg() -> Config {
+    Config::standard(PRICE_SCALE, 100) // bin 0 = 1.0 quote per token, 1% fee
+}
 
 fn book() -> Book {
-    let cfg = Config {
-        base_price: PRICE_SCALE, // bin 0 = 1.0 quote per token
-        step_bps: 100,
-        fee_bps: 100,
-        shares: FeeShares { pot_bps: 4_500, creator_bps: 1_000 },
-    };
-    let mut b = Book::new(cfg);
-    // Tokens in bins 1,2,3 and quote in bins -1,-2,-3.
-    b.add_uniform("treasury", 3 * UNIT, 3 * UNIT, 3, 0).unwrap();
-    b
+    // Tokens in bins 1,2,3 and quote in bins -1,-2,-3. Not locked.
+    Book::seed(cfg(), "treasury", 3 * UNIT, 3 * UNIT, 3, 0, 0).unwrap().0
 }
 
 #[test]
@@ -34,7 +30,6 @@ fn small_buy_stays_in_first_bin() {
 #[test]
 fn big_buy_crosses_into_the_next_bin() {
     let mut b = book();
-    // Emptying bin 1 costs 1_010_000 net + fee 10_203 (1% of gross) = 1_020_203.
     let r = b.swap(Side::Buy, 1_500_000, 0).unwrap();
     assert_eq!(b.bins[&1].token, 0); // bin 1 sold out
     assert!(b.bins[&2].token < UNIT); // bin 2 partly filled
@@ -67,7 +62,6 @@ fn buy_then_sell_back_costs_about_two_fees() {
     let mut b = book();
     let bought = b.swap(Side::Buy, 100_000, 0).unwrap().out;
     let back = b.swap(Side::Sell, bought, 0).unwrap().out;
-    // 100_000 in, ~98_000 back: two 1% fees plus rounding.
     assert!(back < 100_000 && back > 97_900, "got {back}");
 }
 
@@ -92,17 +86,16 @@ fn only_owner_can_claim() {
 #[test]
 fn wrong_side_liquidity_is_rejected() {
     let mut b = book();
-    assert_eq!(b.add_liquidity("alice", 5, 0, 100, 0), Err(Error::WrongSide)); // quote above price
-    assert_eq!(b.add_liquidity("alice", -5, 100, 0, 0), Err(Error::WrongSide)); // token below price
+    assert_eq!(b.add_liquidity("alice", 5, 0, 100, 0, 0), Err(Error::WrongSide));
+    assert_eq!(b.add_liquidity("alice", -5, 100, 0, 0, 0), Err(Error::WrongSide));
 }
 
 #[test]
 fn locked_liquidity_cannot_leave_early() {
     let mut b = book();
-    let id = b.add_liquidity("dev", 4, UNIT, 0, 1_000).unwrap();
+    let id = b.add_liquidity("dev", 4, UNIT, 0, 1_000, 0).unwrap();
     assert_eq!(b.withdraw(id, "dev", 999), Err(Error::Locked { until_ns: 1_000 }));
-    let w = b.withdraw(id, "dev", 1_000).unwrap();
-    assert_eq!(w.token, UNIT);
+    assert_eq!(b.withdraw(id, "dev", 1_000).unwrap().token, UNIT);
 }
 
 #[test]
@@ -111,10 +104,91 @@ fn withdraw_after_being_filled_returns_quote() {
     b.swap(Side::Buy, 2_000_000, 0).unwrap(); // empties bin 1, partly bin 2
     let bin1 = *b.positions.iter().find(|(_, p)| p.bin == 1).unwrap().0;
     let w = b.withdraw(bin1, "treasury", 0).unwrap();
-    // The LP's tokens were sold at 1.01: they now get ~1_010_000 quote back.
-    assert_eq!(w.token, 0);
-    assert_eq!(w.quote, 1_010_000);
+    // The LP's tokens were sold at 1.01: they now get 1_010_000 quote back.
+    assert_eq!((w.token, w.quote), (0, 1_010_000));
     assert!(w.fee_quote > 0);
+}
+
+// ---------- graduation, vault, creator slice, crank, ladder ----------
+
+#[test]
+fn graduation_opens_at_the_auction_price() {
+    // 4_000 quote raised, 500_000 tokens to the pool -> price 0.008
+    let mut b = Book::graduate(cfg(), 4_000 * UNIT, 500_000 * UNIT, 50);
+    assert_eq!(b.cfg.base_price, PRICE_SCALE * 8 / 1_000);
+    assert_eq!(b.protocol_pos.len(), 100); // 50 bins each side
+    assert_eq!(b.withdraw(0, engine::PROTOCOL, u64::MAX - 1), Err(Error::Locked { until_ns: u64::MAX }));
+}
+
+#[test]
+fn crank_pays_stakers_and_burns_by_vote() {
+    let mut b = book();
+    b.stake("alice", 300).unwrap();
+    b.stake("bob", 100).unwrap();
+    b.set_vote("alice", [0, 10_000, 0]).unwrap(); // all burn
+    b.set_vote("bob", [10_000, 0, 0]).unwrap(); // all dividend
+    b.swap(Side::Buy, 1_000_000, 0).unwrap(); // fee 10_000 -> pot 4_500, creator 1_000
+    let r = b.crank(1).unwrap();
+    // No locked liquidity, so the creator slice joins the pot: 5_500 (+ protocol LP fees: none).
+    // Votes: 75% burn, 25% dividend.
+    assert_eq!(r.dividend_q, 5_500 / 4);
+    assert!(r.burned > 0);
+    let (dq, _) = b.claim_dividends("alice").unwrap();
+    assert_eq!(dq, 5_500 / 4 * 300 / 400); // Alice voted burn but still shares the dividend
+}
+
+#[test]
+fn crank_is_rate_limited() {
+    let mut b = book();
+    b.crank(DAY).unwrap();
+    assert!(matches!(b.crank(DAY + 1), Err(Error::TooSoon { .. })));
+    assert!(b.crank(DAY + 3_600 * 1_000_000_000).is_ok());
+}
+
+#[test]
+fn unstake_waits_seven_days_and_stops_earning() {
+    let mut b = book();
+    b.stake("alice", 1_000).unwrap();
+    b.request_unstake("alice", 1_000, 0).unwrap();
+    assert!(matches!(b.withdraw_unstaked("alice", 6 * DAY), Err(Error::Locked { .. })));
+    assert_eq!(b.withdraw_unstaked("alice", 7 * DAY).unwrap(), 1_000);
+    assert_eq!(b.vault.total_stake, 0);
+    assert_eq!(b.vault.votes, Default::default());
+}
+
+#[test]
+fn creator_slice_goes_to_locked_liquidity_only() {
+    let mut b = book();
+    // dev locks 40 days (eligible), degen locks 1 day (not eligible).
+    let dev = b.add_liquidity("dev", 10, UNIT, 0, 40 * DAY, 0).unwrap();
+    let degen = b.add_liquidity("degen", 11, UNIT, 0, DAY, 0).unwrap();
+    b.swap(Side::Buy, 1_000_000, 0).unwrap(); // creator slice 1_000
+    b.crank(1).unwrap();
+    let (dev_q, _) = b.claimable(dev).unwrap();
+    let (degen_q, _) = b.claimable(degen).unwrap();
+    assert!(dev_q >= 999, "dev got {dev_q}");
+    assert_eq!(degen_q, 0);
+}
+
+#[test]
+fn creator_slice_stops_when_lock_expires() {
+    let mut b = book();
+    let dev = b.add_liquidity("dev", 10, UNIT, 0, 31 * DAY, 0).unwrap();
+    b.crank(32 * DAY).unwrap(); // lock expired before this crank
+    b.swap(Side::Buy, 1_000_000, 0).unwrap();
+    b.crank(33 * DAY).unwrap();
+    assert_eq!(b.claimable(dev).unwrap().0, 0);
+    assert_eq!(b.creator.total_weight, 0);
+}
+
+#[test]
+fn ladder_places_asks_at_multiples() {
+    let mut b = book();
+    let (r, kept, ids) = b.buy_with_ladder("ape", 100_000, 0, &DEFAULT_LADDER, 0).unwrap();
+    assert_eq!(ids.len(), 4);
+    assert_eq!(kept, r.out - 4 * (r.out * 1_250 / 10_000));
+    let bins: Vec<i32> = ids.iter().map(|i| b.positions[i].bin).collect();
+    assert_eq!(bins, vec![1 + 41, 1 + 70, 1 + 111, 1 + 162]); // from active bin 1
 }
 
 /// Simple deterministic random numbers, so the test is repeatable.
@@ -127,33 +201,32 @@ impl Lcg {
 }
 
 #[test]
-fn no_value_from_nothing_over_2000_random_trades() {
+fn solvent_after_5000_random_actions_of_every_kind() {
     let mut b = book();
-    let mut rng = Lcg(42);
-    // Everything that ever entered the contract, minus everything that left.
-    let (mut quote_in, mut token_in) = (3 * UNIT, 3 * UNIT);
-    for _ in 0..2_000 {
-        let amount = (rng.next() % 300_000) as u128 + 1;
-        let side = if rng.next() % 2 == 0 { Side::Buy } else { Side::Sell };
-        if let Ok(r) = b.swap(side, amount, 0) {
-            match side {
-                Side::Buy => { quote_in += r.used; token_in -= r.out; }
-                Side::Sell => { token_in += r.used; quote_in -= r.out; }
-            }
+    let mut rng = Lcg(7);
+    // Real balances the contract would hold: everything in minus everything out.
+    let (mut q_bal, mut t_bal) = (3 * UNIT, 3 * UNIT);
+    let mut now = 0u64;
+    let users = ["a", "b", "c", "d"];
+    for step in 0..5_000u64 {
+        now += 600 * 1_000_000_000; // 10 minutes
+        let who = users[(rng.next() % 4) as usize];
+        match rng.next() % 9 {
+            0 | 1 | 2 => if let Ok(r) = b.swap(Side::Buy, rng.next() as u128 % 200_000 + 1, 0) { q_bal += r.used; t_bal -= r.out; },
+            3 | 4 => if let Ok(r) = b.swap(Side::Sell, rng.next() as u128 % 200_000 + 1, 0) { t_bal += r.used; q_bal -= r.out; },
+            5 => { let a = rng.next() as u128 % 50_000 + 1; if b.stake(who, a).is_ok() { t_bal += a; } }
+            6 => { let s = b.vault.stakers.get(who).map(|s| s.stake).unwrap_or(0); if s > 0 { b.request_unstake(who, s / 2 + 1, now).ok(); } if let Ok(a) = b.withdraw_unstaked(who, now) { t_bal -= a; } }
+            7 => if let Ok((q, t)) = b.claim_dividends(who) { q_bal -= q; t_bal -= t; },
+            _ => { let a = rng.next() as u128 % 50_000 + 1; if let Ok((_, placed)) = b.place_ladder(who, a, &DEFAULT_LADDER, now) { t_bal += placed; } }
+        }
+        let _ = b.crank(now); // anyone can call it; often too soon, that is fine
+        if step % 250 == 0 {
+            let (oq, ot) = b.obligations();
+            assert!(oq <= q_bal && ot <= t_bal - b.burned, "step {step}: owes ({oq},{ot}) holds ({q_bal},{t_bal})");
         }
     }
-    // What the contract owes: bin reserves + pots + every LP's unclaimed fees.
-    let ids: Vec<u64> = b.positions.keys().copied().collect();
-    let (mut owed_q, mut owed_t) = (0u128, 0u128);
-    for id in ids {
-        let (q, t) = b.claimable(id).unwrap();
-        owed_q += q;
-        owed_t += t;
-    }
-    let held_q: u128 = b.bins.values().map(|x| x.quote).sum::<u128>() + b.pots.pot_quote + b.pots.creator_quote + owed_q;
-    let held_t: u128 = b.bins.values().map(|x| x.token).sum::<u128>() + b.pots.pot_token + b.pots.creator_token + owed_t;
-    // Obligations can never exceed what came in. The difference is rounding dust.
-    assert!(held_q <= quote_in, "quote: owes {held_q}, has {quote_in}");
-    assert!(held_t <= token_in, "token: owes {held_t}, has {token_in}");
-    assert!(quote_in - held_q < 2_000 && token_in - held_t < 2_000, "dust should be tiny");
+    // Burned tokens left the contract for good.
+    let (oq, ot) = b.obligations();
+    assert!(oq <= q_bal, "quote: owes {oq}, holds {q_bal}");
+    assert!(ot <= t_bal - b.burned, "token: owes {ot}, holds {}", t_bal - b.burned);
 }

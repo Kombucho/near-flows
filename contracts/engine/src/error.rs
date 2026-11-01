@@ -14,4 +14,9 @@ pub enum Error {
     NoPosition,
     NotOwner,
     Locked { until_ns: u64 },
+    /// Crank called before its interval passed.
+    TooSoon { next_ns: u64 },
+    NotStaker,
+    NotEnoughStake,
+    BadVote,
 }
