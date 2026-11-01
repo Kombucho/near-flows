@@ -1,0 +1,8 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2021"
+description = "The market engine as plain Rust: bins, liquidity positions, swaps, fees. No near-sdk, so it runs in tests and simulations."
+
+[dependencies]
+math = { path = "../math" }

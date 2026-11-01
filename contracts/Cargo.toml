@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["math"]
+members = ["math", "engine"]
 
 # Contracts handle money: an overflow must abort the call, never wrap around silently.
 [profile.release]
