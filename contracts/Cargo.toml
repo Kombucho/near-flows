@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["math"]
+
+# Contracts handle money: an overflow must abort the call, never wrap around silently.
+[profile.release]
+overflow-checks = true
+codegen-units = 1
+opt-level = "z"
+lto = true
+panic = "abort"

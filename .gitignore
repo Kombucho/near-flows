@@ -1,0 +1,10 @@
+.near-credentials/
+neardev/
+.env
+.env.*
+!.env.example
+target/
+node_modules/
+*.pem
+submission*.json
+.DS_Store

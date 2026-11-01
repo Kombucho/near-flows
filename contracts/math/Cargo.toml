@@ -1,0 +1,8 @@
+[package]
+name = "math"
+version = "0.1.0"
+edition = "2021"
+description = "Pure integer math for the market: fees, bin prices, in-bin swaps, fee-per-share, constant product. No near-sdk."
+
+[dependencies]
+uint = "0.10"
