@@ -21,6 +21,7 @@ pub fn fee_on_net(net: u128, fee_bps: u16) -> u128 {
 
 /// Shares in bps OF THE FEE (not of the trade). LPs get the remainder.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
 pub struct FeeShares {
     pub pot_bps: u16,
     pub creator_bps: u16,
@@ -47,6 +48,7 @@ pub fn split_fee(fee: u128, shares: FeeShares) -> FeeSplit {
 /// Stake-weighted vote totals for the three fixed pot options.
 /// Each total = sum over stakers of (stake * that staker's bps for the option).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
 pub struct PotVotes {
     pub dividend: u128,
     pub burn: u128,

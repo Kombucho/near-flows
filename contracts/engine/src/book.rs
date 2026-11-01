@@ -19,6 +19,7 @@ const DAY_NS: u64 = 24 * HOUR_NS;
 
 /// One price level. Holds tokens (for buyers) and quote (for sellers).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
 pub struct Bin {
     pub token: u128,
     pub quote: u128,
@@ -40,6 +41,7 @@ pub struct Bin {
 
 /// Fixed at creation. None of this can change afterwards.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
 pub struct Config {
     pub base_price: u128, // price of bin 0, quote per token, fixed-point
     pub step_bps: u16,    // price gap between bins (100 = 1%)
@@ -91,6 +93,7 @@ impl Config {
 
 /// One LP's liquidity in one bin.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
 pub struct Position {
     pub owner: String,
     pub bin: i32,
@@ -112,6 +115,7 @@ pub struct Position {
 
 /// Fee slices that do not go to LPs, waiting for the next crank.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
 pub struct Pots {
     pub pot_quote: u128,
     pub pot_token: u128,
@@ -121,6 +125,7 @@ pub struct Pots {
 
 /// The creator slice is shared by locked liquidity, pro-rata to weight.
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
 pub struct CreatorPool {
     pub total_weight: u128,
     pub acc_q: u128,
@@ -129,6 +134,7 @@ pub struct CreatorPool {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
 pub struct Book {
     pub cfg: Config,
     pub active: i32, // the bin where the current price sits

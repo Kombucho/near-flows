@@ -13,6 +13,7 @@ pub type Vote = [u16; 3];
 pub const DEFAULT_VOTE: Vote = [DEFAULT_MIX.dividend as u16, DEFAULT_MIX.burn as u16, DEFAULT_MIX.deepen as u16];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
 pub struct Staker {
     pub stake: u128,
     pub vote: Vote,
@@ -25,6 +26,7 @@ pub struct Staker {
 }
 
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
 pub struct Vault {
     pub total_stake: u128,
     pub acc_q: u128,

@@ -6,3 +6,8 @@ description = "Pure integer math for the market: fees, bin prices, in-bin swaps,
 
 [dependencies]
 uint = "0.10"
+borsh = { version = "1", features = ["derive"], optional = true }
+
+[features]
+# Lets the NEAR contract store these types on chain. Off by default.
+borsh = ["dep:borsh"]

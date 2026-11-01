@@ -6,3 +6,8 @@ description = "The market engine as plain Rust: bins, liquidity positions, swaps
 
 [dependencies]
 math = { path = "../math" }
+borsh = { version = "1", features = ["derive"], optional = true }
+
+[features]
+# Lets the NEAR contract store the Book on chain. Off by default.
+borsh = ["dep:borsh", "math/borsh"]
