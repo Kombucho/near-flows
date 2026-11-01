@@ -18,6 +18,7 @@ pub struct ConfigView {
     pub base_price: U128, // quote per token, 1e18 fixed-point
     pub active_bin: i32,
     pub price: U128, // current price, same format
+    pub current_fee_bps: u16, // what a small trade pays right now (dynamic)
 }
 
 #[near(serializers = [json])]
@@ -63,14 +64,14 @@ pub struct StakerView {
 #[near]
 impl Market {
     pub fn get_config(&self) -> ConfigView {
-        let (step, base, active, price) = match &self.book {
-            Some(b) => (b.cfg.step_bps, b.cfg.base_price, b.active, b.price(b.active)),
-            None => (0, 0, 0, 0),
+        let (step, base, active, price, fee) = match &self.book {
+            Some(b) => (b.cfg.step_bps, b.cfg.base_price, b.active, b.price(b.active), b.fee_at(b.active, b.active)),
+            None => (0, 0, 0, 0, self.fee_bps),
         };
         ConfigView {
             token: self.token.clone(), quote: self.quote.clone(), native: self.native, fee_bps: self.fee_bps,
             launched: self.book.is_some(), paused: self.paused, step_bps: step,
-            base_price: U128(base), active_bin: active, price: U128(price),
+            base_price: U128(base), active_bin: active, price: U128(price), current_fee_bps: fee,
         }
     }
 

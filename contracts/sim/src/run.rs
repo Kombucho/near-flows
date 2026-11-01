@@ -31,8 +31,10 @@ pub struct Outcome {
 
 struct Ctx { rng: Rng, fair: f64, anchor: f64, event_pnl: f64, stash: u128 }
 
-pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32) -> Outcome {
+pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, max_fee: u16) -> Outcome {
     let mut cfg = Config::standard(1, fee_bps);
+    cfg.dyn_k = dyn_k;
+    cfg.max_fee_bps = max_fee.max(fee_bps);
     if !r.launch_lock {
         cfg.launch_window_ns = 0;
     }
@@ -50,7 +52,7 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32) -> Outcome {
         move_fair(r, hour, &mut c);
         event(r, hour, &mut w, &mut c, &mut holders, insider_share);
         noise(r, &mut w, &mut c);
-        arbitrage(&mut w, &mut c, fee_bps);
+        arbitrage(&mut w, &mut c);
         w.crank();
         if hour % 24 == 0 {
             w.audit();
@@ -131,7 +133,7 @@ fn event(r: &Regime, hour: u32, w: &mut World, c: &mut Ctx, holders: &mut [Holde
         Event::BankRun { at } if hour == at => {
             c.fair *= 0.3;
             c.anchor = c.fair;
-            arbitrage(w, c, w.book.cfg.fee_bps); // the crash hits the book first
+            arbitrage(w, c); // the crash hits the book first
             for h in holders.iter_mut() {
                 w.close_all(h);
                 if let Some(s) = w.sell(std::mem::take(&mut h.wallet_t), 1.0) {
@@ -178,11 +180,13 @@ fn noise(r: &Regime, w: &mut World, c: &mut Ctx) {
 }
 
 /// Arbitrageurs trade the book toward fair value while it pays more than fees.
-fn arbitrage(w: &mut World, c: &mut Ctx, fee_bps: u16) {
-    let band = 2.0 * fee_bps as f64 / 10_000.0;
+fn arbitrage(w: &mut World, c: &mut Ctx) {
     // SIM_ARB_ROUNDS: how many 20-NEAR arbitrage trades per hour (default 40 = 800 NEAR/h).
     let rounds: u32 = std::env::var("SIM_ARB_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
     for _ in 0..rounds {
+        // A real bot only trades if the gap beats the CURRENT fee (dynamic or not).
+        let fee = w.book.fee_at(w.book.active, w.book.active) as f64 / 10_000.0;
+        let band = 2.0 * fee;
         let p = w.price();
         if p < c.fair * (1.0 - band) {
             if w.buy("arb", near(ARB_CHUNK), &[], 0.05).is_none() { break; }

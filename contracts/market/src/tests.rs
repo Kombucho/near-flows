@@ -47,7 +47,7 @@ fn deposit_storage(m: &mut Market, who: &str) {
 /// A launched native market: 4_000 wNEAR raised, 500_000_000 coins to the pool.
 fn native_market() -> Market {
     as_caller("owner.testnet", 0, 0);
-    let mut m = Market::new(acc("owner.testnet"), acc("coin.testnet"), acc("wrap.testnet"), true, 100);
+    let mut m = Market::new(acc("owner.testnet"), acc("coin.testnet"), acc("wrap.testnet"), true, 30);
     deposit_storage(&mut m, "owner.testnet");
     send(&mut m, "coin.testnet", "owner.testnet", 500_000_000 * ONE, r#"{"action":"fund"}"#);
     send(&mut m, "wrap.testnet", "owner.testnet", 4_000 * ONE, r#"{"action":"fund"}"#);
@@ -158,7 +158,7 @@ fn only_owner_can_pause() {
 #[should_panic(expected = "NotNative")]
 fn adopted_coins_cannot_be_staked() {
     as_caller("owner.testnet", 0, 0);
-    let mut m = Market::new(acc("owner.testnet"), acc("coin.testnet"), acc("wrap.testnet"), false, 100);
+    let mut m = Market::new(acc("owner.testnet"), acc("coin.testnet"), acc("wrap.testnet"), false, 30);
     deposit_storage(&mut m, "owner.testnet");
     send(&mut m, "coin.testnet", "owner.testnet", 1_000_000 * ONE, r#"{"action":"fund"}"#);
     send(&mut m, "wrap.testnet", "owner.testnet", 100 * ONE, r#"{"action":"fund"}"#);
@@ -214,4 +214,12 @@ fn users_pay_for_their_own_storage() {
     as_caller("alice.testnet", 1, 2 * DAY_NS);
     m.withdraw(id);
     assert!(m.storage_balance_of(acc("alice.testnet")).0 > before - paid, "freed bytes were credited");
+}
+
+#[test]
+fn fee_is_dynamic_after_launch() {
+    let mut m = native_market();
+    assert_eq!(m.get_config().current_fee_bps, 30, "calm: base fee");
+    send(&mut m, "wrap.testnet", "alice.testnet", 400 * ONE, r#"{"action":"buy","min_out":"0"}"#);
+    assert!(m.get_config().current_fee_bps > 30, "after a big move the fee is higher");
 }

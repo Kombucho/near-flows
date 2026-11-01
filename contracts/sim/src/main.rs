@@ -1,6 +1,6 @@
 //! Stress-test simulator.
 //!
-//!   cargo run --profile sim -p sim -- [runs per regime] [fee bps] [bins per side]
+//!   cargo run --profile sim -p sim -- [runs] [base fee bps] [bins per side] [dynamic k] [max fee bps]
 //!
 //! Runs every regime `runs` times with different seeds, checks solvency every
 //! simulated day, catches any panic, and prints what happened to holders.
@@ -20,8 +20,10 @@ fn main() {
     let runs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(300);
     let fee: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
     let bins: i32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
+    let dyn_k: u16 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let max_fee: u16 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(500);
     if std::env::var("SIM_QUIET").is_ok() { std::panic::set_hook(Box::new(|_| {})); } // panics are counted
-    println!("SIMULATION: {runs} runs x {} regimes, 30 days each, fee {fee} bps, graduation liquidity over {bins} bins per side\n", regime::all().len());
+    println!("SIMULATION: {runs} runs x {} regimes, 30 days each, fee {fee} bps (dynamic k={dyn_k}, max {max_fee} bps), graduation liquidity over {bins} bins per side\n", regime::all().len());
     for r in regime::all() {
         println!("- {}: {}", r.name, r.what);
     }
@@ -34,7 +36,7 @@ fn main() {
     let regimes: Vec<_> = regime::all().into_iter().filter(|r| only.as_deref().map_or(true, |o| o == r.name)).collect();
     // One thread per regime; each returns its table row, CSV lines and problems.
     let results: Vec<(String, String, Vec<String>)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = regimes.iter().map(|r| scope.spawn(move || run_regime(r, runs, fee, bins))).collect();
+        let handles: Vec<_> = regimes.iter().map(|r| scope.spawn(move || run_regime(r, runs, fee, bins, dyn_k, max_fee))).collect();
         handles.into_iter().map(|h| h.join().expect("regime thread")).collect()
     });
     for (row, lines, probs) in results {
@@ -43,7 +45,7 @@ fn main() {
         problems.extend(probs);
     }
     std::fs::create_dir_all("sim-out").ok();
-    let file = format!("sim-out/results_fee{fee}_bins{bins}.csv");
+    let file = format!("sim-out/results_fee{fee}_bins{bins}_k{dyn_k}.csv");
     std::fs::write(&file, csv).expect("write csv");
     println!("\nCells: median [10th-90th percentile] across seeds. Holder columns = end value / NEAR put in.");
     println!("Per-run rows written to contracts/{file}");
@@ -53,10 +55,10 @@ fn main() {
     }
 }
 
-fn run_regime(r: &regime::Regime, runs: u64, fee: u16, bins: i32) -> (String, String, Vec<String>) {
+fn run_regime(r: &regime::Regime, runs: u64, fee: u16, bins: i32, dyn_k: u16, max_fee: u16) -> (String, String, Vec<String>) {
     let (mut outs, mut lines, mut problems, mut panics) = (Vec::new(), String::new(), Vec::new(), 0);
     for seed in 0..runs {
-        match catch_unwind(AssertUnwindSafe(|| run(r, seed, fee, bins))) {
+        match catch_unwind(AssertUnwindSafe(|| run(r, seed, fee, bins, dyn_k, max_fee))) {
             Ok(o) => {
                 lines += &format!("{},{seed},{},{},{},{},{},{},{},{},{},{},{},{},{},{},0\n", r.name, o.fair_mult, o.book_mult,
                     o.cohort[0], o.cohort[1], o.cohort[2], o.cohort[3], o.staker_yield, o.burned_pct,

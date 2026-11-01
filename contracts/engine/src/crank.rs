@@ -34,6 +34,7 @@ impl Book {
             return Err(Error::TooSoon { next_ns: next });
         }
         self.last_crank_ns = now_ns;
+        self.vol_bins /= 2; // volatility memory fades: halves every crank
         self.expire_locks(now_ns);
         self.collect_protocol_fees();
         self.distribute_creator();

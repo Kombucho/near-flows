@@ -59,6 +59,12 @@ pub struct Config {
     /// burn, creator slice, launch window). false = an adopted existing coin:
     /// take-profit ladders and liquidity only, fees 90% LPs / 10% deepen.
     pub native: bool,
+    /// Dynamic fee: extra bps per (bins of movement)^2. 0 = fixed fee.
+    /// Fee for a bin = fee_bps + dyn_k * (recent volatility + bins moved so far)^2,
+    /// capped at max_fee_bps. Volatile moments cost more, which pays LPs for
+    /// the extra risk and makes picking off stale prices expensive.
+    pub dyn_k: u16,
+    pub max_fee_bps: u16,
 }
 
 impl Config {
@@ -76,6 +82,8 @@ impl Config {
             deepen_bins: 10,
             launch_window_ns: DAY_NS,
             native: true,
+            dyn_k: 0,
+            max_fee_bps: fee_bps,
         }
     }
 
@@ -157,17 +165,21 @@ pub struct Book {
     pub ref_bin: i32,
     /// Final `tp_acc` of every take-profit round that sold out: (bin, round) -> acc.
     pub tp_closed: BTreeMap<(i32, u32), u128>,
+    /// Recent volatility in bins crossed. Grows with every swap's movement,
+    /// halves at every crank (hourly), so fees fall back when things calm down.
+    pub vol_bins: u32,
 }
 
 impl Book {
     pub fn new(cfg: Config) -> Self {
         assert!(cfg.fee_bps < 10_000, "fee must be below 100%");
+        assert!(cfg.max_fee_bps >= cfg.fee_bps && cfg.max_fee_bps < 10_000, "bad max fee");
         assert!(cfg.base_price > 0, "price must be positive");
         Book {
             cfg, active: 0, bins: BTreeMap::new(), positions: BTreeMap::new(), next_id: 0,
             pots: Pots::default(), creator: CreatorPool::default(), vault: Vault::default(),
             protocol_pos: BTreeMap::new(), burn_quote: 0, burned: 0, last_crank_ns: 0, launched_ns: 0,
-            ref_bin: 0, tp_closed: BTreeMap::new(),
+            ref_bin: 0, tp_closed: BTreeMap::new(), vol_bins: 0,
         }
     }
 

@@ -417,3 +417,71 @@ fn adopted_coins_still_get_one_way_take_profits() {
     assert_eq!(tokens, 0);
     assert!(quote > UNIT, "Alice's rung sold and the dump did not undo it");
 }
+
+// ---------- dynamic fee ----------
+
+fn dynamic_book() -> Book {
+    let mut cfg = Config::standard(PRICE_SCALE, 30); // base 0.3%
+    cfg.dyn_k = 2; // +2 bps per (bin of movement)^2
+    cfg.max_fee_bps = 500; // never above 5%
+    Book::seed(cfg, "lp", 30 * UNIT, 30 * UNIT, 30, 0, 0).unwrap().0
+}
+
+#[test]
+fn calm_market_pays_the_base_fee() {
+    let b = dynamic_book();
+    assert_eq!(b.fee_at(0, 0), 30);
+    assert_eq!(b.fee_at(0, 1), 32); // 30 + 2 * 1^2
+    assert_eq!(b.fee_at(0, 5), 80); // 30 + 2 * 5^2
+}
+
+#[test]
+fn fees_rise_after_the_price_moves_and_are_capped() {
+    let mut b = dynamic_book();
+    b.swap(Side::Buy, 10 * UNIT, 0).unwrap(); // moves ~10 bins
+    assert!(b.vol_bins >= 9, "volatility remembered: {}", b.vol_bins);
+    let next = b.fee_at(b.active, b.active);
+    assert!(next > 150, "the next trade pays more: {next} bps");
+    b.vol_bins = 1_000;
+    assert_eq!(b.fee_at(0, 0), 500, "never above the cap");
+}
+
+#[test]
+fn one_big_trade_pays_an_escalating_fee() {
+    let mut calm = dynamic_book();
+    let small = calm.swap(Side::Buy, UNIT / 10, 0).unwrap();
+    let mut wild = dynamic_book();
+    let big = wild.swap(Side::Buy, 10 * UNIT, 0).unwrap();
+    let small_rate = small.fee * 10_000 / small.used;
+    let big_rate = big.fee * 10_000 / big.used;
+    assert!(small_rate <= 33, "small trade ~base fee, got {small_rate} bps");
+    assert!(big_rate > 3 * small_rate, "big trade pays much more per unit: {big_rate} bps");
+}
+
+#[test]
+fn crank_halves_the_volatility_memory() {
+    let mut b = dynamic_book();
+    b.vol_bins = 40;
+    b.crank(1).unwrap();
+    assert_eq!(b.vol_bins, 20);
+    b.crank(1 + 3_600 * 1_000_000_000).unwrap();
+    assert_eq!(b.vol_bins, 10);
+}
+
+#[test]
+fn solvent_with_dynamic_fees_over_3000_random_trades() {
+    let mut b = dynamic_book();
+    let mut rng = Lcg(99);
+    let (mut q_bal, mut t_bal) = (30 * UNIT, 30 * UNIT);
+    let mut now = 0u64;
+    for _ in 0..3_000 {
+        now += 300 * 1_000_000_000;
+        let amount = rng.next() as u128 % (2 * UNIT) + 1;
+        if rng.next() % 2 == 0 {
+            if let Ok(r) = b.swap(Side::Buy, amount, 0) { q_bal += r.used; t_bal -= r.out; }
+        } else if let Ok(r) = b.swap(Side::Sell, amount, 0) { t_bal += r.used; q_bal -= r.out; }
+        let _ = b.crank(now);
+    }
+    let (oq, ot) = b.obligations();
+    assert!(oq <= q_bal && ot <= t_bal - b.burned, "owes ({oq},{ot}) holds ({q_bal},{})", t_bal - b.burned);
+}

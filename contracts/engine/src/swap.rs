@@ -80,8 +80,22 @@ impl Book {
         for s in &steps {
             self.apply(side, s);
         }
+        let start = self.active;
         self.active = steps.last().map(|s| s.bin).unwrap_or(self.active);
+        let moved = (self.active - start).unsigned_abs();
+        self.vol_bins = self.vol_bins.saturating_add(moved).min(10_000);
         Ok(SwapResult { used: amount_in - left, out, fee, refund: left })
+    }
+
+    /// Fee in bps for filling at `bin` during a swap that started at `start`.
+    pub fn fee_at(&self, start: i32, bin: i32) -> u16 {
+        let c = &self.cfg;
+        if c.dyn_k == 0 {
+            return c.fee_bps;
+        }
+        let movement = self.vol_bins as u64 + (bin - start).unsigned_abs() as u64;
+        let extra = (c.dyn_k as u64).saturating_mul(movement.saturating_mul(movement));
+        (c.fee_bps as u64 + extra).min(c.max_fee_bps as u64) as u16
     }
 
     /// Bins that can fill this side, in walking order, read lazily: the walk
@@ -98,7 +112,7 @@ impl Book {
 
     /// Read-only: how the trade would fill. Returns the steps and unspent input.
     fn plan(&self, side: Side, amount_in: u128, limit: Option<i32>) -> (Vec<Step>, u128) {
-        let fee_bps = self.cfg.fee_bps;
+        let start = self.active;
         let mut left = amount_in;
         let mut steps = Vec::new();
         for (bin, reserve) in self.walk(side) {
@@ -116,6 +130,7 @@ impl Book {
                 Side::Buy => mul_div_up(reserve, price, PRICE_SCALE),
                 Side::Sell => mul_div_up(reserve, PRICE_SCALE, price),
             };
+            let fee_bps = self.fee_at(start, bin);
             let need_gross = need + fee_on_net(need, fee_bps);
             if left >= need_gross {
                 steps.push(Step { bin, net: need, fee: need_gross - need, out: reserve });

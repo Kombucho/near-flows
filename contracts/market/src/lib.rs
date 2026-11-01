@@ -34,6 +34,19 @@ pub const MAX_POSITIONS: usize = 3_000;
 
 const DAY_NS: u64 = 86_400 * 1_000_000_000;
 
+/// Dynamic fee, chosen from the simulator (3,600 runs per policy): a low base
+/// fee in calm markets, +2 bps per (bin of recent movement)^2, capped at 5%.
+/// With a 30 bps base it kept take-profit fills intact (1.48x in pump-dump)
+/// while paying ~60% more in wild markets than a fixed 1% fee.
+const DYN_K: u16 = 2;
+const MAX_FEE_BPS: u16 = 500;
+
+fn with_dynamic_fee(mut cfg: Config) -> Config {
+    cfg.dyn_k = DYN_K;
+    cfg.max_fee_bps = MAX_FEE_BPS.max(cfg.fee_bps);
+    cfg
+}
+
 /// Prefixes for the contract's storage maps (each map needs a unique one).
 #[near]
 #[derive(BorshStorageKey)]
@@ -68,7 +81,7 @@ pub struct Market {
 impl Market {
     #[init]
     pub fn new(owner: AccountId, token: AccountId, quote: AccountId, native: bool, fee_bps: u16) -> Self {
-        require!(fee_bps > 0 && fee_bps < 1_000, "fee must be between 0.01% and 10%");
+        require!(fee_bps > 0 && fee_bps <= MAX_FEE_BPS, "base fee must be between 0.01% and 5%");
         Market {
             owner, token, quote, native, fee_bps, book: None, paused: false,
             funded_token: 0, funded_quote: 0,
@@ -82,7 +95,7 @@ impl Market {
     pub fn launch_native(&mut self, bins_per_side: i32) {
         self.assert_can_launch();
         require!(self.native, "this market is for an adopted coin");
-        let cfg = Config::standard(1, self.fee_bps); // base price is set by graduate()
+        let cfg = with_dynamic_fee(Config::standard(1, self.fee_bps)); // base price is set by graduate()
         let now = env::block_timestamp();
         self.book = Some(Book::graduate(cfg, self.funded_quote, self.funded_token, bins_per_side, now));
         self.emit("launch", &format!(r#"{{"kind":"native","bins_per_side":{bins_per_side}}}"#));
@@ -94,7 +107,7 @@ impl Market {
         self.assert_can_launch();
         require!(!self.native, "this market is for a native coin");
         let now = env::block_timestamp();
-        let cfg = Config::adopted(base_price.0, self.fee_bps);
+        let cfg = with_dynamic_fee(Config::adopted(base_price.0, self.fee_bps));
         let lock = now + lock_days as u64 * DAY_NS;
         let owner = self.owner.to_string();
         let (book, _) = Book::seed(cfg, &owner, self.funded_token, self.funded_quote, bins_per_side, lock, now)
