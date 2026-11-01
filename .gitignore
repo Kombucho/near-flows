@@ -8,3 +8,4 @@ node_modules/
 *.pem
 submission*.json
 .DS_Store
+contracts/sim-out/

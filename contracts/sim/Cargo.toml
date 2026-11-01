@@ -1,0 +1,9 @@
+[package]
+name = "sim"
+version = "0.1.0"
+edition = "2021"
+description = "Stress-test simulator: thousands of seeded 30-day markets across regimes. Not deployed anywhere."
+
+[dependencies]
+engine = { path = "../engine" }
+math = { path = "../math" }
