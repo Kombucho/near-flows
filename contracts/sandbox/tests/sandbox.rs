@@ -116,6 +116,7 @@ async fn positions(w: &World, who: &AccountId) -> anyhow::Result<Vec<Value>> {
 async fn buy_and_sell_move_real_tokens() -> anyhow::Result<()> {
     let w = setup().await?;
     let r = send(&w, &w.alice, &w.wnear, 10 * ONE, r#"{"action":"buy","min_out":"0","ladder":true}"#).await?;
+    println!("GAS buy with ladder (whole tx incl. token + payout): {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
     assert!(r.is_success(), "buy failed: {:?}", r.failures());
     let coins = balance(&w.coin, w.alice.id()).await?;
     assert!(coins > 0, "Alice received coins");
@@ -152,7 +153,7 @@ async fn a_fake_token_is_refunded() -> anyhow::Result<()> {
     let w = setup().await?;
     let evil = deploy_token(&w.worker, &w.alice, 1_000 * ONE, "EVIL").await?;
     register(&w.alice, &evil, w.market.id()).await?;
-    send(&w, &w.alice, &evil, 100 * ONE, r#"{"action":"buy","min_out":"0"}"#).await?;
+    let _ = send(&w, &w.alice, &evil, 100 * ONE, r#"{"action":"buy","min_out":"0"}"#).await?; // rejected inside, refunded
     assert_eq!(balance(&evil, w.alice.id()).await?, 1_000 * ONE, "fully refunded");
     assert_eq!(balance(&evil, w.market.id()).await?, 0);
     Ok(())
@@ -178,7 +179,9 @@ async fn stakers_receive_real_dividends() -> anyhow::Result<()> {
     let w = setup().await?;
     transfer(&w.owner, &w.coin, w.alice.id(), 10_000_000 * ONE).await?;
     send(&w, &w.alice, &w.coin, 10_000_000 * ONE, r#"{"action":"stake"}"#).await?.into_result()?;
-    w.alice.call(w.market.id(), "set_vote").args_json(json!({"vote": [10_000, 0, 0]})).transact().await?.into_result()?;
+    let vote = w.alice.call(w.market.id(), "set_vote").args_json(json!({"vote": [10_000, 0, 0]})).max_gas().transact().await?;
+    println!("GAS set_vote: {:.1} Tgas", vote.total_gas_burnt.as_gas() as f64 / 1e12);
+    vote.into_result()?;
     // Some trading to create fees.
     send(&w, &w.bob, &w.wnear, 50 * ONE, r#"{"action":"buy","min_out":"0"}"#).await?.into_result()?;
     w.bob.call(w.market.id(), "crank").max_gas().transact().await?.into_result()?; // anyone can crank
@@ -196,14 +199,14 @@ async fn pause_blocks_buys_but_never_exits() -> anyhow::Result<()> {
     let w = setup().await?;
     transfer(&w.owner, &w.coin, w.alice.id(), 1_000 * ONE).await?;
     send(&w, &w.alice, &w.coin, 1_000 * ONE, r#"{"action":"ladder"}"#).await?.into_result()?;
-    w.owner.call(w.market.id(), "pause").transact().await?.into_result()?;
-    send(&w, &w.alice, &w.wnear, 10 * ONE, r#"{"action":"buy","min_out":"0"}"#).await?;
+    w.owner.call(w.market.id(), "pause").max_gas().transact().await?.into_result()?;
+    let _ = send(&w, &w.alice, &w.wnear, 10 * ONE, r#"{"action":"buy","min_out":"0"}"#).await?; // fails inside, refunded
     assert_eq!(balance(&w.wnear, w.alice.id()).await?, 100 * ONE, "paused buy was refunded");
     let id = positions(&w, w.alice.id()).await?[0]["id"].as_u64().unwrap();
     let r = w.alice.call(w.market.id(), "withdraw").args_json(json!({"position_id": id}))
         .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?;
     assert!(r.is_success(), "withdraw works while paused: {:?}", r.failures());
-    let stranger = w.alice.call(w.market.id(), "unpause").transact().await?;
+    let stranger = w.alice.call(w.market.id(), "unpause").max_gas().transact().await?;
     assert!(stranger.is_failure(), "only the owner can unpause");
     Ok(())
 }
