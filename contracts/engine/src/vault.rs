@@ -80,6 +80,9 @@ impl Vault {
 impl Book {
     /// Stake tokens (already transferred to the contract).
     pub fn stake(&mut self, who: &str, amount: u128) -> Result<(), Error> {
+        if !self.cfg.native {
+            return Err(Error::NotNative); // staking only means something on native coins
+        }
         if amount == 0 {
             return Err(Error::ZeroAmount);
         }

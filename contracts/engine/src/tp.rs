@@ -25,7 +25,7 @@ impl Book {
             return Err(Error::WrongSide);
         }
         let value = self.value(bin, tokens, 0);
-        let eligible = locked_until_ns >= now_ns.saturating_add(self.cfg.min_creator_lock_ns);
+        let eligible = self.cfg.native && locked_until_ns >= now_ns.saturating_add(self.cfg.min_creator_lock_ns);
         let weight = if eligible { value } else { 0 };
         let b = self.bins.entry(bin).or_default();
         // First order of a round: 1 share per token. Later: pro-rata to what is left.

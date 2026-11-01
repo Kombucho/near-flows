@@ -375,3 +375,45 @@ fn ladder_now_uses_one_way_orders() {
     let buy = b.buy("ape", 100_000, 0, &DEFAULT_LADDER, DAY).unwrap();
     assert!(buy.ladder.iter().all(|i| b.positions[i].take_profit));
 }
+
+// ---------- adopted coins ----------
+
+fn adopted_book() -> Book {
+    Book::seed(Config::adopted(PRICE_SCALE, 100), "lp", 3 * UNIT, 3 * UNIT, 3, 0, 0).unwrap().0
+}
+
+#[test]
+fn adopted_coins_cannot_be_staked() {
+    let mut b = adopted_book();
+    assert_eq!(b.stake("alice", 1_000), Err(Error::NotNative));
+}
+
+#[test]
+fn adopted_fees_go_90_to_lps_and_10_to_depth() {
+    let mut b = adopted_book();
+    b.swap(Side::Buy, 100_000, 0).unwrap(); // fee 1_000 -> pot 100, creator 0, LPs 900
+    assert_eq!((b.pots.pot_quote, b.pots.creator_quote), (100, 0));
+    let before = b.protocol_pos.len();
+    b.crank(1).unwrap();
+    assert_eq!(b.burned, 0, "adopted coins never burn");
+    assert!(b.protocol_pos.len() > before || b.pots.pot_quote > 0, "the pot went to depth");
+}
+
+#[test]
+fn adopted_locked_liquidity_earns_no_creator_slice() {
+    let mut b = adopted_book();
+    let id = b.add_liquidity("dev", 10, UNIT, 0, 40 * DAY, 0).unwrap();
+    assert_eq!(b.positions[&id].creator_weight, 0);
+    assert!(!b.in_launch_window(0), "no launch window for adopted coins");
+}
+
+#[test]
+fn adopted_coins_still_get_one_way_take_profits() {
+    let mut b = adopted_book();
+    let id = b.place_take_profit("alice", 5, UNIT, 0, 0).unwrap();
+    b.swap(Side::Buy, 5 * UNIT, 0).unwrap();
+    b.swap(Side::Sell, 3 * UNIT, 0).unwrap();
+    let (tokens, quote) = b.position_assets(id).unwrap();
+    assert_eq!(tokens, 0);
+    assert!(quote > UNIT, "Alice's rung sold and the dump did not undo it");
+}

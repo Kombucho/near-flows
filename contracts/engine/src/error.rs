@@ -19,4 +19,6 @@ pub enum Error {
     NotStaker,
     NotEnoughStake,
     BadVote,
+    /// Staking, voting and the creator slice exist only for native coins.
+    NotNative,
 }

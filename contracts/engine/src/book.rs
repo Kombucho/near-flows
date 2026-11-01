@@ -53,6 +53,10 @@ pub struct Config {
     /// LOCKED take-profit ladder, so snipers and bundlers cannot dump on day one:
     /// their bag turns into depth that earns the creator slice instead. 0 = off.
     pub launch_window_ns: u64,
+    /// true = a coin launched on this protocol: full mechanics (stake, vote,
+    /// burn, creator slice, launch window). false = an adopted existing coin:
+    /// take-profit ladders and liquidity only, fees 90% LPs / 10% deepen.
+    pub native: bool,
 }
 
 impl Config {
@@ -69,6 +73,18 @@ impl Config {
             min_creator_lock_ns: 30 * DAY_NS,
             deepen_bins: 10,
             launch_window_ns: DAY_NS,
+            native: true,
+        }
+    }
+
+    /// An existing coin brought into the layer. No pot vote, no creator slice,
+    /// no launch window: 90% of fees to LPs, 10% to protocol-owned depth.
+    pub fn adopted(base_price: u128, fee_bps: u16) -> Self {
+        Config {
+            shares: FeeShares { pot_bps: 1_000, creator_bps: 0 },
+            launch_window_ns: 0,
+            native: false,
+            ..Config::standard(base_price, fee_bps)
         }
     }
 }
@@ -186,7 +202,7 @@ impl Book {
         if minted == 0 {
             return Err(Error::ZeroAmount);
         }
-        let eligible = owner != PROTOCOL
+        let eligible = self.cfg.native && owner != PROTOCOL
             && locked_until_ns >= now_ns.saturating_add(self.cfg.min_creator_lock_ns);
         let weight = if eligible { value } else { 0 };
         let b = self.bins.entry(bin).or_default();

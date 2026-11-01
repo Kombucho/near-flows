@@ -8,7 +8,9 @@
 //!   6. deepen: the protocol adds liquidity around the current price
 //! No owner input, no price targets: the same inputs always do the same thing.
 
-use math::fees::split_pot;
+use math::fees::{split_pot, PotVotes};
+
+const ALL_DEEPEN: PotVotes = PotVotes { dividend: 0, burn: 0, deepen: 1 };
 
 use crate::{Book, Error, Side};
 
@@ -36,8 +38,10 @@ impl Book {
         self.collect_protocol_fees();
         self.distribute_creator();
         let (q, t) = (std::mem::take(&mut self.pots.pot_quote), std::mem::take(&mut self.pots.pot_token));
-        let sq = split_pot(q, self.vault.votes);
-        let st = split_pot(t, self.vault.votes);
+        // Adopted coins have no stakers: their whole pot deepens the market.
+        let votes = if self.cfg.native { self.vault.votes } else { ALL_DEEPEN };
+        let sq = split_pot(q, votes);
+        let st = split_pot(t, votes);
         let mut r = CrankReport::default();
         // Dividends. With no stakers there is nobody to pay, so it is burned instead.
         if self.vault.distribute(sq.dividend, st.dividend) {
