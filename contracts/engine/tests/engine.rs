@@ -114,7 +114,7 @@ fn withdraw_after_being_filled_returns_quote() {
 #[test]
 fn graduation_opens_at_the_auction_price() {
     // 4_000 quote raised, 500_000 tokens to the pool -> price 0.008
-    let mut b = Book::graduate(cfg(), 4_000 * UNIT, 500_000 * UNIT, 50);
+    let mut b = Book::graduate(cfg(), 4_000 * UNIT, 500_000 * UNIT, 50, 0);
     assert_eq!(b.cfg.base_price, PRICE_SCALE * 8 / 1_000);
     assert_eq!(b.protocol_pos.len(), 100); // 50 bins each side
     assert_eq!(b.withdraw(0, engine::PROTOCOL, u64::MAX - 1), Err(Error::Locked { until_ns: u64::MAX }));
@@ -184,11 +184,34 @@ fn creator_slice_stops_when_lock_expires() {
 #[test]
 fn ladder_places_asks_at_multiples() {
     let mut b = book();
-    let (r, kept, ids) = b.buy_with_ladder("ape", 100_000, 0, &DEFAULT_LADDER, 0).unwrap();
-    assert_eq!(ids.len(), 4);
-    assert_eq!(kept, r.out - 4 * (r.out * 1_250 / 10_000));
-    let bins: Vec<i32> = ids.iter().map(|i| b.positions[i].bin).collect();
+    let after_launch = DAY; // outside the 24h launch window: the buyer's own choice applies
+    let buy = b.buy("ape", 100_000, 0, &DEFAULT_LADDER, after_launch).unwrap();
+    assert!(!buy.locked);
+    assert_eq!(buy.ladder.len(), 4);
+    assert_eq!(buy.kept, buy.swap.out - 4 * (buy.swap.out * 1_250 / 10_000));
+    let bins: Vec<i32> = buy.ladder.iter().map(|i| b.positions[i].bin).collect();
     assert_eq!(bins, vec![1 + 41, 1 + 70, 1 + 111, 1 + 162]); // from active bin 1
+    assert!(buy.ladder.iter().all(|i| b.positions[i].locked_until_ns == 0));
+}
+
+#[test]
+fn plain_spot_buy_after_launch_keeps_everything() {
+    let mut b = book();
+    let buy = b.buy("ape", 100_000, 0, &[], DAY).unwrap();
+    assert_eq!(buy.kept, buy.swap.out);
+    assert!(buy.ladder.is_empty());
+}
+
+#[test]
+fn launch_window_locks_half_of_every_buy_for_30_days() {
+    let mut b = book(); // launched at t = 0, window 24h
+    let sniper = b.buy("sniper", 100_000, 0, &[], 60 * 1_000_000_000).unwrap(); // 1 minute in
+    assert!(sniper.locked);
+    // Asked for plain spot, but inside the window 4 x 12.5% goes on the locked ladder.
+    assert_eq!(sniper.kept, sniper.swap.out - 4 * (sniper.swap.out * 1_250 / 10_000));
+    let id = sniper.ladder[0];
+    assert!(b.positions[&id].creator_weight > 0); // locked depth earns the creator slice
+    assert!(matches!(b.withdraw(id, "sniper", 10 * DAY), Err(Error::Locked { .. })));
 }
 
 /// Simple deterministic random numbers, so the test is repeatable.
@@ -217,7 +240,7 @@ fn solvent_after_5000_random_actions_of_every_kind() {
             5 => { let a = rng.next() as u128 % 50_000 + 1; if b.stake(who, a).is_ok() { t_bal += a; } }
             6 => { let s = b.vault.stakers.get(who).map(|s| s.stake).unwrap_or(0); if s > 0 { b.request_unstake(who, s / 2 + 1, now).ok(); } if let Ok(a) = b.withdraw_unstaked(who, now) { t_bal -= a; } }
             7 => if let Ok((q, t)) = b.claim_dividends(who) { q_bal -= q; t_bal -= t; },
-            _ => { let a = rng.next() as u128 % 50_000 + 1; if let Ok((_, placed)) = b.place_ladder(who, a, &DEFAULT_LADDER, now) { t_bal += placed; } }
+            _ => { let a = rng.next() as u128 % 50_000 + 1; if let Ok((_, placed)) = b.place_ladder(who, a, &DEFAULT_LADDER, 0, now) { t_bal += placed; } }
         }
         let _ = b.crank(now); // anyone can call it; often too soon, that is fine
         if step % 250 == 0 {

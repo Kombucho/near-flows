@@ -12,10 +12,24 @@ pub type Rung = (u32, u16);
 /// 50% kept as spot, 12.5% at each of 1.5x, 2x, 3x and 5x.
 pub const DEFAULT_LADDER: [Rung; 4] = [(15_000, 1_250), (20_000, 1_250), (30_000, 1_250), (50_000, 1_250)];
 
+/// What happens to a buy inside the launch window: same rungs, but locked.
+pub const LAUNCH_LADDER: [Rung; 4] = DEFAULT_LADDER;
+
+/// Result of a buy through the market.
+#[derive(Debug)]
+pub struct Buy {
+    pub swap: SwapResult,
+    pub kept: u128,        // tokens sent to the buyer's wallet
+    pub ladder: Vec<u64>,  // take-profit positions created
+    pub locked: bool,      // true if the launch-window rule applied
+}
+
 impl Book {
     /// Place `tokens` (already in the contract) on the ladder above the current price.
     /// Returns (position ids, tokens placed). Unplaced tokens stay with the caller.
-    pub fn place_ladder(&mut self, owner: &str, tokens: u128, ladder: &[Rung], now_ns: u64) -> Result<(Vec<u64>, u128), Error> {
+    pub fn place_ladder(
+        &mut self, owner: &str, tokens: u128, ladder: &[Rung], locked_until_ns: u64, now_ns: u64,
+    ) -> Result<(Vec<u64>, u128), Error> {
         let share_sum: u128 = ladder.iter().map(|r| r.1 as u128).sum();
         assert!(share_sum <= BPS, "ladder shares exceed 100%");
         let (mut ids, mut placed) = (Vec::new(), 0);
@@ -26,20 +40,30 @@ impl Book {
                 continue;
             }
             let bin = self.active + bins_for_multiple(self.cfg.step_bps, multiple_bps);
-            ids.push(self.add_liquidity(owner, bin, amount, 0, 0, now_ns)?);
+            ids.push(self.add_liquidity(owner, bin, amount, 0, locked_until_ns, now_ns)?);
             placed += amount;
         }
         Ok((ids, placed))
     }
 
-    /// Buy, then put part of what you bought on the ladder.
-    /// Returns (swap result, tokens kept by the buyer, ladder position ids).
-    pub fn buy_with_ladder(
+    pub fn in_launch_window(&self, now_ns: u64) -> bool {
+        now_ns < self.launched_ns.saturating_add(self.cfg.launch_window_ns)
+    }
+
+    /// The one way to buy. Outside the launch window the buyer's own `ladder`
+    /// applies (pass &[] for plain spot). Inside it, the launch ladder is forced
+    /// and locked for the creator-slice minimum, for EVERY buyer alike.
+    pub fn buy(
         &mut self, owner: &str, quote_in: u128, min_out: u128, ladder: &[Rung], now_ns: u64,
-    ) -> Result<(SwapResult, u128, Vec<u64>), Error> {
-        let r = self.swap(Side::Buy, quote_in, min_out)?;
-        let (ids, placed) = self.place_ladder(owner, r.out, ladder, now_ns)?;
-        let kept = r.out - placed;
-        Ok((r, kept, ids))
+    ) -> Result<Buy, Error> {
+        let swap = self.swap(Side::Buy, quote_in, min_out)?;
+        let locked = self.in_launch_window(now_ns);
+        let (rungs, until) = if locked {
+            (&LAUNCH_LADDER[..], now_ns + self.cfg.min_creator_lock_ns)
+        } else {
+            (ladder, 0)
+        };
+        let (ids, placed) = self.place_ladder(owner, swap.out, rungs, until, now_ns)?;
+        Ok(Buy { kept: swap.out - placed, ladder: ids, locked, swap })
     }
 }

@@ -17,7 +17,7 @@ mod vault;
 pub use book::{Bin, Book, Config, CreatorPool, Pots, Position, PROTOCOL};
 pub use crank::CrankReport;
 pub use error::Error;
-pub use ladder::{Rung, DEFAULT_LADDER};
+pub use ladder::{Buy, Rung, DEFAULT_LADDER, LAUNCH_LADDER};
 pub use position::Withdrawal;
 pub use swap::{Side, SwapResult};
 pub use vault::{Staker, Vault, Vote, DEFAULT_VOTE};

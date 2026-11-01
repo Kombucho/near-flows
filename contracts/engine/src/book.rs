@@ -40,6 +40,10 @@ pub struct Config {
     pub unstake_delay_ns: u64,    // wait between "unstake" and getting tokens back
     pub min_creator_lock_ns: u64, // lock needed to earn the creator slice
     pub deepen_bins: i32,         // bins per side that "deepen" spreads over
+    /// Launch window after graduation. Inside it, part of every buy becomes a
+    /// LOCKED take-profit ladder, so snipers and bundlers cannot dump on day one:
+    /// their bag turns into depth that earns the creator slice instead. 0 = off.
+    pub launch_window_ns: u64,
 }
 
 impl Config {
@@ -55,6 +59,7 @@ impl Config {
             unstake_delay_ns: 7 * DAY_NS,
             min_creator_lock_ns: 30 * DAY_NS,
             deepen_bins: 10,
+            launch_window_ns: DAY_NS,
         }
     }
 }
@@ -110,6 +115,7 @@ pub struct Book {
     pub burn_quote: u128,                 // quote waiting to buy back + burn
     pub burned: u128,                     // tokens burned so far
     pub last_crank_ns: u64,
+    pub launched_ns: u64, // when the market opened (graduation or seed)
 }
 
 impl Book {
@@ -119,7 +125,7 @@ impl Book {
         Book {
             cfg, active: 0, bins: BTreeMap::new(), positions: BTreeMap::new(), next_id: 0,
             pots: Pots::default(), creator: CreatorPool::default(), vault: Vault::default(),
-            protocol_pos: BTreeMap::new(), burn_quote: 0, burned: 0, last_crank_ns: 0,
+            protocol_pos: BTreeMap::new(), burn_quote: 0, burned: 0, last_crank_ns: 0, launched_ns: 0,
         }
     }
 
