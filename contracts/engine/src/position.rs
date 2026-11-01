@@ -19,10 +19,14 @@ impl Book {
         let p = self.positions.get(&id).ok_or(Error::NoPosition)?;
         let b = &self.bins[&p.bin];
         let c = &self.creator;
-        let q = owed(p.shares, b.acc_quote, p.snap_quote)
-            + p.creator_owed_q + owed(p.creator_weight, c.acc_q, p.snap_cq);
-        let t = owed(p.shares, b.acc_token, p.snap_token)
-            + p.creator_owed_t + owed(p.creator_weight, c.acc_t, p.snap_ct);
+        let creator_q = p.creator_owed_q + owed(p.creator_weight, c.acc_q, p.snap_cq);
+        let creator_t = p.creator_owed_t + owed(p.creator_weight, c.acc_t, p.snap_ct);
+        if p.take_profit {
+            // Fill proceeds (in the drawer) + maker fees, plus any creator slice.
+            return Ok((self.tp_earned(p) + creator_q, creator_t));
+        }
+        let q = owed(p.shares, b.acc_quote, p.snap_quote) + creator_q;
+        let t = owed(p.shares, b.acc_token, p.snap_token) + creator_t;
         Ok((q, t))
     }
 
@@ -35,8 +39,9 @@ impl Book {
         }
         let fees = self.claimable(id)?;
         self.settle_creator(id);
-        let b = &self.bins[&self.positions[&id].bin];
-        let (aq, at) = (b.acc_quote, b.acc_token);
+        let p = &self.positions[&id];
+        let b = &self.bins[&p.bin];
+        let (aq, at) = if p.take_profit { (self.tp_acc_for(p), 0) } else { (b.acc_quote, b.acc_token) };
         let p = self.positions.get_mut(&id).expect("exists");
         p.snap_quote = aq;
         p.snap_token = at;
@@ -50,6 +55,9 @@ impl Book {
         let p = self.positions.get(&id).ok_or(Error::NoPosition)?;
         let b = &self.bins[&p.bin];
         let (fq, ft) = self.claimable(id)?;
+        if p.take_profit {
+            return Ok((self.tp_remaining(p) + ft, fq));
+        }
         let token = mul_div_down(b.token, p.shares, b.shares);
         let quote = mul_div_down(b.quote, p.shares, b.shares);
         Ok((token + ft, quote + fq))
@@ -66,6 +74,13 @@ impl Book {
         }
         if p.creator_weight > 0 {
             self.drop_creator_weight(id);
+        }
+        if self.positions[&id].take_profit {
+            // Creator slice first (claim), then the order itself: unsold tokens back,
+            // proceeds already counted in the claim.
+            let (fee_quote, fee_token) = self.claim(id, caller)?;
+            let (token, _) = self.tp_close(id);
+            return Ok(Withdrawal { token, quote: 0, fee_quote, fee_token });
         }
         let (fee_quote, fee_token) = self.claim(id, caller)?;
         let p = self.positions.remove(&id).expect("exists");

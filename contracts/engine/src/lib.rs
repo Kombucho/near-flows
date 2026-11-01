@@ -12,6 +12,7 @@ mod ladder;
 mod launch;
 mod position;
 mod swap;
+mod tp;
 mod vault;
 
 pub use book::{Bin, Book, Config, CreatorPool, Pots, Position, PROTOCOL};

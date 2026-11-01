@@ -13,7 +13,7 @@ impl Book {
         let mut t = self.pots.pot_token + self.pots.creator_token;
         for b in self.bins.values() {
             q += b.quote;
-            t += b.token;
+            t += b.token + b.tp_token; // unsold take-profit tokens belong to their owners
         }
         for id in self.positions.keys() {
             let (fq, ft) = self.claimable(*id).expect("listed position exists");

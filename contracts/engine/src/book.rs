@@ -27,6 +27,15 @@ pub struct Bin {
     /// Fee-per-share counters (see math::acc), one per currency.
     pub acc_quote: u128,
     pub acc_token: u128,
+    /// Take-profit layer: one-way sell orders. Buyers take these tokens first;
+    /// the quote they pay goes to the order owners' "drawer" (`tp_acc`), never
+    /// back into the bin, so sellers can never undo a filled take-profit.
+    pub tp_token: u128,  // tokens still waiting to be sold
+    pub tp_shares: u128, // shares of the current round of orders
+    pub tp_acc: u128,    // quote earned per share (fill proceeds + maker fee slice)
+    /// Increases each time the layer sells out completely. Orders placed
+    /// after that start a new round, so they never share earlier proceeds.
+    pub tp_round: u32,
 }
 
 /// Fixed at creation. None of this can change afterwards.
@@ -79,6 +88,10 @@ pub struct Position {
     pub snap_ct: u128,
     pub creator_owed_q: u128, // creator slice settled but not yet claimed
     pub creator_owed_t: u128,
+    /// true = a one-way take-profit order (lives in the bin's tp layer).
+    /// For these, `snap_quote` is the snapshot of `tp_acc`.
+    pub take_profit: bool,
+    pub tp_round: u32,
 }
 
 /// Fee slices that do not go to LPs, waiting for the next crank.
@@ -120,6 +133,8 @@ pub struct Book {
     /// toward the active bin. Buyback and deepen only act near it, so a price
     /// pushed for one hour cannot steer the protocol's money.
     pub ref_bin: i32,
+    /// Final `tp_acc` of every take-profit round that sold out: (bin, round) -> acc.
+    pub tp_closed: BTreeMap<(i32, u32), u128>,
 }
 
 impl Book {
@@ -130,7 +145,7 @@ impl Book {
             cfg, active: 0, bins: BTreeMap::new(), positions: BTreeMap::new(), next_id: 0,
             pots: Pots::default(), creator: CreatorPool::default(), vault: Vault::default(),
             protocol_pos: BTreeMap::new(), burn_quote: 0, burned: 0, last_crank_ns: 0, launched_ns: 0,
-            ref_bin: 0,
+            ref_bin: 0, tp_closed: BTreeMap::new(),
         }
     }
 
@@ -182,7 +197,7 @@ impl Book {
             owner: owner.to_string(), bin, shares: minted,
             snap_quote: b.acc_quote, snap_token: b.acc_token, locked_until_ns,
             creator_weight: weight, snap_cq: self.creator.acc_q, snap_ct: self.creator.acc_t,
-            creator_owed_q: 0, creator_owed_t: 0,
+            creator_owed_q: 0, creator_owed_t: 0, take_profit: false, tp_round: 0,
         };
         let id = self.next_id;
         self.next_id += 1;

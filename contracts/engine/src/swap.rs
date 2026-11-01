@@ -29,9 +29,29 @@ pub struct SwapResult {
 /// One bin's part of a trade.
 struct Step {
     bin: i32,
-    net: u128, // input that went into the bin's reserves
+    net: u128, // input paid for this bin's output (fee excluded)
     fee: u128, // fee charged in this bin
     out: u128, // output taken from the bin
+}
+
+/// How a buy's fill in one bin divides between the take-profit layer
+/// (filled first) and the two-way LP layer.
+struct BuySplit {
+    out_tp: u128,
+    out_lp: u128,
+    net_tp: u128,
+    net_lp: u128,
+    fee_tp: u128,
+    fee_lp: u128,
+}
+
+fn split_buy(s: &Step, tp_token: u128) -> BuySplit {
+    let out_tp = s.out.min(tp_token);
+    // Pro-rata by tokens taken, rounded down for the tp side: the LP layer gets
+    // the odd unit, so tp owners are never credited more than was paid.
+    let net_tp = math::wide::mul_div_down(s.net, out_tp, s.out);
+    let fee_tp = math::wide::mul_div_down(s.fee, out_tp, s.out);
+    BuySplit { out_tp, out_lp: s.out - out_tp, net_tp, net_lp: s.net - net_tp, fee_tp, fee_lp: s.fee - fee_tp }
 }
 
 impl Book {
@@ -69,7 +89,9 @@ impl Book {
     /// `Box<dyn Iterator>` lets the two directions share one return type.
     fn walk(&self, side: Side) -> Box<dyn Iterator<Item = (i32, u128)> + '_> {
         match side {
-            Side::Buy => Box::new(self.bins.range(self.active..).filter(|(_, b)| b.token > 0).map(|(k, b)| (*k, b.token))),
+            // Buyers can take both layers: take-profit orders and LP tokens.
+            Side::Buy => Box::new(self.bins.range(self.active..).filter(|(_, b)| b.token + b.tp_token > 0).map(|(k, b)| (*k, b.token + b.tp_token))),
+            // Sellers only ever see the LP layer's quote. Take-profit proceeds are invisible.
             Side::Sell => Box::new(self.bins.range(..=self.active).rev().filter(|(_, b)| b.quote > 0).map(|(k, b)| (*k, b.quote))),
         }
     }
@@ -118,28 +140,47 @@ impl Book {
 
     /// Apply one planned step: move reserves and hand out the fee.
     fn apply(&mut self, side: Side, s: &Step) {
-        let mut split = split_fee(s.fee, self.cfg.shares);
+        match side {
+            Side::Buy => self.apply_buy(s),
+            Side::Sell => self.apply_sell(s),
+        }
+    }
+
+    fn apply_buy(&mut self, s: &Step) {
+        let tp_token = self.bins[&s.bin].tp_token;
+        let x = split_buy(s, tp_token);
+        if x.out_tp > 0 {
+            // Take-profit owners get the price paid plus the LP slice of their fee.
+            let f = split_fee(x.fee_tp, self.cfg.shares);
+            self.pots.pot_quote += f.pot;
+            self.pots.creator_quote += f.creator;
+            self.tp_fill(s.bin, x.out_tp, x.net_tp + f.lps);
+        }
+        let mut f = split_fee(x.fee_lp, self.cfg.shares);
         let b = self.bins.get_mut(&s.bin).expect("planned bin exists");
         if b.shares == 0 {
-            // Only rounding dust is left here with no LPs: their slice goes to the pot.
-            split.pot += split.lps;
-            split.lps = 0;
+            // No LPs here (only rounding dust): their slice goes to the pot.
+            f.pot += f.lps;
+            f.lps = 0;
         }
-        match side {
-            Side::Buy => {
-                b.token -= s.out;
-                b.quote += s.net;
-                b.acc_quote = accrue(b.acc_quote, split.lps, b.shares);
-                self.pots.pot_quote += split.pot;
-                self.pots.creator_quote += split.creator;
-            }
-            Side::Sell => {
-                b.quote -= s.out;
-                b.token += s.net;
-                b.acc_token = accrue(b.acc_token, split.lps, b.shares);
-                self.pots.pot_token += split.pot;
-                self.pots.creator_token += split.creator;
-            }
+        b.token -= x.out_lp;
+        b.quote += x.net_lp;
+        b.acc_quote = accrue(b.acc_quote, f.lps, b.shares);
+        self.pots.pot_quote += f.pot;
+        self.pots.creator_quote += f.creator;
+    }
+
+    fn apply_sell(&mut self, s: &Step) {
+        let mut f = split_fee(s.fee, self.cfg.shares);
+        let b = self.bins.get_mut(&s.bin).expect("planned bin exists");
+        if b.shares == 0 {
+            f.pot += f.lps;
+            f.lps = 0;
         }
+        b.quote -= s.out;
+        b.token += s.net;
+        b.acc_token = accrue(b.acc_token, f.lps, b.shares);
+        self.pots.pot_token += f.pot;
+        self.pots.creator_token += f.creator;
     }
 }

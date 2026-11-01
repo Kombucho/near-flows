@@ -1,5 +1,6 @@
-//! Take-profit ladder: part of a holder's tokens sit as asks at multiples of
-//! the current price, so a rally sells them step by step (and earns LP fees).
+//! Take-profit ladder: part of a holder's tokens sit as one-way sell orders at
+//! multiples of the current price. A rally sells them step by step, the holder
+//! earns the maker fee slice, and a later dump cannot buy them back.
 
 use math::price::bins_for_multiple;
 use math::BPS;
@@ -40,7 +41,7 @@ impl Book {
                 continue;
             }
             let bin = self.active + bins_for_multiple(self.cfg.step_bps, multiple_bps);
-            ids.push(self.add_liquidity(owner, bin, amount, 0, locked_until_ns, now_ns)?);
+            ids.push(self.place_take_profit(owner, bin, amount, locked_until_ns, now_ns)?);
             placed += amount;
         }
         Ok((ids, placed))

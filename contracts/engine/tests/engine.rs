@@ -300,3 +300,78 @@ fn a_price_pushed_right_before_the_crank_does_not_steer_deepen() {
     assert_eq!(b.protocol_pos.len(), bins_before, "no new protocol bins at the pushed price");
     assert!(b.pots.pot_quote > 1_000_000, "deepen money waits in the pot, got {}", b.pots.pot_quote);
 }
+
+// ---------- one-way take-profits ("the locked drawer") ----------
+
+/// Book with LP tokens in bins 1..3 and quote below, plus Alice's take-profit at bin 5.
+fn book_with_alice_tp(tokens: u128) -> (Book, u64) {
+    let mut b = book();
+    let id = b.place_take_profit("alice", 5, tokens, 0, DAY).unwrap();
+    (b, id)
+}
+
+#[test]
+fn a_filled_take_profit_survives_the_dump() {
+    let (mut b, alice) = book_with_alice_tp(UNIT);
+    // Rally: a buyer eats bins 1..3 and all of Alice's order at bin 5 (price 1.01^5).
+    b.swap(Side::Buy, 5 * UNIT, 0).unwrap();
+    let (tokens, quote) = b.position_assets(alice).unwrap();
+    assert_eq!(tokens, 0, "all of Alice's tokens sold");
+    assert!(quote >= 1_051_000, "Alice was paid ~1.051 per token plus maker fees, got {quote}");
+    // Dump: sell a lot back down through bin 5 and below.
+    b.swap(Side::Sell, 3 * UNIT, 0).unwrap();
+    assert_eq!(b.position_assets(alice).unwrap(), (0, quote), "the dump cannot touch the drawer");
+    let (q, _) = b.claim(alice, "alice").unwrap();
+    assert_eq!(q, quote);
+}
+
+#[test]
+fn sellers_never_see_take_profit_proceeds() {
+    let (mut b, _) = book_with_alice_tp(UNIT);
+    b.swap(Side::Buy, 5 * UNIT, 0).unwrap();
+    assert_eq!(b.bins[&5].quote, 0, "proceeds are not in the two-way layer");
+}
+
+#[test]
+fn partial_fill_is_shared_pro_rata() {
+    let mut b = book();
+    let alice = b.place_take_profit("alice", 5, 3 * UNIT, 0, DAY).unwrap();
+    let bob = b.place_take_profit("bob", 5, UNIT, 0, DAY).unwrap();
+    // Bins 1..3 cost ~3_091_000 with fees; the remaining ~209_000 buys part of bin 5.
+    b.swap(Side::Buy, 3_300_000, 0).unwrap();
+    let sold_at_5 = 4 * UNIT - b.bins[&5].tp_token;
+    assert!(sold_at_5 > 0);
+    let (a_left, a_q) = b.position_assets(alice).unwrap();
+    let (b_left, b_q) = b.position_assets(bob).unwrap();
+    // Alice owns 3x Bob's share: 3x the tokens left and 3x the proceeds (±1 for rounding).
+    assert!(a_left.abs_diff(3 * b_left) <= 3, "{a_left} vs {b_left}");
+    assert!(a_q.abs_diff(3 * b_q) <= 3, "{a_q} vs {b_q}");
+}
+
+#[test]
+fn a_new_order_after_a_sell_out_does_not_share_old_proceeds() {
+    let (mut b, alice) = book_with_alice_tp(UNIT);
+    b.swap(Side::Buy, 5 * UNIT, 0).unwrap(); // Alice's round sells out
+    let alice_quote = b.position_assets(alice).unwrap().1;
+    b.swap(Side::Sell, 1_000, 0).unwrap(); // price moves, bin 5 is still at/above it
+    let carol = b.place_take_profit("carol", 6, UNIT, 0, DAY).unwrap();
+    let dave = b.place_take_profit("dave", 5, UNIT, 0, DAY).unwrap(); // same bin, new round
+    assert_eq!(b.position_assets(dave).unwrap(), (UNIT, 0), "Dave gets none of Alice's money");
+    assert_eq!(b.position_assets(alice).unwrap().1, alice_quote, "Alice keeps all of it");
+    let _ = carol;
+}
+
+#[test]
+fn cancel_returns_unsold_tokens() {
+    let (mut b, alice) = book_with_alice_tp(UNIT);
+    let w = b.withdraw(alice, "alice", DAY).unwrap();
+    assert_eq!((w.token, w.fee_quote), (UNIT, 0));
+    assert_eq!(b.bins[&5].tp_token, 0);
+}
+
+#[test]
+fn ladder_now_uses_one_way_orders() {
+    let mut b = book();
+    let buy = b.buy("ape", 100_000, 0, &DEFAULT_LADDER, DAY).unwrap();
+    assert!(buy.ladder.iter().all(|i| b.positions[i].take_profit));
+}
