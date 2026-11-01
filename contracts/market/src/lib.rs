@@ -41,9 +41,15 @@ const DAY_NS: u64 = 86_400 * 1_000_000_000;
 const DYN_K: u16 = 2;
 const MAX_FEE_BPS: u16 = 500;
 
-fn with_dynamic_fee(mut cfg: Config) -> Config {
+/// Protocol slice: at most 10% of each fee, and only while the coin is busy
+/// (see engine: off below the volume threshold, phasing in up to 2x it).
+const PROTOCOL_BPS: u16 = 1_000;
+
+fn with_fees(mut cfg: Config, protocol_threshold: u128) -> Config {
     cfg.dyn_k = DYN_K;
     cfg.max_fee_bps = MAX_FEE_BPS.max(cfg.fee_bps);
+    cfg.protocol_bps = PROTOCOL_BPS;
+    cfg.protocol_threshold = protocol_threshold;
     cfg
 }
 
@@ -64,6 +70,8 @@ pub struct Market {
     quote: AccountId, // what it trades against (wNEAR: wrap.testnet)
     native: bool,
     fee_bps: u16,
+    /// Trailing daily quote volume above which the protocol slice phases in.
+    protocol_threshold: u128,
     /// None until launched. Everything market-related lives in here.
     book: Option<Book>,
     paused: bool,
@@ -80,10 +88,17 @@ pub struct Market {
 #[near]
 impl Market {
     #[init]
-    pub fn new(owner: AccountId, token: AccountId, quote: AccountId, native: bool, fee_bps: u16) -> Self {
+    /// `protocol_fee_after_daily_volume`: in the quote token's smallest units.
+    /// Below it the protocol takes nothing; it is fixed forever at deploy.
+    pub fn new(
+        owner: AccountId, token: AccountId, quote: AccountId, native: bool, fee_bps: u16,
+        protocol_fee_after_daily_volume: near_sdk::json_types::U128,
+    ) -> Self {
         require!(fee_bps > 0 && fee_bps <= MAX_FEE_BPS, "base fee must be between 0.01% and 5%");
+        require!(protocol_fee_after_daily_volume.0 > 0, "threshold must be positive");
         Market {
             owner, token, quote, native, fee_bps, book: None, paused: false,
+            protocol_threshold: protocol_fee_after_daily_volume.0,
             funded_token: 0, funded_quote: 0,
             storage: LookupMap::new(Key::Storage),
             owed: LookupMap::new(Key::Owed),
@@ -95,7 +110,7 @@ impl Market {
     pub fn launch_native(&mut self, bins_per_side: i32) {
         self.assert_can_launch();
         require!(self.native, "this market is for an adopted coin");
-        let cfg = with_dynamic_fee(Config::standard(1, self.fee_bps)); // base price is set by graduate()
+        let cfg = with_fees(Config::standard(1, self.fee_bps), self.protocol_threshold); // price set by graduate()
         let now = env::block_timestamp();
         self.book = Some(Book::graduate(cfg, self.funded_quote, self.funded_token, bins_per_side, now));
         self.emit("launch", &format!(r#"{{"kind":"native","bins_per_side":{bins_per_side}}}"#));
@@ -107,7 +122,7 @@ impl Market {
         self.assert_can_launch();
         require!(!self.native, "this market is for a native coin");
         let now = env::block_timestamp();
-        let cfg = with_dynamic_fee(Config::adopted(base_price.0, self.fee_bps));
+        let cfg = with_fees(Config::adopted(base_price.0, self.fee_bps), self.protocol_threshold);
         let lock = now + lock_days as u64 * DAY_NS;
         let owner = self.owner.to_string();
         let (book, _) = Book::seed(cfg, &owner, self.funded_token, self.funded_quote, bins_per_side, lock, now)
@@ -128,6 +143,18 @@ impl Market {
         self.assert_owner();
         self.paused = false;
         self.emit("unpaused", "{}");
+    }
+
+    /// Owner only: collect the protocol slice accrued so far. This is the
+    /// owner's ONLY way to take money out, and it can only reach this slice.
+    #[payable]
+    pub fn withdraw_protocol_fees(&mut self) {
+        near_sdk::assert_one_yocto();
+        self.assert_owner();
+        let (q, t) = self.book().take_protocol_fees();
+        let owner = self.owner.clone();
+        self.pay_both(&owner, q, t);
+        self.emit("protocol_fees", &format!(r#"{{"quote":"{q}","token":"{t}"}}"#));
     }
 }
 

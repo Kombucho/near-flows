@@ -485,3 +485,58 @@ fn solvent_with_dynamic_fees_over_3000_random_trades() {
     let (oq, ot) = b.obligations();
     assert!(oq <= q_bal && ot <= t_bal - b.burned, "owes ({oq},{ot}) holds ({q_bal},{})", t_bal - b.burned);
 }
+
+// ---------- protocol slice (only when busy) ----------
+
+fn book_with_protocol_fee(threshold: u128) -> Book {
+    let mut cfg = Config::standard(PRICE_SCALE, 100);
+    cfg.protocol_bps = 1_000; // up to 10% of each fee
+    cfg.protocol_threshold = threshold;
+    Book::seed(cfg, "lp", 30 * UNIT, 30 * UNIT, 30, 0, 0).unwrap().0
+}
+
+#[test]
+fn protocol_slice_is_off_while_the_coin_is_quiet() {
+    let mut b = book_with_protocol_fee(1_000 * UNIT);
+    b.swap(Side::Buy, UNIT, 0).unwrap();
+    assert_eq!(b.protocol_bps_now(), 0);
+    assert_eq!((b.pots.protocol_quote, b.pots.protocol_token), (0, 0));
+}
+
+#[test]
+fn protocol_slice_phases_in_between_1x_and_2x_the_threshold() {
+    let mut b = book_with_protocol_fee(1_000);
+    b.daily_volume = 1_000;
+    assert_eq!(b.protocol_bps_now(), 0, "at the threshold: still off");
+    b.daily_volume = 1_500;
+    assert_eq!(b.protocol_bps_now(), 500, "halfway: 5%");
+    b.daily_volume = 2_000;
+    assert_eq!(b.protocol_bps_now(), 1_000, "at 2x: the full 10%");
+    b.daily_volume = 50_000;
+    assert_eq!(b.protocol_bps_now(), 1_000, "never more than 10%");
+}
+
+#[test]
+fn when_busy_the_protocol_takes_10pct_of_the_fee_off_the_top() {
+    let mut b = book_with_protocol_fee(1);
+    b.daily_volume = 10; // busy
+    b.swap(Side::Buy, 100_000, 0).unwrap(); // fee 1_000 -> protocol 100, then 45/10/45 of 900
+    assert_eq!(b.pots.protocol_quote, 100);
+    assert_eq!(b.pots.pot_quote, 405);
+    assert_eq!(b.pots.creator_quote, 90);
+    assert_eq!(b.take_protocol_fees(), (100, 0));
+    assert_eq!(b.pots.protocol_quote, 0);
+}
+
+#[test]
+fn daily_volume_tracks_trading_and_fades_when_it_stops() {
+    let mut b = book_with_protocol_fee(1);
+    b.swap(Side::Buy, 2_400_000, 0).unwrap();
+    b.crank(1).unwrap(); // this hour x 24 = 57.6M; the average moves 1/24 of the way
+    let busy = b.daily_volume;
+    assert!(busy > 2_000_000, "daily volume rose: {busy}");
+    for h in 2..50u64 {
+        b.crank(h * 3_600 * 1_000_000_000).unwrap(); // two quiet days
+    }
+    assert!(b.daily_volume < busy / 4, "quiet days bring it down: {}", b.daily_volume);
+}

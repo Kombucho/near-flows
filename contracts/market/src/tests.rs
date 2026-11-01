@@ -47,7 +47,7 @@ fn deposit_storage(m: &mut Market, who: &str) {
 /// A launched native market: 4_000 wNEAR raised, 500_000_000 coins to the pool.
 fn native_market() -> Market {
     as_caller("owner.testnet", 0, 0);
-    let mut m = Market::new(acc("owner.testnet"), acc("coin.testnet"), acc("wrap.testnet"), true, 30);
+    let mut m = Market::new(acc("owner.testnet"), acc("coin.testnet"), acc("wrap.testnet"), true, 30, U128(5_000 * ONE));
     deposit_storage(&mut m, "owner.testnet");
     send(&mut m, "coin.testnet", "owner.testnet", 500_000_000 * ONE, r#"{"action":"fund"}"#);
     send(&mut m, "wrap.testnet", "owner.testnet", 4_000 * ONE, r#"{"action":"fund"}"#);
@@ -158,7 +158,7 @@ fn only_owner_can_pause() {
 #[should_panic(expected = "NotNative")]
 fn adopted_coins_cannot_be_staked() {
     as_caller("owner.testnet", 0, 0);
-    let mut m = Market::new(acc("owner.testnet"), acc("coin.testnet"), acc("wrap.testnet"), false, 30);
+    let mut m = Market::new(acc("owner.testnet"), acc("coin.testnet"), acc("wrap.testnet"), false, 30, U128(5_000 * ONE));
     deposit_storage(&mut m, "owner.testnet");
     send(&mut m, "coin.testnet", "owner.testnet", 1_000_000 * ONE, r#"{"action":"fund"}"#);
     send(&mut m, "wrap.testnet", "owner.testnet", 100 * ONE, r#"{"action":"fund"}"#);
@@ -222,4 +222,21 @@ fn fee_is_dynamic_after_launch() {
     assert_eq!(m.get_config().current_fee_bps, 30, "calm: base fee");
     send(&mut m, "wrap.testnet", "alice.testnet", 400 * ONE, r#"{"action":"buy","min_out":"0"}"#);
     assert!(m.get_config().current_fee_bps > 30, "after a big move the fee is higher");
+}
+
+#[test]
+fn protocol_slice_starts_off() {
+    let mut m = native_market();
+    send(&mut m, "wrap.testnet", "alice.testnet", 10 * ONE, r#"{"action":"buy","min_out":"0"}"#);
+    let s = m.get_stats();
+    assert_eq!(s.protocol_fee_bps_now, 0, "a new, quiet coin pays no protocol fee");
+    assert_eq!(s.protocol_pending_quote.0, 0);
+}
+
+#[test]
+#[should_panic(expected = "owner only")]
+fn only_owner_withdraws_protocol_fees() {
+    let mut m = native_market();
+    as_caller("alice.testnet", 1, DAY_NS);
+    m.withdraw_protocol_fees();
 }

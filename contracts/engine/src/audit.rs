@@ -9,8 +9,8 @@ use crate::Book;
 impl Book {
     /// Total obligations: (quote, token).
     pub fn obligations(&self) -> (u128, u128) {
-        let mut q = self.pots.pot_quote + self.pots.creator_quote + self.burn_quote;
-        let mut t = self.pots.pot_token + self.pots.creator_token;
+        let mut q = self.pots.pot_quote + self.pots.creator_quote + self.pots.protocol_quote + self.burn_quote;
+        let mut t = self.pots.pot_token + self.pots.creator_token + self.pots.protocol_token;
         for b in self.bins.values() {
             q += b.quote;
             t += b.token + b.tp_token; // unsold take-profit tokens belong to their owners

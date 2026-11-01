@@ -65,6 +65,12 @@ pub struct Config {
     /// the extra risk and makes picking off stale prices expensive.
     pub dyn_k: u16,
     pub max_fee_bps: u16,
+    /// Protocol slice: at most this share of every fee (1_000 = 10%) goes to
+    /// the protocol, and ONLY once the coin is busy. Off below
+    /// `protocol_threshold` of trailing daily quote volume, phasing in linearly
+    /// to the full share at 2x the threshold, and off again if traffic fades.
+    pub protocol_bps: u16,
+    pub protocol_threshold: u128,
 }
 
 impl Config {
@@ -84,6 +90,8 @@ impl Config {
             native: true,
             dyn_k: 0,
             max_fee_bps: fee_bps,
+            protocol_bps: 0,
+            protocol_threshold: 0,
         }
     }
 
@@ -129,6 +137,9 @@ pub struct Pots {
     pub pot_token: u128,
     pub creator_quote: u128,
     pub creator_token: u128,
+    /// The protocol slice, waiting for the owner to withdraw it.
+    pub protocol_quote: u128,
+    pub protocol_token: u128,
 }
 
 /// The creator slice is shared by locked liquidity, pro-rata to weight.
@@ -168,6 +179,10 @@ pub struct Book {
     /// Recent volatility in bins crossed. Grows with every swap's movement,
     /// halves at every crank (hourly), so fees fall back when things calm down.
     pub vol_bins: u32,
+    /// Quote volume traded since the last crank, and a smoothed daily volume
+    /// (updated each crank). The protocol slice is measured against the latter.
+    pub hour_volume: u128,
+    pub daily_volume: u128,
 }
 
 impl Book {
@@ -180,6 +195,7 @@ impl Book {
             pots: Pots::default(), creator: CreatorPool::default(), vault: Vault::default(),
             protocol_pos: BTreeMap::new(), burn_quote: 0, burned: 0, last_crank_ns: 0, launched_ns: 0,
             ref_bin: 0, tp_closed: BTreeMap::new(), vol_bins: 0,
+            hour_volume: 0, daily_volume: 0,
         }
     }
 

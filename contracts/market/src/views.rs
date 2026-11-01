@@ -50,6 +50,10 @@ pub struct MarketStats {
     pub votes_deepen: U128,
     pub positions: u32,
     pub creator_weight: U128,
+    pub daily_volume: U128,       // smoothed, in quote units
+    pub protocol_fee_bps_now: u16, // share of each fee going to the protocol right now
+    pub protocol_pending_quote: U128,
+    pub protocol_pending_token: U128,
 }
 
 #[near(serializers = [json])]
@@ -113,6 +117,8 @@ impl Market {
             burned: U128(b.burned), total_staked: U128(b.vault.total_stake),
             votes_dividend: U128(v.dividend), votes_burn: U128(v.burn), votes_deepen: U128(v.deepen),
             positions: b.positions.len() as u32, creator_weight: U128(b.creator.total_weight),
+            daily_volume: U128(b.daily_volume), protocol_fee_bps_now: b.protocol_bps_now(),
+            protocol_pending_quote: U128(b.pots.protocol_quote), protocol_pending_token: U128(b.pots.protocol_token),
         }
     }
 

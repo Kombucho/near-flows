@@ -80,11 +80,40 @@ impl Book {
         for s in &steps {
             self.apply(side, s);
         }
+        // Quote volume of this trade: paid in for buys, paid out for sells.
+        let volume: u128 = match side {
+            Side::Buy => steps.iter().map(|s| s.net + s.fee).sum(),
+            Side::Sell => steps.iter().map(|s| s.out).sum(),
+        };
+        self.hour_volume = self.hour_volume.saturating_add(volume);
         let start = self.active;
         self.active = steps.last().map(|s| s.bin).unwrap_or(self.active);
         let moved = (self.active - start).unsigned_abs();
         self.vol_bins = self.vol_bins.saturating_add(moved).min(10_000);
         Ok(SwapResult { used: amount_in - left, out, fee, refund: left })
+    }
+
+    /// Current protocol share of each fee, in bps: 0 until the coin is busy,
+    /// then phasing in linearly between 1x and 2x the volume threshold.
+    pub fn protocol_bps_now(&self) -> u16 {
+        let (cap, t, v) = (self.cfg.protocol_bps as u128, self.cfg.protocol_threshold, self.daily_volume);
+        if cap == 0 || t == 0 || v <= t {
+            return 0;
+        }
+        let ramp = (v - t).min(t); // 0..t as volume goes from t to 2t
+        (cap * ramp / t) as u16
+    }
+
+    /// Take the protocol slice off the top of a fee; returns what is left.
+    fn take_protocol(&mut self, fee: u128, quote_side: bool) -> u128 {
+        let cut = fee * self.protocol_bps_now() as u128 / math::BPS; // rounds down: users keep the dust
+        if quote_side { self.pots.protocol_quote += cut } else { self.pots.protocol_token += cut }
+        fee - cut
+    }
+
+    /// The owner collects the protocol slice: (quote, token).
+    pub fn take_protocol_fees(&mut self) -> (u128, u128) {
+        (std::mem::take(&mut self.pots.protocol_quote), std::mem::take(&mut self.pots.protocol_token))
     }
 
     /// Fee in bps for filling at `bin` during a swap that started at `start`.
@@ -166,12 +195,14 @@ impl Book {
         let x = split_buy(s, tp_token);
         if x.out_tp > 0 {
             // Take-profit owners get the price paid plus the LP slice of their fee.
-            let f = split_fee(x.fee_tp, self.cfg.shares);
+            let fee_tp = self.take_protocol(x.fee_tp, true);
+            let f = split_fee(fee_tp, self.cfg.shares);
             self.pots.pot_quote += f.pot;
             self.pots.creator_quote += f.creator;
             self.tp_fill(s.bin, x.out_tp, x.net_tp + f.lps);
         }
-        let mut f = split_fee(x.fee_lp, self.cfg.shares);
+        let fee_lp = self.take_protocol(x.fee_lp, true);
+        let mut f = split_fee(fee_lp, self.cfg.shares);
         let b = self.bins.get_mut(&s.bin).expect("planned bin exists");
         if b.shares == 0 {
             // No LPs here (only rounding dust): their slice goes to the pot.
@@ -186,7 +217,8 @@ impl Book {
     }
 
     fn apply_sell(&mut self, s: &Step) {
-        let mut f = split_fee(s.fee, self.cfg.shares);
+        let fee = self.take_protocol(s.fee, false);
+        let mut f = split_fee(fee, self.cfg.shares);
         let b = self.bins.get_mut(&s.bin).expect("planned bin exists");
         if b.shares == 0 {
             f.pot += f.lps;

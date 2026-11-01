@@ -78,7 +78,8 @@ async fn setup() -> anyhow::Result<World> {
     let wnear = deploy_token(&worker, &owner, 1_000_000 * ONE, "mWNEAR").await?;
     let market = worker.dev_deploy(&wasm("market")).await?;
     market.call("new")
-        .args_json(json!({"owner": owner.id(), "token": coin.id(), "quote": wnear.id(), "native": true, "fee_bps": 30}))
+        .args_json(json!({"owner": owner.id(), "token": coin.id(), "quote": wnear.id(), "native": true, "fee_bps": 30,
+                          "protocol_fee_after_daily_volume": (5_000 * ONE).to_string()}))
         .transact().await?.into_result()?;
     for who in [market.id(), alice.id()] {
         register(&owner, &coin, who).await?;
