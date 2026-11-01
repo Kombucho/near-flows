@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["math", "engine"]
+members = ["math", "engine", "sim"]
 
 # Contracts handle money: an overflow must abort the call, never wrap around silently.
 [profile.release]
@@ -9,3 +9,9 @@ codegen-units = 1
 opt-level = "z"
 lto = true
 panic = "abort"
+
+# The simulator must CATCH panics (to count them per seed), so it needs unwinding.
+# Build it with: cargo run --profile sim -p sim
+[profile.sim]
+inherits = "release"
+panic = "unwind"

@@ -253,3 +253,50 @@ fn solvent_after_5000_random_actions_of_every_kind() {
     assert!(oq <= q_bal, "quote: owes {oq}, holds {q_bal}");
     assert!(ot <= t_bal - b.burned, "token: owes {ot}, holds {}", t_bal - b.burned);
 }
+
+#[test]
+fn crank_survives_a_pot_too_small_to_mint_shares() {
+    // Found by the simulator: tiny deepen amounts into big bins minted 0 shares
+    // and the crank panicked, which on-chain would block it forever.
+    let mut b = Book::graduate(cfg(), 4_000 * UNIT * UNIT, 500_000 * UNIT * UNIT, 50, 0);
+    b.stake("alice", 1_000).unwrap();
+    b.set_vote("alice", [0, 0, 10_000]).unwrap(); // all deepen
+    // Price is 0.008. Selling 20_000 tokens pays a 200-token fee: pot 90 + creator 20
+    // (no locked LPs, so it joins the pot) = 110 tokens, all to deepen, 11 per bin.
+    // 11 tokens x 0.008 = 0.088 quote, which rounds to 0 value -> 0 shares.
+    b.swap(Side::Sell, 20_000, 0).unwrap();
+    for h in 1..5u64 {
+        b.crank(h * 3_600 * 1_000_000_000).unwrap();
+    }
+}
+
+#[test]
+fn buyback_cannot_be_baited_by_a_far_dust_ask() {
+    // Attack: when the asks near the price are gone, leave 1 token at bin 300
+    // (~20x the price) and wait for the buyback to pay that price for it.
+    let mut b = book();
+    b.stake("alice", 1_000).unwrap();
+    b.set_vote("alice", [0, 10_000, 0]).unwrap(); // all burn
+    b.swap(Side::Buy, 10 * UNIT, 0).unwrap(); // eats every ask, fills the pot
+    let bait = b.add_liquidity("attacker", 300, 1, 0, 0, 0).unwrap();
+    b.crank(1).unwrap();
+    assert_eq!(b.bins[&300].token, 1, "the bait ask must not be bought");
+    assert_eq!(b.position_assets(bait).unwrap().1, 0, "attacker earned no quote");
+    assert!(b.burn_quote > 0, "unspent buyback money waits for real asks");
+}
+
+#[test]
+fn a_price_pushed_right_before_the_crank_does_not_steer_deepen() {
+    // Attack: push the price up 40 bins, then crank, hoping the protocol places
+    // its bids at the inflated price so the attacker can sell into them.
+    let mut b = Book::graduate(cfg(), 4_000 * UNIT, 4_000 * UNIT, 100, 0); // price 1.0
+    b.stake("alice", 1_000).unwrap();
+    b.set_vote("alice", [0, 0, 10_000]).unwrap(); // all deepen
+    b.crank(1).unwrap();
+    let bins_before = b.protocol_pos.len();
+    b.swap(Side::Buy, 1_500 * UNIT, 0).unwrap(); // big push
+    assert!(b.active > 30, "price pushed to bin {}", b.active);
+    b.crank(2 * 3_600 * 1_000_000_000).unwrap();
+    assert_eq!(b.protocol_pos.len(), bins_before, "no new protocol bins at the pushed price");
+    assert!(b.pots.pot_quote > 1_000_000, "deepen money waits in the pot, got {}", b.pots.pot_quote);
+}

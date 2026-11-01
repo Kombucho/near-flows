@@ -116,6 +116,10 @@ pub struct Book {
     pub burned: u128,                     // tokens burned so far
     pub last_crank_ns: u64,
     pub launched_ns: u64, // when the market opened (graduation or seed)
+    /// Slow reference price (as a bin id): each crank it moves 1/4 of the way
+    /// toward the active bin. Buyback and deepen only act near it, so a price
+    /// pushed for one hour cannot steer the protocol's money.
+    pub ref_bin: i32,
 }
 
 impl Book {
@@ -126,6 +130,7 @@ impl Book {
             cfg, active: 0, bins: BTreeMap::new(), positions: BTreeMap::new(), next_id: 0,
             pots: Pots::default(), creator: CreatorPool::default(), vault: Vault::default(),
             protocol_pos: BTreeMap::new(), burn_quote: 0, burned: 0, last_crank_ns: 0, launched_ns: 0,
+            ref_bin: 0,
         }
     }
 

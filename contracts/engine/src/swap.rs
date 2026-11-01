@@ -36,10 +36,19 @@ struct Step {
 
 impl Book {
     pub fn swap(&mut self, side: Side, amount_in: u128, min_out: u128) -> Result<SwapResult, Error> {
+        self.swap_within(side, amount_in, min_out, None)
+    }
+
+    /// Like `swap`, but never fills beyond bin `limit` (above it for buys,
+    /// below it for sells). The protocol's own buyback uses this so it can never
+    /// be tricked into paying a far-away price for a dust ask.
+    pub fn swap_within(
+        &mut self, side: Side, amount_in: u128, min_out: u128, limit: Option<i32>,
+    ) -> Result<SwapResult, Error> {
         if amount_in == 0 {
             return Err(Error::ZeroAmount);
         }
-        let (steps, left) = self.plan(side, amount_in);
+        let (steps, left) = self.plan(side, amount_in, limit);
         let out: u128 = steps.iter().map(|s| s.out).sum();
         if out == 0 {
             return Err(Error::NoLiquidity);
@@ -55,23 +64,31 @@ impl Book {
         Ok(SwapResult { used: amount_in - left, out, fee, refund: left })
     }
 
-    /// Bins that can fill this side, in walking order. Collected into a Vec
-    /// so we stop borrowing `self.bins` before the loop reads other fields.
-    fn walk(&self, side: Side) -> Vec<i32> {
+    /// Bins that can fill this side, in walking order, read lazily: the walk
+    /// stops at the first bin that completes the order, never touching the rest.
+    /// `Box<dyn Iterator>` lets the two directions share one return type.
+    fn walk(&self, side: Side) -> Box<dyn Iterator<Item = (i32, u128)> + '_> {
         match side {
-            Side::Buy => self.bins.range(self.active..).filter(|(_, b)| b.token > 0).map(|(k, _)| *k).collect(),
-            Side::Sell => self.bins.range(..=self.active).rev().filter(|(_, b)| b.quote > 0).map(|(k, _)| *k).collect(),
+            Side::Buy => Box::new(self.bins.range(self.active..).filter(|(_, b)| b.token > 0).map(|(k, b)| (*k, b.token))),
+            Side::Sell => Box::new(self.bins.range(..=self.active).rev().filter(|(_, b)| b.quote > 0).map(|(k, b)| (*k, b.quote))),
         }
     }
 
     /// Read-only: how the trade would fill. Returns the steps and unspent input.
-    fn plan(&self, side: Side, amount_in: u128) -> (Vec<Step>, u128) {
+    fn plan(&self, side: Side, amount_in: u128, limit: Option<i32>) -> (Vec<Step>, u128) {
         let fee_bps = self.cfg.fee_bps;
         let mut left = amount_in;
         let mut steps = Vec::new();
-        for bin in self.walk(side) {
-            let (b, price) = (&self.bins[&bin], self.price(bin));
-            let reserve = if side == Side::Buy { b.token } else { b.quote };
+        for (bin, reserve) in self.walk(side) {
+            let past_limit = match (side, limit) {
+                (Side::Buy, Some(l)) => bin > l,
+                (Side::Sell, Some(l)) => bin < l,
+                _ => false,
+            };
+            if past_limit {
+                break; // the rest of the order is refunded
+            }
+            let price = self.price(bin);
             // Net input needed to empty this bin, then the fee on top of it.
             let need = match side {
                 Side::Buy => mul_div_up(reserve, price, PRICE_SCALE),
