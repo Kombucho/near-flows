@@ -180,7 +180,9 @@ fn noise(r: &Regime, w: &mut World, c: &mut Ctx) {
 /// Arbitrageurs trade the book toward fair value while it pays more than fees.
 fn arbitrage(w: &mut World, c: &mut Ctx, fee_bps: u16) {
     let band = 2.0 * fee_bps as f64 / 10_000.0;
-    for _ in 0..40 {
+    // SIM_ARB_ROUNDS: how many 20-NEAR arbitrage trades per hour (default 40 = 800 NEAR/h).
+    let rounds: u32 = std::env::var("SIM_ARB_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+    for _ in 0..rounds {
         let p = w.price();
         if p < c.fair * (1.0 - band) {
             if w.buy("arb", near(ARB_CHUNK), &[], 0.05).is_none() { break; }
