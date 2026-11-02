@@ -1,0 +1,21 @@
+{
+  "name": "keeper",
+  "version": "1.0.0",
+  "description": "Keeper + market simulator for the liquidity layer: calls the crank and trades the pool toward an outside price (simulated on testnet).",
+  "scripts": {
+    "test": "node --import tsx --test src/*.test.ts",
+    "keeper": "tsx src/main.ts"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "near-api-js": "^7.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  },
+  "private": true,
+  "type": "module"
+}
