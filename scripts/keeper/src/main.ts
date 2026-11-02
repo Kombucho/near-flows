@@ -73,7 +73,8 @@ async function main() {
     await tradeTowards(chain, cfg.token, cfg.quote, fair, p0, chunk);
     if (Date.now() / 1000 - lastCrank >= Number(opt["crank-every"])) {
       lastCrank = Date.now() / 1000;
-      await attempt("crank", () => chain.crank());
+      if (opt.send) await attempt("crank", () => chain.crank());
+      else console.log(`${tag}   would crank (dry run)`);
     }
     if (opt.once) break;
     await sleep(Number(opt.tick));

@@ -127,6 +127,8 @@ pub struct Position {
     /// For these, `snap_quote` is the snapshot of `tp_acc`.
     pub take_profit: bool,
     pub tp_round: u32,
+    /// Take-profit proceeds settled when the order was topped up, not yet claimed.
+    pub tp_owed: u128,
 }
 
 /// Fee slices that do not go to LPs, waiting for the next crank.
@@ -183,6 +185,9 @@ pub struct Book {
     /// (updated each crank). The protocol slice is measured against the latter.
     pub hour_volume: u128,
     pub daily_volume: u128,
+    /// (owner, bin, round) -> that owner's open take-profit there, so repeat
+    /// orders top it up instead of creating new positions (bounded storage).
+    pub tp_index: BTreeMap<(String, i32, u32), u64>,
 }
 
 impl Book {
@@ -195,7 +200,7 @@ impl Book {
             pots: Pots::default(), creator: CreatorPool::default(), vault: Vault::default(),
             protocol_pos: BTreeMap::new(), burn_quote: 0, burned: 0, last_crank_ns: 0, launched_ns: 0,
             ref_bin: 0, tp_closed: BTreeMap::new(), vol_bins: 0,
-            hour_volume: 0, daily_volume: 0,
+            hour_volume: 0, daily_volume: 0, tp_index: BTreeMap::new(),
         }
     }
 
@@ -247,7 +252,7 @@ impl Book {
             owner: owner.to_string(), bin, shares: minted,
             snap_quote: b.acc_quote, snap_token: b.acc_token, locked_until_ns,
             creator_weight: weight, snap_cq: self.creator.acc_q, snap_ct: self.creator.acc_t,
-            creator_owed_q: 0, creator_owed_t: 0, take_profit: false, tp_round: 0,
+            creator_owed_q: 0, creator_owed_t: 0, take_profit: false, tp_round: 0, tp_owed: 0,
         };
         let id = self.next_id;
         self.next_id += 1;

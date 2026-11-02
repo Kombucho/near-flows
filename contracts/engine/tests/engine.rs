@@ -540,3 +540,43 @@ fn daily_volume_tracks_trading_and_fades_when_it_stops() {
     }
     assert!(b.daily_volume < busy / 4, "quiet days bring it down: {}", b.daily_volume);
 }
+
+// ---------- merging repeat take-profits ----------
+
+#[test]
+fn repeat_orders_at_the_same_rung_merge_into_one_position() {
+    let mut b = book();
+    let first = b.place_take_profit("alice", 5, UNIT, 0, DAY).unwrap();
+    let second = b.place_take_profit("alice", 5, UNIT, 0, DAY).unwrap();
+    assert_eq!(first, second, "topped up, not a new position");
+    assert_eq!(b.position_assets(first).unwrap(), (2 * UNIT, 0));
+    let bob = b.place_take_profit("bob", 5, UNIT, 0, DAY).unwrap();
+    assert_ne!(bob, first, "other owners keep their own position");
+}
+
+#[test]
+fn topping_up_keeps_earlier_proceeds_exactly_once() {
+    let mut b = book();
+    let id = b.place_take_profit("alice", 5, UNIT, 0, DAY).unwrap();
+    b.swap(Side::Buy, 3_300_000, 0).unwrap(); // fills part of Alice's rung
+    let (left, earned) = b.position_assets(id).unwrap();
+    assert!(earned > 0 && left < UNIT);
+    b.place_take_profit("alice", 5, UNIT, 0, DAY).unwrap(); // top up
+    let (left2, earned2) = b.position_assets(id).unwrap();
+    assert_eq!(earned2, earned, "earlier proceeds kept, not doubled");
+    assert!(left2.abs_diff(left + UNIT) <= 1, "{left2} vs {}", left + UNIT);
+    assert_eq!(b.claim(id, "alice").unwrap().0, earned);
+}
+
+#[test]
+fn launch_day_buys_merge_their_rungs() {
+    let mut b = book(); // launched at 0, 24h window
+    let one = b.buy("ape", 50_000, 0, &[], 3_600 * 1_000_000_000).unwrap();
+    let two = b.buy("ape", 50_000, 0, &[], 7_200 * 1_000_000_000).unwrap();
+    assert_eq!(one.ladder.len(), 4);
+    let ape_positions = b.positions.values().filter(|p| p.owner == "ape").count();
+    // Both buys put rungs at multiples of slightly different prices, but the
+    // shared ones merge, so the count grows far slower than 4 per buy.
+    assert!(ape_positions < 8, "got {ape_positions}");
+    let _ = two;
+}

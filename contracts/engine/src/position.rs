@@ -47,6 +47,7 @@ impl Book {
         p.snap_token = at;
         p.creator_owed_q = 0;
         p.creator_owed_t = 0;
+        p.tp_owed = 0;
         Ok(fees)
     }
 

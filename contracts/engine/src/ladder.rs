@@ -7,6 +7,12 @@ use math::BPS;
 
 use crate::{Book, Error, Side, SwapResult};
 
+const DAY_NS: u64 = 86_400 * 1_000_000_000;
+
+fn round_up_to_day(ns: u64) -> u64 {
+    ns.div_ceil(DAY_NS) * DAY_NS
+}
+
 /// One rung: (price multiple in bps, share of tokens in bps). 15_000 = 1.5x.
 pub type Rung = (u32, u16);
 
@@ -60,7 +66,9 @@ impl Book {
         let swap = self.swap(Side::Buy, quote_in, min_out)?;
         let locked = self.in_launch_window(now_ns);
         let (rungs, until) = if locked {
-            (&LAUNCH_LADDER[..], now_ns + self.cfg.min_creator_lock_ns)
+            // Rounded up to a whole day so one buyer's launch-day rungs share an
+            // unlock time and merge (at most 24h longer than the minimum).
+            (&LAUNCH_LADDER[..], round_up_to_day(now_ns + self.cfg.min_creator_lock_ns))
         } else {
             (ladder, 0)
         };
