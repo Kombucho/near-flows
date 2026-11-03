@@ -459,13 +459,27 @@ fn one_big_trade_pays_an_escalating_fee() {
 }
 
 #[test]
-fn crank_halves_the_volatility_memory() {
+fn volatility_memory_halves_every_ten_minutes() {
     let mut b = dynamic_book();
+    let min = 60 * 1_000_000_000u64;
     b.vol_bins = 40;
-    b.crank(1).unwrap();
+    assert_eq!(b.vol_at(10 * min), 20, "one half-life");
+    assert_eq!(b.vol_at(20 * min), 10, "two half-lives");
+    assert_eq!(b.vol_at(5 * min), 30, "half a half-life (linear in between)");
+    assert_eq!(b.vol_at(6 * 60 * min), 0, "gone after hours");
+    b.touch(10 * min);
+    assert_eq!((b.vol_bins, b.vol_updated_ns), (20, 10 * min));
+    b.touch(5 * min); // time never goes backwards
     assert_eq!(b.vol_bins, 20);
-    b.crank(1 + 3_600 * 1_000_000_000).unwrap();
-    assert_eq!(b.vol_bins, 10);
+}
+
+#[test]
+fn the_fee_is_back_near_base_half_an_hour_after_a_pump() {
+    let mut b = dynamic_book();
+    b.swap(Side::Buy, 10 * UNIT, 0).unwrap(); // a pump: the fee jumps
+    assert!(b.current_fee_bps(0) > 150);
+    let half_hour = 30 * 60 * 1_000_000_000u64;
+    assert!(b.current_fee_bps(half_hour) <= 33, "calm again: {}", b.current_fee_bps(half_hour));
 }
 
 #[test]

@@ -178,9 +178,11 @@ pub struct Book {
     pub ref_bin: i32,
     /// Final `tp_acc` of every take-profit round that sold out: (bin, round) -> acc.
     pub tp_closed: BTreeMap<(i32, u32), u128>,
-    /// Recent volatility in bins crossed. Grows with every swap's movement,
-    /// halves at every crank (hourly), so fees fall back when things calm down.
+    /// Recent volatility in bins crossed. Grows with every swap's movement and
+    /// halves every 10 minutes of real time, so fees fall back soon after a
+    /// burst (Meteora-style). `vol_updated_ns` is when it was last decayed.
     pub vol_bins: u32,
+    pub vol_updated_ns: u64,
     /// Quote volume traded since the last crank, and a smoothed daily volume
     /// (updated each crank). The protocol slice is measured against the latter.
     pub hour_volume: u128,
@@ -199,7 +201,7 @@ impl Book {
             cfg, active: 0, bins: BTreeMap::new(), positions: BTreeMap::new(), next_id: 0,
             pots: Pots::default(), creator: CreatorPool::default(), vault: Vault::default(),
             protocol_pos: BTreeMap::new(), burn_quote: 0, burned: 0, last_crank_ns: 0, launched_ns: 0,
-            ref_bin: 0, tp_closed: BTreeMap::new(), vol_bins: 0,
+            ref_bin: 0, tp_closed: BTreeMap::new(), vol_bins: 0, vol_updated_ns: 0,
             hour_volume: 0, daily_volume: 0, tp_index: BTreeMap::new(),
         }
     }

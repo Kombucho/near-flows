@@ -63,6 +63,7 @@ impl Book {
     pub fn buy(
         &mut self, owner: &str, quote_in: u128, min_out: u128, ladder: &[Rung], now_ns: u64,
     ) -> Result<Buy, Error> {
+        self.touch(now_ns);
         let swap = self.swap(Side::Buy, quote_in, min_out)?;
         let locked = self.in_launch_window(now_ns);
         let (rungs, until) = if locked {

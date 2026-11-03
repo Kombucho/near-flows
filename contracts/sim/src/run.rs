@@ -49,6 +49,7 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, 
     let mut lag = 0;
     for hour in 0..HOURS {
         w.now = hour as u64 * HOUR;
+        w.book.touch(w.now); // fee memory decays with time (10-minute half-life)
         move_fair(r, hour, &mut c);
         event(r, hour, &mut w, &mut c, &mut holders, insider_share);
         noise(r, &mut w, &mut c);

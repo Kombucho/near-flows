@@ -68,6 +68,7 @@ impl Market {
         let now = env::block_timestamp();
         let who = sender.to_string();
         require!(self.book_ref().positions.len() < MAX_POSITIONS, "market full");
+        self.book().touch(now); // decay the fee's volatility memory up to now
         match msg {
             Msg::Buy { min_out, ladder } => {
                 require!(is_quote, "pay with the quote token to buy");

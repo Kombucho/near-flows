@@ -34,7 +34,7 @@ impl Book {
             return Err(Error::TooSoon { next_ns: next });
         }
         self.last_crank_ns = now_ns;
-        self.vol_bins /= 2; // volatility memory fades: halves every crank
+        self.touch(now_ns); // volatility memory fades with time (10-minute half-life)
         // Smoothed daily volume: move 1/24 of the way toward "this hour x 24".
         let target = std::mem::take(&mut self.hour_volume).saturating_mul(24);
         self.daily_volume = if target >= self.daily_volume {

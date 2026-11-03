@@ -69,7 +69,7 @@ pub struct StakerView {
 impl Market {
     pub fn get_config(&self) -> ConfigView {
         let (step, base, active, price, fee) = match &self.book {
-            Some(b) => (b.cfg.step_bps, b.cfg.base_price, b.active, b.price(b.active), b.fee_at(b.active, b.active)),
+            Some(b) => (b.cfg.step_bps, b.cfg.base_price, b.active, b.price(b.active), b.current_fee_bps(near_sdk::env::block_timestamp())),
             None => (0, 0, 0, 0, self.fee_bps),
         };
         ConfigView {

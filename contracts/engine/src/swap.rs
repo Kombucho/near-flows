@@ -12,6 +12,9 @@ use math::PRICE_SCALE;
 
 use crate::{Book, Error};
 
+/// The dynamic fee's volatility memory halves every 10 minutes.
+pub const VOL_HALF_LIFE_NS: u64 = 600 * 1_000_000_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
     Buy,  // pay quote, receive token (walks UP through bins)
@@ -116,13 +119,45 @@ impl Book {
         (std::mem::take(&mut self.pots.protocol_quote), std::mem::take(&mut self.pots.protocol_token))
     }
 
+    /// Volatility memory as it would be at `now_ns`: halves every 10 minutes.
+    /// Whole half-lives are applied exactly; the leftover part of one is
+    /// approximated linearly (exact at 0 and at a full half-life).
+    pub fn vol_at(&self, now_ns: u64) -> u32 {
+        let elapsed = now_ns.saturating_sub(self.vol_updated_ns);
+        let halvings = elapsed / VOL_HALF_LIFE_NS;
+        if halvings >= 32 {
+            return 0;
+        }
+        let v = (self.vol_bins >> halvings) as u64;
+        let rem = elapsed % VOL_HALF_LIFE_NS;
+        (v - v * rem / (2 * VOL_HALF_LIFE_NS)) as u32
+    }
+
+    /// Bring the volatility memory up to `now_ns`. Every action that has a
+    /// clock calls this first (buy, crank, and the contract before any swap).
+    pub fn touch(&mut self, now_ns: u64) {
+        if now_ns > self.vol_updated_ns {
+            self.vol_bins = self.vol_at(now_ns);
+            self.vol_updated_ns = now_ns;
+        }
+    }
+
+    /// The fee a small trade would pay right now (for views and UIs).
+    pub fn current_fee_bps(&self, now_ns: u64) -> u16 {
+        self.fee_with_vol(self.vol_at(now_ns), 0, 0)
+    }
+
     /// Fee in bps for filling at `bin` during a swap that started at `start`.
     pub fn fee_at(&self, start: i32, bin: i32) -> u16 {
+        self.fee_with_vol(self.vol_bins, start, bin)
+    }
+
+    fn fee_with_vol(&self, vol: u32, start: i32, bin: i32) -> u16 {
         let c = &self.cfg;
         if c.dyn_k == 0 {
             return c.fee_bps;
         }
-        let movement = self.vol_bins as u64 + (bin - start).unsigned_abs() as u64;
+        let movement = vol as u64 + (bin - start).unsigned_abs() as u64;
         let extra = (c.dyn_k as u64).saturating_mul(movement.saturating_mul(movement));
         (c.fee_bps as u64 + extra).min(c.max_fee_bps as u64) as u16
     }
