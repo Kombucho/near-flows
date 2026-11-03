@@ -627,3 +627,51 @@ fn protocol_positions_cannot_be_settled() {
     let pid = *b.protocol_pos.values().next().unwrap();
     assert_eq!(b.settle(pid, 0), Err(Error::NotOwner));
 }
+
+// ---------- LP across a range (two-way or lock-in) ----------
+
+#[test]
+fn spread_picks_evenly_spaced_bins() {
+    assert_eq!(engine::spread(10, 20, 3), vec![10, 15, 20]);
+    assert_eq!(engine::spread(5, 7, 10), vec![5, 6, 7], "never more bins than exist");
+    assert_eq!(engine::spread(4, 4, 5), vec![4]);
+}
+
+#[test]
+fn two_way_range_earns_on_every_pass() {
+    let mut b = book();
+    let ids = b.lp_range("alice", 5, 9, 5, 5 * UNIT, 0, false, 0, 0).unwrap();
+    assert_eq!(ids.len(), 5);
+    // Price swings up through Alice's range and back down, three times.
+    for _ in 0..3 {
+        b.swap(Side::Buy, 9 * UNIT, 0).unwrap();
+        b.swap(Side::Sell, 9 * UNIT, 0).unwrap();
+    }
+    let earned_q: u128 = ids.iter().map(|i| b.claimable(*i).unwrap().0).sum();
+    let earned_t: u128 = ids.iter().map(|i| b.claimable(*i).unwrap().1).sum();
+    assert!(earned_q > 0 && earned_t > 0, "fees from both directions: {earned_q} quote, {earned_t} token");
+    // After the round trips Alice is back in tokens (two-way), unlike lock-in.
+    let tokens_back: u128 = ids.iter().map(|i| b.position_assets(*i).unwrap().0).sum();
+    assert!(tokens_back > 4 * UNIT, "two-way liquidity converts back on the way down");
+}
+
+#[test]
+fn lock_in_range_keeps_its_proceeds() {
+    let mut b = book();
+    let ids = b.lp_range("alice", 5, 9, 5, 5 * UNIT, 0, true, 0, 0).unwrap();
+    b.swap(Side::Buy, 9 * UNIT, 0).unwrap();
+    b.swap(Side::Sell, 9 * UNIT, 0).unwrap();
+    let (tokens, quote): (u128, u128) = ids.iter().map(|i| b.position_assets(*i).unwrap())
+        .fold((0, 0), |(t, q), (pt, pq)| (t + pt, q + pq));
+    assert!(quote > 5 * UNIT && tokens < UNIT / 10, "sold and kept: {tokens} tokens, {quote} quote");
+}
+
+#[test]
+fn a_range_around_the_price_splits_coins_above_and_quote_below() {
+    let mut b = book(); // active bin 0
+    let ids = b.lp_range("alice", -4, 4, 9, UNIT, UNIT, false, 0, 0).unwrap();
+    let bins: Vec<i32> = ids.iter().map(|i| b.positions[i].bin).collect();
+    assert!(bins.iter().filter(|x| **x > 0).count() >= 3 && bins.iter().filter(|x| **x < 0).count() >= 3);
+    assert_eq!(b.lp_range("alice", 1, 5, 21, UNIT, 0, false, 0, 0), Err(Error::BadRange));
+    assert_eq!(b.lp_range("alice", 1, 5, 3, 0, UNIT, true, 0, 0), Err(Error::WrongSide), "lock-in takes coins only");
+}

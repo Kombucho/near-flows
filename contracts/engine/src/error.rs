@@ -21,4 +21,6 @@ pub enum Error {
     BadVote,
     /// Staking, voting and the creator slice exist only for native coins.
     NotNative,
+    /// Range must have from <= to and 1..=20 bins.
+    BadRange,
 }

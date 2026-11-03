@@ -54,6 +54,9 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, 
         event(r, hour, &mut w, &mut c, &mut holders, insider_share);
         noise(r, &mut w, &mut c);
         arbitrage(&mut w, &mut c);
+        for h in holders.iter_mut().filter(|h| h.strategy == Strategy::RangeAuto) {
+            w.autopilot(h);
+        }
         w.crank();
         if hour % 24 == 0 {
             w.audit();
@@ -80,16 +83,13 @@ fn make_holders(r: &Regime, w: &mut World, rng: &mut Rng, insider_share: f64) ->
     for (i, wt) in weights.iter().enumerate() {
         let deposit = (1.0 - insider_share) * RAISED * wt / total;
         let tokens = near(SUPPLY / 2.0 * deposit / RAISED);
-        let mut h = Holder { name: format!("h{i}"), strategy: STRATEGIES[i % 4], deposit, wallet_t: tokens, wallet_q: 0, ladder: vec![] };
-        if matches!(h.strategy, Strategy::Ladder | Strategy::LadderStake) {
-            w.ladder(&mut h, tokens, &DEFAULT_LADDER); // places 4 x 12.5% = 50%
+        let mut h = Holder { name: format!("h{i}"), strategy: STRATEGIES[i % 4], deposit, wallet_t: tokens, wallet_q: 0, ladder: vec![], bids: vec![] };
+        match h.strategy {
+            Strategy::Spot => {}
+            Strategy::LockIn => w.lp_range(&mut h, tokens / 2, true),
+            Strategy::Range | Strategy::RangeAuto => w.lp_range(&mut h, tokens / 2, false),
         }
-        if matches!(h.strategy, Strategy::Stake | Strategy::LadderStake) {
-            let amount = h.wallet_t;
-            w.stake(&mut h, amount);
-            let votes = [[7_778, 2_222, 0], [0, 10_000, 0], [10_000, 0, 0], [5_000, 0, 5_000]];
-            let _ = w.book.set_vote(&h.name, votes[rng.pick(4)]);
-        }
+        let _ = (rng.f(), &DEFAULT_LADDER); // keep the random stream identical across strategy sets
         out.push(h);
     }
     out

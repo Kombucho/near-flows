@@ -17,12 +17,12 @@ pub fn to_f(x: u128) -> f64 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Strategy {
-    Spot,        // hold everything in the wallet
-    Ladder,      // 50% wallet, 50% take-profit ladder
-    Stake,       // stake everything
-    LadderStake, // 50% ladder, 50% staked
+    Spot,      // hold everything in the wallet
+    LockIn,    // 50% as one-way liquidity over 1.2x..3x (sold stays sold)
+    Range,     // 50% as two-way liquidity over 1.2x..3x (earns every pass)
+    RangeAuto, // Range + autopilot: recycle sold-out bins into bids below the price
 }
-pub const STRATEGIES: [Strategy; 4] = [Strategy::Spot, Strategy::Ladder, Strategy::Stake, Strategy::LadderStake];
+pub const STRATEGIES: [Strategy; 4] = [Strategy::Spot, Strategy::LockIn, Strategy::Range, Strategy::RangeAuto];
 
 pub struct Holder {
     pub name: String,
@@ -30,7 +30,8 @@ pub struct Holder {
     pub deposit: f64, // NEAR put into the auction
     pub wallet_t: u128,
     pub wallet_q: u128,
-    pub ladder: Vec<u64>,
+    pub ladder: Vec<u64>, // original range positions (asks)
+    pub bids: Vec<u64>,   // autopilot: proceeds recycled as bids below the price
 }
 
 /// Counters for things that should never happen.
@@ -132,9 +133,59 @@ impl World {
         }
     }
 
+    /// Put `tokens` from the wallet into the range 1.2x..3x above the price.
+    pub fn lp_range(&mut self, h: &mut Holder, tokens: u128, lock_in: bool) {
+        let a = self.book.active;
+        // SIM_RANGE=tight: 1.02x..1.3x (bins +2..+26); default 1.2x..3x (bins +19..+111).
+        let (lo, hi) = if std::env::var("SIM_RANGE").as_deref() == Ok("tight") { (2, 26) } else { (19, 111) };
+        match self.book.lp_range(&h.name, a + lo, a + hi, 10, tokens, 0, lock_in, 0, self.now) {
+            Ok(ids) => {
+                h.wallet_t -= tokens;
+                self.contract_t += tokens;
+                h.ladder.extend(ids);
+            }
+            Err(e) => self.check(Err(e), "lp_range"),
+        }
+    }
+
+    /// AUTOPILOT: a range bin that has fully sold (all quote) while the price
+    /// is well above it is withdrawn, and the proceeds go back in as two-way
+    /// bids just below the current price. Profits buy dips; the original bag
+    /// is never used to chase the price.
+    pub fn autopilot(&mut self, h: &mut Holder) {
+        let active = self.book.active;
+        let mut recycled = 0u128;
+        let mut keep = Vec::new();
+        for id in std::mem::take(&mut h.ladder) {
+            let (bin, (t, q)) = match (self.book.positions.get(&id), self.book.position_assets(id)) {
+                (Some(p), Ok(a)) => (p.bin, a),
+                _ => continue,
+            };
+            if t == 0 && q > 0 && active > bin + 5 {
+                if let Ok(w) = self.book.withdraw(id, &h.name, self.now) {
+                    let (wt, wq) = (w.token + w.fee_token, w.quote + w.fee_quote);
+                    self.contract_t -= wt; self.contract_q -= wq;
+                    h.wallet_t += wt; recycled += wq;
+                    continue;
+                }
+            }
+            keep.push(id);
+        }
+        h.ladder = keep;
+        if recycled == 0 {
+            return;
+        }
+        match self.book.lp_range(&h.name, active - 10, active - 1, 5, 0, recycled, false, 0, self.now) {
+            Ok(ids) => { self.contract_q += recycled; h.bids.extend(ids); }
+            Err(_) => h.wallet_q += recycled, // nowhere to place: keep it
+        }
+    }
+
     /// Close every ladder position and collect dividends into the wallet.
     pub fn close_all(&mut self, h: &mut Holder) {
-        for id in std::mem::take(&mut h.ladder) {
+        let mut all = std::mem::take(&mut h.ladder);
+        all.append(&mut h.bids);
+        for id in all {
             match self.book.withdraw(id, &h.name, self.now) {
                 Ok(w) => {
                     let (t, q) = (w.token + w.fee_token, w.quote + w.fee_quote);
@@ -163,7 +214,7 @@ impl World {
     /// Everything a holder could walk away with, in NEAR, valued at `p`.
     pub fn holder_value(&self, h: &Holder, p: f64) -> f64 {
         let mut v = to_f(h.wallet_q) + to_f(h.wallet_t) * p;
-        for id in &h.ladder {
+        for id in h.ladder.iter().chain(h.bids.iter()) {
             if let Ok((t, q)) = self.book.position_assets(*id) {
                 v += to_f(q) + to_f(t) * p;
             }
