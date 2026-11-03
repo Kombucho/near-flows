@@ -37,6 +37,14 @@ pub struct Bin {
     /// Increases each time the layer sells out completely. Orders placed
     /// after that start a new round, so they never share earlier proceeds.
     pub tp_round: u32,
+    /// One-way BUY layer (mirror of the take-profit layer): quote waiting to
+    /// buy at this price. Sellers fill it first; the coins they hand over go to
+    /// the bidders' drawer (`bid_acc`), never back into the bin, so a later
+    /// pump can't sell them back.
+    pub bid_quote: u128,
+    pub bid_shares: u128,
+    pub bid_acc: u128, // coins earned per share (fills + maker fee slice)
+    pub bid_round: u32,
 }
 
 /// Fixed at creation. None of this can change afterwards.
@@ -127,8 +135,15 @@ pub struct Position {
     /// For these, `snap_quote` is the snapshot of `tp_acc`.
     pub take_profit: bool,
     pub tp_round: u32,
-    /// Take-profit proceeds settled when the order was topped up, not yet claimed.
+    /// One-way proceeds settled when the order was topped up, not yet claimed
+    /// (quote for take-profits, coins for bids).
     pub tp_owed: u128,
+    /// true = a one-way BID (buy liquidity below the price). For these,
+    /// `snap_quote` is the snapshot of `bid_acc` and `tp_round` is the bid round.
+    pub bid: bool,
+    /// Wheel: once this bid has bought coins, `rearm` places them as one-way
+    /// sell liquidity at this preset (index into WHEEL_EXITS; 0 = none).
+    pub rearm: u8,
 }
 
 /// Fee slices that do not go to LPs, waiting for the next crank.
@@ -190,6 +205,9 @@ pub struct Book {
     /// (owner, bin, round) -> that owner's open take-profit there, so repeat
     /// orders top it up instead of creating new positions (bounded storage).
     pub tp_index: BTreeMap<(String, i32, u32), u64>,
+    /// Same as tp_closed / tp_index, for the one-way bid layer.
+    pub bid_closed: BTreeMap<(i32, u32), u128>,
+    pub bid_index: BTreeMap<(String, i32, u32), u64>,
 }
 
 impl Book {
@@ -203,6 +221,7 @@ impl Book {
             protocol_pos: BTreeMap::new(), burn_quote: 0, burned: 0, last_crank_ns: 0, launched_ns: 0,
             ref_bin: 0, tp_closed: BTreeMap::new(), vol_bins: 0, vol_updated_ns: 0,
             hour_volume: 0, daily_volume: 0, tp_index: BTreeMap::new(),
+            bid_closed: BTreeMap::new(), bid_index: BTreeMap::new(),
         }
     }
 
@@ -254,7 +273,7 @@ impl Book {
             owner: owner.to_string(), bin, shares: minted,
             snap_quote: b.acc_quote, snap_token: b.acc_token, locked_until_ns,
             creator_weight: weight, snap_cq: self.creator.acc_q, snap_ct: self.creator.acc_t,
-            creator_owed_q: 0, creator_owed_t: 0, take_profit: false, tp_round: 0, tp_owed: 0,
+            creator_owed_q: 0, creator_owed_t: 0, take_profit: false, tp_round: 0, tp_owed: 0, bid: false, rearm: 0,
         };
         let id = self.next_id;
         self.next_id += 1;

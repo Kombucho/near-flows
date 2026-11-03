@@ -25,6 +25,10 @@ impl Book {
             // Fill proceeds (in the drawer) + maker fees, plus any creator slice.
             return Ok((self.tp_earned(p) + creator_q, creator_t));
         }
+        if p.bid {
+            // Coins bought (in the drawer) + maker fees.
+            return Ok((creator_q, self.bid_earned(p) + creator_t));
+        }
         let q = owed(p.shares, b.acc_quote, p.snap_quote) + creator_q;
         let t = owed(p.shares, b.acc_token, p.snap_token) + creator_t;
         Ok((q, t))
@@ -41,7 +45,13 @@ impl Book {
         self.settle_creator(id);
         let p = &self.positions[&id];
         let b = &self.bins[&p.bin];
-        let (aq, at) = if p.take_profit { (self.tp_acc_for(p), 0) } else { (b.acc_quote, b.acc_token) };
+        let (aq, at) = if p.take_profit {
+            (self.tp_acc_for(p), 0)
+        } else if p.bid {
+            (self.bid_acc_for(p), 0)
+        } else {
+            (b.acc_quote, b.acc_token)
+        };
         let p = self.positions.get_mut(&id).expect("exists");
         p.snap_quote = aq;
         p.snap_token = at;
@@ -59,6 +69,9 @@ impl Book {
         if p.take_profit {
             return Ok((self.tp_remaining(p) + ft, fq));
         }
+        if p.bid {
+            return Ok((ft, self.bid_remaining(p) + fq));
+        }
         let token = mul_div_down(b.token, p.shares, b.shares);
         let quote = mul_div_down(b.quote, p.shares, b.shares);
         Ok((token + ft, quote + fq))
@@ -75,6 +88,11 @@ impl Book {
         }
         if p.creator_weight > 0 {
             self.drop_creator_weight(id);
+        }
+        if self.positions[&id].bid {
+            let (fee_quote, fee_token) = self.claim(id, caller)?;
+            let (quote, _) = self.bid_close(id);
+            return Ok(Withdrawal { token: 0, quote, fee_quote, fee_token });
         }
         if self.positions[&id].take_profit {
             // Creator slice first (claim), then the order itself: unsold tokens back,
@@ -111,13 +129,25 @@ impl Book {
     /// that has fully sold and is not locked is also closed, freeing storage.
     /// The protocol's own positions cannot be settled.
     pub fn settle(&mut self, id: u64, now_ns: u64) -> Result<Settlement, Error> {
-        let owner = self.positions.get(&id).ok_or(Error::NoPosition)?.owner.clone();
+        let p = self.positions.get(&id).ok_or(Error::NoPosition)?;
+        let (owner, wheel) = (p.owner.clone(), p.bid && p.rearm > 0);
         if owner == crate::book::PROTOCOL {
             return Err(Error::NotOwner);
         }
+        if wheel {
+            // A wheel bid's coins are not paid out: they become sell liquidity above.
+            self.rearm(id, now_ns)?;
+            let p = &self.positions[&id];
+            if self.bid_remaining(p) == 0 && now_ns >= p.locked_until_ns {
+                let w = self.withdraw(id, &owner, now_ns)?; // fully used: close it
+                return Ok(Settlement { owner, quote: w.quote + w.fee_quote, token: w.token + w.fee_token, closed: true });
+            }
+            return Ok(Settlement { owner, quote: 0, token: 0, closed: false });
+        }
         let (mut quote, mut token) = self.claim(id, &owner)?;
         let p = &self.positions[&id];
-        let done = p.take_profit && self.tp_remaining(p) == 0 && now_ns >= p.locked_until_ns;
+        let sold_out = (p.take_profit && self.tp_remaining(p) == 0) || (p.bid && p.rearm == 0 && self.bid_remaining(p) == 0);
+        let done = sold_out && now_ns >= p.locked_until_ns;
         if done {
             let w = self.withdraw(id, &owner, now_ns)?;
             quote += w.quote + w.fee_quote;

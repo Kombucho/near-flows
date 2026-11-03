@@ -42,6 +42,7 @@ impl Book {
             owner: owner.to_string(), bin, shares: minted, snap_quote: b.tp_acc, snap_token: 0,
             locked_until_ns, creator_weight: weight, snap_cq: self.creator.acc_q, snap_ct: self.creator.acc_t,
             creator_owed_q: 0, creator_owed_t: 0, take_profit: true, tp_round: b.tp_round, tp_owed: 0,
+            bid: false, rearm: 0,
         };
         let id = self.next_id;
         self.next_id += 1;

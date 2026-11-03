@@ -25,6 +25,11 @@ pub struct Outcome {
     pub protocol_vs_hold: f64, // protocol liquidity value / just holding its launch assets
     pub volume: f64,
     pub event_pnl: f64, // insider, sniper or sandwich bot profit in NEAR
+    /// Buyers who enter at hour 25 with NEAR: end value / NEAR put in, per
+    /// strategy [hold NEAR, market, market+lock-in, wheel, wheel tight].
+    pub buyers: [f64; 5],
+    /// Share of wheel buyers whose bids never filled at all (still all NEAR).
+    pub wheel_never_filled: f64,
     pub lag_hours: u32, // hours the book was >25% away from fair value
     pub faults: Faults,
 }
@@ -48,6 +53,7 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, 
     let staked0: f64 = holders.iter().map(|h| to_f(w.book.vault.assets(&h.name).0)).sum::<f64>() * p0;
     let mut lag = 0;
     let mut hist: Vec<i32> = Vec::new();
+    let mut buyers: Vec<Buyer> = Vec::new();
     for hour in 0..HOURS {
         w.now = hour as u64 * HOUR;
         w.book.touch(w.now); // fee memory decays with time (10-minute half-life)
@@ -65,6 +71,15 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, 
             }
         }
         w.crank();
+        // Staggered entry: one or two small buyers per hour between hours 25 and 72,
+        // so buyers don't move the price themselves (a fair comparison).
+        if (BUYERS_ENTER..BUYERS_ENTER + 48).contains(&hour) && buyers.len() < 80 {
+            let mut fresh = make_buyers(&mut w, &mut c.rng, buyers.len(), 2);
+            buyers.append(&mut fresh);
+        }
+        if hour >= BUYERS_ENTER {
+            keeper_settle(&mut w, &mut buyers);
+        }
         if hour % 24 == 0 {
             w.audit();
         }
@@ -80,7 +95,90 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, 
     }
     w.now = HOURS as u64 * HOUR;
     w.audit();
-    finish(r, &w, &c, &holders, p0, staked0, lag)
+    let mut o = finish(r, &w, &c, &holders, p0, staked0, lag);
+    (o.buyers, o.wheel_never_filled) = score_buyers(&w, &buyers, w.price().min(c.fair));
+    o
+}
+
+const BUYERS_ENTER: u32 = 25; // after the 24h launch window
+const BUYER_KINDS: usize = 5;
+
+struct Buyer { name: String, kind: usize, deposit: u128, wallet_q: u128, wallet_t: u128, ever_filled: bool }
+
+/// `count` new buyers of 0.5..2 NEAR each, cycling through the five strategies.
+fn make_buyers(w: &mut World, rng: &mut Rng, first: usize, count: usize) -> Vec<Buyer> {
+    let mut out = Vec::new();
+    for i in first..first + count {
+        let deposit = near(0.5 + 1.5 * rng.f());
+        let mut b = Buyer { name: format!("b{i}"), kind: i % BUYER_KINDS, deposit, wallet_q: deposit, wallet_t: 0, ever_filled: false };
+        match b.kind {
+            0 => {} // hold NEAR
+            1 | 2 => {
+                if let Some((kept, used, _)) = w.buy(&b.name, deposit, &[], 1.0) {
+                    b.wallet_q -= used;
+                    b.wallet_t += kept;
+                    b.ever_filled = true;
+                    if b.kind == 2 {
+                        if let Ok((_, placed)) = w.book.place_ladder(&b.name, kept, &DEFAULT_LADDER, 0, w.now) {
+                            b.wallet_t -= placed;
+                            w.contract_t += placed;
+                        }
+                    }
+                }
+            }
+            k => {
+                let (dips, preset): (&[(u32, u16)], u8) = if k == 3 { (&[(9_000, 5_000), (8_000, 5_000)], 1) } else { (&[(9_500, 5_000), (9_000, 5_000)], 2) };
+                if w.book.place_wheel(&b.name, deposit, dips, preset, w.now).is_ok() {
+                    b.wallet_q -= deposit;
+                    w.contract_q += deposit;
+                }
+            }
+        }
+        out.push(b);
+    }
+    out
+}
+
+/// The keeper's job each hour: settle every buyer position with something to do
+/// (wheel bids re-arm into sell liquidity; filled sells pay out to the wallet).
+fn keeper_settle(w: &mut World, buyers: &mut [Buyer]) {
+    for id in w.book.settleable(1_000) {
+        let Some(owner) = w.book.positions.get(&id).map(|p| p.owner.clone()) else { continue };
+        let Some(b) = buyers.iter_mut().find(|b| b.name == owner) else { continue };
+        if w.book.positions[&id].bid {
+            b.ever_filled = true;
+        }
+        if let Ok(s) = w.book.settle(id, w.now) {
+            b.wallet_q += s.quote;
+            b.wallet_t += s.token;
+            w.contract_q -= s.quote;
+            w.contract_t -= s.token;
+        }
+    }
+}
+
+fn score_buyers(w: &World, buyers: &[Buyer], p: f64) -> ([f64; 5], f64) {
+    let mut sum = [0.0; 5];
+    let mut n = [0usize; 5];
+    let (mut wheels, mut never) = (0, 0);
+    for b in buyers {
+        let mut v = to_f(b.wallet_q) + to_f(b.wallet_t) * p;
+        for (id, pos) in &w.book.positions {
+            if pos.owner == b.name {
+                if let Ok((t, q)) = w.book.position_assets(*id) {
+                    v += to_f(q) + to_f(t) * p;
+                }
+            }
+        }
+        sum[b.kind] += v / to_f(b.deposit);
+        n[b.kind] += 1;
+        if b.kind >= 3 {
+            wheels += 1;
+            if !b.ever_filled { never += 1; }
+        }
+    }
+    let avg = [0, 1, 2, 3, 4].map(|k| if n[k] > 0 { sum[k] / n[k] as f64 } else { f64::NAN });
+    (avg, if wheels > 0 { never as f64 / wheels as f64 } else { 0.0 })
 }
 
 fn make_holders(r: &Regime, w: &mut World, rng: &mut Rng, insider_share: f64) -> Vec<Holder> {
@@ -241,5 +339,6 @@ fn finish(r: &Regime, w: &World, c: &Ctx, holders: &[Holder], p0: f64, staked0: 
         burned_pct: to_f(w.book.burned) / SUPPLY * 100.0,
         protocol_vs_hold: protocol / hold,
         volume: to_f(w.volume_q), event_pnl, lag_hours: lag, faults: w.faults.clone(),
+        buyers: [f64::NAN; 5], wheel_never_filled: 0.0,
     }
 }

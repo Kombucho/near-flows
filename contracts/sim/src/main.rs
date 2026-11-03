@@ -28,8 +28,14 @@ fn main() {
         println!("- {}: {}", r.name, r.what);
     }
     println!();
+    if std::env::var("SIM_BUYERS").is_ok() {
+        println!("BUYERS: 80 small buyers (0.5-2 NEAR) enter between hours 25 and 72. Cells: end value / NEAR in, median [10th-90th].");
+        println!("| regime | fair x | hold NEAR | market buy | market + lock-in | wheel 0.9/0.8 | wheel tight 0.95/0.9 | best wheel - market | wheel never filled | faults |");
+        println!("|---|---|---|---|---|---|---|---|---|---|");
+    } else {
     println!("| regime | fair x | book x | spot | lock-in | range | range+trend switch | div yield | burned | protocol vs hold | event PnL (NEAR) | lag h | faults |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    }
     let mut csv = String::from("regime,seed,fair_mult,book_mult,spot,ladder,stake,ladder_stake,div_yield,burned_pct,protocol_vs_hold,volume,event_pnl,lag_hours,insolvent,unexpected,panicked\n");
     let mut problems = Vec::new();
     let only = std::env::var("SIM_ONLY").ok();
@@ -95,6 +101,12 @@ fn fmt(x: f64) -> String {
 fn row(name: &str, o: &[Outcome], panics: u32) -> String {
     let col = |f: &dyn Fn(&Outcome) -> f64| q(o.iter().map(f).collect());
     let faults: u32 = o.iter().map(|x| x.faults.insolvent + x.faults.unexpected).sum::<u32>() + panics;
+    if std::env::var("SIM_BUYERS").is_ok() {
+        return format!("| {name} | {} | {} | {} | {} | {} | {} | {} | {}% | {faults} |",
+            col(&|x| x.fair_mult), col(&|x| x.buyers[0]), col(&|x| x.buyers[1]), col(&|x| x.buyers[2]),
+            col(&|x| x.buyers[3]), col(&|x| x.buyers[4]), col(&|x| x.buyers[3].max(x.buyers[4]) - x.buyers[1]),
+            col(&|x| x.wheel_never_filled * 100.0));
+    }
     format!("| {name} | {} | {} | {} | {} | {} | {} | {} | {}% | {} | {} | {} | {faults} |",
         col(&|x| x.fair_mult), col(&|x| x.book_mult),
         col(&|x| x.cohort[0]), col(&|x| x.cohort[1]), col(&|x| x.cohort[2]), col(&|x| x.cohort[3]),

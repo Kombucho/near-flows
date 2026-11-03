@@ -675,3 +675,80 @@ fn a_range_around_the_price_splits_coins_above_and_quote_below() {
     assert_eq!(b.lp_range("alice", 1, 5, 21, UNIT, 0, false, 0, 0), Err(Error::BadRange));
     assert_eq!(b.lp_range("alice", 1, 5, 3, 0, UNIT, true, 0, 0), Err(Error::WrongSide), "lock-in takes coins only");
 }
+
+// ---------- one-way bids and the Wheel ----------
+
+#[test]
+fn a_filled_bid_keeps_its_coins_through_the_pump() {
+    let mut b = book();
+    let id = b.place_bid("alice", -2, UNIT, 0, 0, 0).unwrap();
+    b.swap(Side::Sell, 3 * UNIT, 0).unwrap(); // dump through bin -2: Alice's bid buys
+    let (coins, quote_left) = b.position_assets(id).unwrap();
+    assert!(coins > UNIT, "bought ~1/0.98 coins per quote plus maker fee: {coins}");
+    assert_eq!(quote_left, 0);
+    b.swap(Side::Buy, 9 * UNIT, 0).unwrap(); // pump back up through bin -2
+    assert_eq!(b.position_assets(id).unwrap(), (coins, 0), "the pump can't sell them back");
+}
+
+#[test]
+fn sellers_hit_one_way_bids_before_lp_quote() {
+    let mut b = book();
+    b.place_bid("alice", -1, UNIT / 2, 0, 0, 0).unwrap();
+    b.swap(Side::Sell, UNIT / 4, 0).unwrap();
+    assert!(b.bins[&-1].bid_quote < UNIT / 2, "bid layer used first");
+    assert_eq!(b.bins[&-1].quote, UNIT, "LP quote untouched");
+}
+
+#[test]
+fn the_wheel_buys_the_dip_then_sells_above_and_keeps_it() {
+    let mut b = book();
+    let start_quote = 2 * UNIT;
+    let ids = b.place_wheel("alice", start_quote, &[(9_900, 5_000), (9_800, 5_000)], 1, 0).unwrap();
+    assert_eq!(ids.len(), 2);
+    b.swap(Side::Sell, 4 * UNIT, 0).unwrap(); // the dip fills both bids
+    for id in &ids { b.settle(*id, 0).unwrap(); } // keeper: rearm into sell liquidity
+    let asks: Vec<u64> = b.positions.iter().filter(|(_, p)| p.owner == "alice" && p.take_profit).map(|(i, _)| *i).collect();
+    assert!(!asks.is_empty(), "bought coins now sit as one-way asks above");
+    b.swap(Side::Buy, 30 * UNIT, 0).unwrap(); // the rebound fills them
+    let mut got = 0u128;
+    for id in asks { got += b.settle(id, 0).unwrap().quote; }
+    assert!(got > start_quote, "round trip ended with more quote: {got} vs {start_quote}");
+    // Dump again. Alice's sold liquidity is already paid out, so it can't be touched.
+    // The only thing a dump can do is fill whatever part of her dip bids was still
+    // waiting: that is the wheel buying the dip again (the keeper re-arms it next).
+    b.swap(Side::Sell, 30 * UNIT, 0).unwrap();
+    assert!(b.positions.values().all(|p| p.owner != "alice" || p.bid), "no exposed sell liquidity left");
+}
+
+#[test]
+fn settle_on_a_wheel_bid_rearms_instead_of_paying() {
+    let mut b = book();
+    let id = b.place_bid("alice", -2, UNIT, 1, 0, 0).unwrap();
+    b.swap(Side::Sell, 3 * UNIT, 0).unwrap();
+    let s = b.settle(id, 0).unwrap();
+    assert_eq!((s.quote, s.token), (0, 0), "nothing paid out");
+    assert!(b.positions.values().any(|p| p.owner == "alice" && p.take_profit), "coins re-armed as asks");
+}
+
+#[test]
+fn solvent_with_bids_wheels_and_settles_over_4000_random_actions() {
+    let mut b = book();
+    let mut rng = Lcg(2026);
+    let (mut q_bal, mut t_bal) = (3 * UNIT, 3 * UNIT);
+    for step in 0..4_000u64 {
+        let who = ["a", "b", "c"][(rng.next() % 3) as usize];
+        let amt = rng.next() as u128 % 400_000 + 1;
+        match rng.next() % 6 {
+            0 | 1 => if let Ok(r) = b.swap(Side::Buy, amt, 0) { q_bal += r.used; t_bal -= r.out; },
+            2 | 3 => if let Ok(r) = b.swap(Side::Sell, amt, 0) { t_bal += r.used; q_bal -= r.out; },
+            4 => if b.place_wheel(who, amt, &[(9_800, 5_000), (9_500, 5_000)], 1 + (rng.next() % 2) as u8, 0).is_ok() { q_bal += amt; },
+            _ => for id in b.settleable(5) {
+                if let Ok(s) = b.settle(id, step) { q_bal -= s.quote; t_bal -= s.token; }
+            },
+        }
+        if step % 200 == 0 {
+            let (oq, ot) = b.obligations();
+            assert!(oq <= q_bal && ot <= t_bal, "step {step}: owes ({oq},{ot}) holds ({q_bal},{t_bal})");
+        }
+    }
+}

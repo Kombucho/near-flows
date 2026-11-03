@@ -170,7 +170,8 @@ impl Book {
             // Buyers can take both layers: take-profit orders and LP tokens.
             Side::Buy => Box::new(self.bins.range(self.active..).filter(|(_, b)| b.token + b.tp_token > 0).map(|(k, b)| (*k, b.token + b.tp_token))),
             // Sellers only ever see the LP layer's quote. Take-profit proceeds are invisible.
-            Side::Sell => Box::new(self.bins.range(..=self.active).rev().filter(|(_, b)| b.quote > 0).map(|(k, b)| (*k, b.quote))),
+            // Sellers can hit both: one-way bids (filled first) and LP quote.
+            Side::Sell => Box::new(self.bins.range(..=self.active).rev().filter(|(_, b)| b.quote + b.bid_quote > 0).map(|(k, b)| (*k, b.quote + b.bid_quote))),
         }
     }
 
@@ -252,15 +253,26 @@ impl Book {
     }
 
     fn apply_sell(&mut self, s: &Step) {
-        let fee = self.take_protocol(s.fee, false);
+        // One-way bids are filled first; they receive the coins sold into them
+        // plus the LP slice of their part of the fee (they are the makers).
+        let bid_quote = self.bins[&s.bin].bid_quote;
+        let x = split_buy(s, bid_quote); // same pro-rata split, mirrored sides
+        if x.out_tp > 0 {
+            let fee_b = self.take_protocol(x.fee_tp, false);
+            let fb = split_fee(fee_b, self.cfg.shares);
+            self.pots.pot_token += fb.pot;
+            self.pots.creator_token += fb.creator;
+            self.bid_fill(s.bin, x.out_tp, x.net_tp + fb.lps);
+        }
+        let fee = self.take_protocol(x.fee_lp, false);
         let mut f = split_fee(fee, self.cfg.shares);
         let b = self.bins.get_mut(&s.bin).expect("planned bin exists");
         if b.shares == 0 {
             f.pot += f.lps;
             f.lps = 0;
         }
-        b.quote -= s.out;
-        b.token += s.net;
+        b.quote -= x.out_lp;
+        b.token += x.net_lp;
         b.acc_token = accrue(b.acc_token, f.lps, b.shares);
         self.pots.pot_token += f.pot;
         self.pots.creator_token += f.creator;

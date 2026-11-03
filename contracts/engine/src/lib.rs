@@ -4,6 +4,7 @@
 //! Keeping the logic here means we can test and simulate it on a laptop.
 
 mod audit;
+mod bid;
 mod book;
 mod crank;
 mod creator;
@@ -16,6 +17,7 @@ mod swap;
 mod tp;
 mod vault;
 
+pub use bid::WHEEL_EXITS;
 pub use book::{Bin, Book, Config, CreatorPool, Pots, Position, PROTOCOL};
 pub use crank::CrankReport;
 pub use error::Error;
