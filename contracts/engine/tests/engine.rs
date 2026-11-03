@@ -594,3 +594,36 @@ fn launch_day_buys_merge_their_rungs() {
     assert!(ape_positions < 8, "got {ape_positions}");
     let _ = two;
 }
+
+// ---------- settle: payouts anyone can trigger, only to the owner ----------
+
+#[test]
+fn settle_pays_the_owner_and_closes_a_sold_out_rung() {
+    let mut b = book();
+    let id = b.place_take_profit("alice", 5, UNIT, 0, DAY).unwrap();
+    b.swap(Side::Buy, 5 * UNIT, 0).unwrap(); // Alice's rung sells out
+    // (The seeded "treasury" account's LP positions earned fees too, so they are listed as well.)
+    assert!(b.settleable(10).contains(&id), "the keeper can find it");
+    let s = b.settle(id, DAY).unwrap();
+    assert_eq!(s.owner, "alice");
+    assert!(s.quote > UNIT && s.closed, "paid ~1.05 per token and closed: {s:?}");
+    assert!(!b.positions.contains_key(&id));
+    assert!(!b.settleable(10).contains(&id));
+}
+
+#[test]
+fn settle_keeps_a_partly_filled_rung_open() {
+    let mut b = book();
+    let id = b.place_take_profit("alice", 5, 4 * UNIT, 0, DAY).unwrap();
+    b.swap(Side::Buy, 3_300_000, 0).unwrap(); // only part of it sells
+    let s = b.settle(id, DAY).unwrap();
+    assert!(s.quote > 0 && !s.closed);
+    assert_eq!(b.settle(id, DAY).unwrap().quote, 0, "nothing paid twice");
+}
+
+#[test]
+fn protocol_positions_cannot_be_settled() {
+    let mut b = Book::graduate(cfg(), 4_000 * UNIT, 4_000 * UNIT, 10, 0);
+    let pid = *b.protocol_pos.values().next().unwrap();
+    assert_eq!(b.settle(pid, 0), Err(Error::NotOwner));
+}

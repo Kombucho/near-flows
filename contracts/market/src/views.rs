@@ -122,6 +122,11 @@ impl Market {
         }
     }
 
+    /// Positions with earnings waiting (for keepers to call `settle`).
+    pub fn get_settleable(&self, limit: u32) -> Vec<u64> {
+        self.book_ref().settleable(limit.min(100) as usize)
+    }
+
     /// Solvency check anyone can run: what the market owes, (quote, token).
     /// Compare with the contract's balances on the two token contracts.
     pub fn get_obligations(&self) -> (U128, U128) {

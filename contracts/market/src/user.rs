@@ -36,6 +36,23 @@ impl Market {
         self.emit("withdraw", &format!(r#"{{"account":"{who}","position":{position_id}}}"#));
     }
 
+    /// Pay a position's earnings to its OWNER. Anyone may call this (the keeper
+    /// does, automatically): the money can only ever go to the owner, so no
+    /// signature from the owner is needed. A sold-out, unlocked rung is also
+    /// closed and its storage credited back to the owner.
+    pub fn settle(&mut self, position_id: u64) {
+        let before = env::storage_usage();
+        let now = env::block_timestamp();
+        let s = self.book().settle(position_id, now).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
+        let owner: near_sdk::AccountId = s.owner.parse().unwrap_or_else(|_| env::panic_str("bad owner"));
+        self.pay_both(&owner, s.quote, s.token);
+        if s.closed {
+            self.charge_storage(&owner, before); // freed bytes are credited to the owner
+        }
+        self.emit("settle", &format!(r#"{{"account":"{owner}","position":{position_id},"quote":"{}","token":"{}","closed":{}}}"#,
+            s.quote, s.token, s.closed));
+    }
+
     #[payable]
     pub fn claim_dividends(&mut self) {
         assert_one_yocto();

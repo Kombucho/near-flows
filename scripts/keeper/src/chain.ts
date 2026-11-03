@@ -65,6 +65,16 @@ export class Chain {
     return this.signer().accountId;
   }
 
+  /** Positions with earnings waiting to be paid to their owners. */
+  settleable(limit = 20): Promise<number[]> {
+    return this.view<number[]>(this.market, "get_settleable", { limit });
+  }
+
+  /** Pay a position's earnings to its OWNER (anyone may call; nothing comes to us). */
+  settle(positionId: number) {
+    return this.signer().callFunction({ contractId: this.market, methodName: "settle", args: { position_id: positionId }, gas: 100n * TGAS });
+  }
+
   crank() {
     return this.signer().callFunction({ contractId: this.market, methodName: "crank", args: {}, gas: 100n * TGAS });
   }

@@ -95,3 +95,44 @@ impl Book {
         Ok(Withdrawal { token, quote, fee_quote, fee_token })
     }
 }
+
+/// Result of `settle`: who gets paid, how much, and whether the position closed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Settlement {
+    pub owner: String,
+    pub quote: u128,
+    pub token: u128,
+    pub closed: bool,
+}
+
+impl Book {
+    /// Pay a position's earnings to its OWNER. Anyone may trigger it (e.g. a
+    /// keeper), because the money can only go to the owner. A take-profit
+    /// that has fully sold and is not locked is also closed, freeing storage.
+    /// The protocol's own positions cannot be settled.
+    pub fn settle(&mut self, id: u64, now_ns: u64) -> Result<Settlement, Error> {
+        let owner = self.positions.get(&id).ok_or(Error::NoPosition)?.owner.clone();
+        if owner == crate::book::PROTOCOL {
+            return Err(Error::NotOwner);
+        }
+        let (mut quote, mut token) = self.claim(id, &owner)?;
+        let p = &self.positions[&id];
+        let done = p.take_profit && self.tp_remaining(p) == 0 && now_ns >= p.locked_until_ns;
+        if done {
+            let w = self.withdraw(id, &owner, now_ns)?;
+            quote += w.quote + w.fee_quote;
+            token += w.token + w.fee_token;
+        }
+        Ok(Settlement { owner, quote, token, closed: done })
+    }
+
+    /// Positions with something to pay out (for keepers), skipping the protocol's.
+    pub fn settleable(&self, limit: usize) -> Vec<u64> {
+        self.positions.iter()
+            .filter(|(_, p)| p.owner != crate::book::PROTOCOL)
+            .filter(|(id, _)| self.claimable(**id).map(|(q, t)| q + t > 0).unwrap_or(false))
+            .map(|(id, _)| *id)
+            .take(limit)
+            .collect()
+    }
+}

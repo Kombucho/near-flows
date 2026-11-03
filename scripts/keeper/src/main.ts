@@ -9,7 +9,9 @@
 //      testnet, or read from a Rhea pool in live mode;
 //   2. trades the pool toward it while the gap beats twice the current fee
 //      (that trading is what fills holders' take-profit rungs);
-//   3. calls the public crank when an hour has passed (dividends, burn, depth).
+//   3. pays out filled liquidity to its owners (`settle`), so proceeds just
+//      land in their wallets with no claim step;
+//   4. calls the public crank when an hour has passed (dividends, burn, depth).
 //
 // Environment: MARKET_ID, KEEPER_ACCOUNT_ID, NEAR_NETWORK (default testnet),
 // NEAR_RPC (default FastNEAR testnet), KEEPER_PRIVATE_KEY (or a near-cli key file).
@@ -71,6 +73,7 @@ async function main() {
       ? scalePrice(p0, scenarioFactor(opt.scenario as Scenario, elapsed / duration, rand()))
       : await chain.refPrice(opt["ref-contract"] ?? fail("--ref-contract"), Number(opt["ref-pool"]), cfg.token, cfg.quote);
     await tradeTowards(chain, cfg.token, cfg.quote, fair, p0, chunk);
+    await settleFilled(chain);
     if (Date.now() / 1000 - lastCrank >= Number(opt["crank-every"])) {
       lastCrank = Date.now() / 1000;
       if (opt.send) await attempt("crank", () => chain.crank());
@@ -100,6 +103,14 @@ async function tradeTowards(chain: Chain, token: string, quote: string, fair: bi
     }
     if (!opt.send) return; // dry run: one line per tick is enough
   }
+}
+
+/** Pay owners whose liquidity was traded. At most 10 per tick to bound gas spend. */
+async function settleFilled(chain: Chain) {
+  const ids = await chain.settleable(10);
+  if (ids.length === 0) return;
+  if (!opt.send) return console.log(`${tag}   would settle positions ${ids.join(", ")} (dry run)`);
+  for (const id of ids) await attempt(`settle #${id} (paid to its owner)`, () => chain.settle(id));
 }
 
 async function hasBalance(chain: Chain, token: string, need: bigint): Promise<boolean> {

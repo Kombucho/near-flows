@@ -251,3 +251,25 @@ async fn a_relayer_buys_for_alice_and_failures_are_owed_to_her() -> anyhow::Resu
         .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?.into_result()?;
     assert_solvent(&w).await
 }
+
+#[tokio::test]
+async fn anyone_can_settle_but_only_the_owner_gets_paid() -> anyhow::Result<()> {
+    let w = setup().await?;
+    // Alice LPs her bag: 10M coins on 4 one-way rungs (1.5x, 2x, 3x, 5x).
+    transfer(&w.owner, &w.coin, w.alice.id(), 10_000_000 * ONE).await?;
+    send(&w, &w.alice, &w.coin, 10_000_000 * ONE, r#"{"action":"ladder"}"#).await?.into_result()?;
+    // A pump: the owner buys enough to push the price past 1.5x.
+    send(&w, &w.owner, &w.wnear, 1_500 * ONE, r#"{"action":"buy","min_out":"0"}"#).await?.into_result()?;
+    let ids: Vec<u64> = w.market.view("get_settleable").args_json(json!({"limit": 100})).await?.json()?;
+    let alice_rungs: Vec<u64> = positions(&w, w.alice.id()).await?.iter().map(|p| p["id"].as_u64().unwrap()).collect();
+    let filled: Vec<u64> = ids.into_iter().filter(|i| alice_rungs.contains(i)).collect();
+    assert!(!filled.is_empty(), "at least Alice's 1.5x rung earned something");
+    // Bob (a stranger, e.g. the keeper) settles it: the wNEAR goes to ALICE.
+    let (alice_before, bob_before) = (balance(&w.wnear, w.alice.id()).await?, balance(&w.wnear, w.bob.id()).await?);
+    for id in &filled {
+        w.bob.call(w.market.id(), "settle").args_json(json!({"position_id": id})).max_gas().transact().await?.into_result()?;
+    }
+    assert!(balance(&w.wnear, w.alice.id()).await? > alice_before, "Alice was paid");
+    assert_eq!(balance(&w.wnear, w.bob.id()).await?, bob_before, "Bob got nothing");
+    assert_solvent(&w).await
+}
