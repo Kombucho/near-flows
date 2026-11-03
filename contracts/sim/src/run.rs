@@ -25,9 +25,10 @@ pub struct Outcome {
     pub protocol_vs_hold: f64, // protocol liquidity value / just holding its launch assets
     pub volume: f64,
     pub event_pnl: f64, // insider, sniper or sandwich bot profit in NEAR
-    /// Buyers who enter at hour 25 with NEAR: end value / NEAR put in, per
-    /// strategy [hold NEAR, market, market+lock-in, wheel, wheel tight].
-    pub buyers: [f64; 5],
+    /// Buyers who enter with NEAR: end value / NEAR put in, per strategy
+    /// [hold, market, market+lock-in, wheel 0.9/0.8, wheel tight, hybrid,
+    ///  hybrid+defend, hybrid lock-in spot+defend].
+    pub buyers: [f64; 8],
     /// Share of wheel buyers whose bids never filled at all (still all NEAR).
     pub wheel_never_filled: f64,
     pub lag_hours: u32, // hours the book was >25% away from fair value
@@ -73,12 +74,22 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, 
         w.crank();
         // Staggered entry: one or two small buyers per hour between hours 25 and 72,
         // so buyers don't move the price themselves (a fair comparison).
-        if (BUYERS_ENTER..BUYERS_ENTER + 48).contains(&hour) && buyers.len() < 80 {
+        if (BUYERS_ENTER..BUYERS_ENTER + 48).contains(&hour) && buyers.len() < 96 {
             let mut fresh = make_buyers(&mut w, &mut c.rng, buyers.len(), 2);
             buyers.append(&mut fresh);
         }
         if hour >= BUYERS_ENTER {
             keeper_settle(&mut w, &mut buyers);
+            // DEFEND: a sustained downtrend (>=10 bins down over 6h) flips hybrids to defence.
+            if hist.len() > 6 && w.book.active - hist[hist.len() - 7] <= -10 {
+                // SIM_DEFEND=underwater: only defend buyers who are also below their entry.
+                let underwater_only = std::env::var("SIM_DEFEND").as_deref() == Ok("underwater");
+                let active = w.book.active;
+                for b in buyers.iter_mut().filter(|b| defends(b.kind) && !b.defended && b.entry_hour < hour
+                    && (!underwater_only || active <= b.entry_bin - 5)) {
+                    defend(&mut w, b);
+                }
+            }
         }
         if hour % 24 == 0 {
             w.audit();
@@ -101,16 +112,24 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, 
 }
 
 const BUYERS_ENTER: u32 = 25; // after the 24h launch window
-const BUYER_KINDS: usize = 5;
+const BUYER_KINDS: usize = 8;
 
-struct Buyer { name: String, kind: usize, deposit: u128, wallet_q: u128, wallet_t: u128, ever_filled: bool }
+struct Buyer {
+    name: String, kind: usize, deposit: u128, wallet_q: u128, wallet_t: u128, ever_filled: bool,
+    entry_hour: u32, defended: bool, entry_bin: i32,
+}
+
+/// Does this kind use the hybrid "defend" switch?
+fn defends(kind: usize) -> bool { kind == 6 || kind == 7 }
 
 /// `count` new buyers of 0.5..2 NEAR each, cycling through the five strategies.
 fn make_buyers(w: &mut World, rng: &mut Rng, first: usize, count: usize) -> Vec<Buyer> {
     let mut out = Vec::new();
     for i in first..first + count {
         let deposit = near(0.5 + 1.5 * rng.f());
-        let mut b = Buyer { name: format!("b{i}"), kind: i % BUYER_KINDS, deposit, wallet_q: deposit, wallet_t: 0, ever_filled: false };
+        let hour = (w.now / HOUR) as u32;
+        let mut b = Buyer { name: format!("b{i}"), kind: i % BUYER_KINDS, deposit, wallet_q: deposit, wallet_t: 0,
+                            ever_filled: false, entry_hour: hour, defended: false, entry_bin: w.book.active };
         match b.kind {
             0 => {} // hold NEAR
             1 | 2 => {
@@ -126,11 +145,31 @@ fn make_buyers(w: &mut World, rng: &mut Rng, first: usize, count: usize) -> Vec<
                     }
                 }
             }
-            k => {
-                let (dips, preset): (&[(u32, u16)], u8) = if k == 3 { (&[(9_000, 5_000), (8_000, 5_000)], 1) } else { (&[(9_500, 5_000), (9_000, 5_000)], 2) };
+            3 | 4 => {
+                let (dips, preset): (&[(u32, u16)], u8) = if b.kind == 3 { (&[(9_000, 5_000), (8_000, 5_000)], 1) } else { (&[(9_500, 5_000), (9_000, 5_000)], 2) };
                 if w.book.place_wheel(&b.name, deposit, dips, preset, w.now).is_ok() {
                     b.wallet_q -= deposit;
                     w.contract_q += deposit;
+                }
+            }
+            _ => {
+                // HYBRID: 25% spot now (kind 7: with a lock-in ladder on it), 75% as a tight wheel.
+                let spot = deposit / 4;
+                if let Some((kept, used, _)) = w.buy(&b.name, spot, &[], 1.0) {
+                    b.wallet_q -= used;
+                    b.wallet_t += kept;
+                    b.ever_filled = true;
+                    if b.kind == 7 {
+                        if let Ok((_, placed)) = w.book.place_ladder(&b.name, kept, &DEFAULT_LADDER, 0, w.now) {
+                            b.wallet_t -= placed;
+                            w.contract_t += placed;
+                        }
+                    }
+                }
+                let rest = deposit - spot;
+                if w.book.place_wheel(&b.name, rest, &[(9_500, 5_000), (9_000, 5_000)], 2, w.now).is_ok() {
+                    b.wallet_q -= rest;
+                    w.contract_q += rest;
                 }
             }
         }
@@ -157,9 +196,34 @@ fn keeper_settle(w: &mut World, buyers: &mut [Buyer]) {
     }
 }
 
-fn score_buyers(w: &World, buyers: &[Buyer], p: f64) -> ([f64; 5], f64) {
-    let mut sum = [0.0; 5];
-    let mut n = [0usize; 5];
+/// Defence mode: cancel waiting bids (NEAR back to the wallet), pull every coin
+/// out of sell liquidity and bid drawers, and re-place ALL coins as one-way
+/// sell liquidity just above the price (+5 and +10 bins), so the first bounce
+/// gets them out. Profits already paid out are untouched.
+fn defend(w: &mut World, b: &mut Buyer) {
+    b.defended = true;
+    let mine: Vec<u64> = w.book.positions.iter().filter(|(_, p)| p.owner == b.name).map(|(i, _)| *i).collect();
+    for id in mine {
+        if let Ok(wd) = w.book.withdraw(id, &b.name, w.now) {
+            let (t, q) = (wd.token + wd.fee_token, wd.quote + wd.fee_quote);
+            b.wallet_t += t; b.wallet_q += q;
+            w.contract_t -= t; w.contract_q -= q;
+        }
+    }
+    let coins = b.wallet_t;
+    if coins == 0 {
+        return;
+    }
+    let a = w.book.active;
+    if let Ok(_ids) = w.book.lp_range(&b.name, a + 5, a + 10, 2, coins, 0, true, 0, w.now) {
+        b.wallet_t = 0;
+        w.contract_t += coins;
+    }
+}
+
+fn score_buyers(w: &World, buyers: &[Buyer], p: f64) -> ([f64; 8], f64) {
+    let mut sum = [0.0; 8];
+    let mut n = [0usize; 8];
     let (mut wheels, mut never) = (0, 0);
     for b in buyers {
         let mut v = to_f(b.wallet_q) + to_f(b.wallet_t) * p;
@@ -172,12 +236,12 @@ fn score_buyers(w: &World, buyers: &[Buyer], p: f64) -> ([f64; 5], f64) {
         }
         sum[b.kind] += v / to_f(b.deposit);
         n[b.kind] += 1;
-        if b.kind >= 3 {
+        if b.kind == 3 || b.kind == 4 {
             wheels += 1;
             if !b.ever_filled { never += 1; }
         }
     }
-    let avg = [0, 1, 2, 3, 4].map(|k| if n[k] > 0 { sum[k] / n[k] as f64 } else { f64::NAN });
+    let avg = [0, 1, 2, 3, 4, 5, 6, 7].map(|k| if n[k] > 0 { sum[k] / n[k] as f64 } else { f64::NAN });
     (avg, if wheels > 0 { never as f64 / wheels as f64 } else { 0.0 })
 }
 
@@ -339,6 +403,6 @@ fn finish(r: &Regime, w: &World, c: &Ctx, holders: &[Holder], p0: f64, staked0: 
         burned_pct: to_f(w.book.burned) / SUPPLY * 100.0,
         protocol_vs_hold: protocol / hold,
         volume: to_f(w.volume_q), event_pnl, lag_hours: lag, faults: w.faults.clone(),
-        buyers: [f64::NAN; 5], wheel_never_filled: 0.0,
+        buyers: [f64::NAN; 8], wheel_never_filled: 0.0,
     }
 }

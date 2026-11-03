@@ -29,9 +29,9 @@ fn main() {
     }
     println!();
     if std::env::var("SIM_BUYERS").is_ok() {
-        println!("BUYERS: 80 small buyers (0.5-2 NEAR) enter between hours 25 and 72. Cells: end value / NEAR in, median [10th-90th].");
-        println!("| regime | fair x | hold NEAR | market buy | market + lock-in | wheel 0.9/0.8 | wheel tight 0.95/0.9 | best wheel - market | wheel never filled | faults |");
-        println!("|---|---|---|---|---|---|---|---|---|---|");
+        println!("BUYERS: 96 small buyers (0.5-2 NEAR) enter between hours 25 and 72. Cells: end value / NEAR in, median [10th-90th].");
+        println!("| regime | coin | market | market+lock-in | wheel | hybrid 25/75 | hybrid+defend | hybrid lock-in spot+defend | faults |");
+        println!("|---|---|---|---|---|---|---|---|---|");
     } else {
     println!("| regime | fair x | book x | spot | lock-in | range | range+trend switch | div yield | burned | protocol vs hold | event PnL (NEAR) | lag h | faults |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
@@ -102,10 +102,9 @@ fn row(name: &str, o: &[Outcome], panics: u32) -> String {
     let col = |f: &dyn Fn(&Outcome) -> f64| q(o.iter().map(f).collect());
     let faults: u32 = o.iter().map(|x| x.faults.insolvent + x.faults.unexpected).sum::<u32>() + panics;
     if std::env::var("SIM_BUYERS").is_ok() {
-        return format!("| {name} | {} | {} | {} | {} | {} | {} | {} | {}% | {faults} |",
-            col(&|x| x.fair_mult), col(&|x| x.buyers[0]), col(&|x| x.buyers[1]), col(&|x| x.buyers[2]),
-            col(&|x| x.buyers[3]), col(&|x| x.buyers[4]), col(&|x| x.buyers[3].max(x.buyers[4]) - x.buyers[1]),
-            col(&|x| x.wheel_never_filled * 100.0));
+        let m = |k: usize| move |x: &Outcome| x.buyers[k];
+        return format!("| {name} | {} | {} | {} | {} | {} | {} | {} | {faults} |",
+            col(&|x| x.fair_mult), col(&m(1)), col(&m(2)), col(&m(4)), col(&m(5)), col(&m(6)), col(&m(7)));
     }
     format!("| {name} | {} | {} | {} | {} | {} | {} | {} | {}% | {} | {} | {} | {faults} |",
         col(&|x| x.fair_mult), col(&|x| x.book_mult),
