@@ -20,7 +20,7 @@ pub enum Strategy {
     Spot,      // hold everything in the wallet
     LockIn,    // 50% as one-way liquidity over 1.2x..3x (sold stays sold)
     Range,     // 50% as two-way liquidity over 1.2x..3x (earns every pass)
-    RangeAuto, // Range + autopilot: recycle sold-out bins into bids below the price
+    RangeAuto, // Range + TREND SWITCH bot: two-way in chop, switches to lock-in on an uptrend
 }
 pub const STRATEGIES: [Strategy; 4] = [Strategy::Spot, Strategy::LockIn, Strategy::Range, Strategy::RangeAuto];
 
@@ -32,6 +32,8 @@ pub struct Holder {
     pub wallet_q: u128,
     pub ladder: Vec<u64>, // original range positions (asks)
     pub bids: Vec<u64>,   // autopilot: proceeds recycled as bids below the price
+    pub range: (i32, i32), // the bins the range was placed over
+    pub switched: bool,    // trend switch already done
 }
 
 /// Counters for things that should never happen.
@@ -138,6 +140,7 @@ impl World {
         let a = self.book.active;
         // SIM_RANGE=tight: 1.02x..1.3x (bins +2..+26); default 1.2x..3x (bins +19..+111).
         let (lo, hi) = if std::env::var("SIM_RANGE").as_deref() == Ok("tight") { (2, 26) } else { (19, 111) };
+        h.range = (a + lo, a + hi);
         match self.book.lp_range(&h.name, a + lo, a + hi, 10, tokens, 0, lock_in, 0, self.now) {
             Ok(ids) => {
                 h.wallet_t -= tokens;
@@ -178,6 +181,35 @@ impl World {
         match self.book.lp_range(&h.name, active - 10, active - 1, 5, 0, recycled, false, 0, self.now) {
             Ok(ids) => { self.contract_q += recycled; h.bids.extend(ids); }
             Err(_) => h.wallet_q += recycled, // nowhere to place: keep it
+        }
+    }
+
+    /// TREND SWITCH bot: on a detected uptrend, withdraw the two-way range and
+    /// re-place the remaining coins as LOCK-IN liquidity over the part of the
+    /// range still above the price. NEAR already earned stays in the wallet.
+    /// (On NEAR this runs on a scoped key that can switch but never withdraw out.)
+    pub fn trend_switch(&mut self, h: &mut Holder) {
+        if h.switched {
+            return;
+        }
+        h.switched = true;
+        let mut tokens = 0u128;
+        for id in std::mem::take(&mut h.ladder) {
+            if let Ok(w) = self.book.withdraw(id, &h.name, self.now) {
+                let (wt, wq) = (w.token + w.fee_token, w.quote + w.fee_quote);
+                self.contract_t -= wt; self.contract_q -= wq;
+                tokens += wt; h.wallet_q += wq;
+            }
+        }
+        h.wallet_t += tokens;
+        let from = h.range.0.max(self.book.active + 1);
+        if tokens == 0 || from > h.range.1 {
+            return; // price already above the range: coins stay as spot
+        }
+        if let Ok(ids) = self.book.lp_range(&h.name, from, h.range.1, 10, tokens, 0, true, 0, self.now) {
+            h.wallet_t -= tokens;
+            self.contract_t += tokens;
+            h.ladder = ids;
         }
     }
 

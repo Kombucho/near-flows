@@ -47,6 +47,7 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, 
     (c.fair, c.anchor) = (p0, p0);
     let staked0: f64 = holders.iter().map(|h| to_f(w.book.vault.assets(&h.name).0)).sum::<f64>() * p0;
     let mut lag = 0;
+    let mut hist: Vec<i32> = Vec::new();
     for hour in 0..HOURS {
         w.now = hour as u64 * HOUR;
         w.book.touch(w.now); // fee memory decays with time (10-minute half-life)
@@ -54,8 +55,14 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, 
         event(r, hour, &mut w, &mut c, &mut holders, insider_share);
         noise(r, &mut w, &mut c);
         arbitrage(&mut w, &mut c);
-        for h in holders.iter_mut().filter(|h| h.strategy == Strategy::RangeAuto) {
-            w.autopilot(h);
+        // Trend signal the bot can see on-chain: bins moved over the last 6 hours.
+        hist.push(w.book.active);
+        let window: usize = std::env::var("SIM_TREND_HOURS").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+        let trigger: i32 = std::env::var("SIM_TREND_BINS").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+        if hist.len() > window && w.book.active - hist[hist.len() - 1 - window] >= trigger {
+            for h in holders.iter_mut().filter(|h| h.strategy == Strategy::RangeAuto) {
+                w.trend_switch(h);
+            }
         }
         w.crank();
         if hour % 24 == 0 {
@@ -83,7 +90,7 @@ fn make_holders(r: &Regime, w: &mut World, rng: &mut Rng, insider_share: f64) ->
     for (i, wt) in weights.iter().enumerate() {
         let deposit = (1.0 - insider_share) * RAISED * wt / total;
         let tokens = near(SUPPLY / 2.0 * deposit / RAISED);
-        let mut h = Holder { name: format!("h{i}"), strategy: STRATEGIES[i % 4], deposit, wallet_t: tokens, wallet_q: 0, ladder: vec![], bids: vec![] };
+        let mut h = Holder { name: format!("h{i}"), strategy: STRATEGIES[i % 4], deposit, wallet_t: tokens, wallet_q: 0, ladder: vec![], bids: vec![], range: (0, 0), switched: false };
         match h.strategy {
             Strategy::Spot => {}
             Strategy::LockIn => w.lp_range(&mut h, tokens / 2, true),

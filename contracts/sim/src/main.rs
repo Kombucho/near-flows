@@ -28,7 +28,7 @@ fn main() {
         println!("- {}: {}", r.name, r.what);
     }
     println!();
-    println!("| regime | fair x | book x | spot | lock-in | range | range+autopilot | div yield | burned | protocol vs hold | event PnL (NEAR) | lag h | faults |");
+    println!("| regime | fair x | book x | spot | lock-in | range | range+trend switch | div yield | burned | protocol vs hold | event PnL (NEAR) | lag h | faults |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let mut csv = String::from("regime,seed,fair_mult,book_mult,spot,ladder,stake,ladder_stake,div_yield,burned_pct,protocol_vs_hold,volume,event_pnl,lag_hours,insolvent,unexpected,panicked\n");
     let mut problems = Vec::new();
