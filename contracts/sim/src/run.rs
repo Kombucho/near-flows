@@ -114,9 +114,57 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, 
 const BUYERS_ENTER: u32 = 25; // after the 24h launch window
 const BUYER_KINDS: usize = 8;
 
-struct Buyer {
+pub(crate) struct Buyer {
     name: String, kind: usize, deposit: u128, wallet_q: u128, wallet_t: u128, ever_filled: bool,
     entry_hour: u32, defended: bool, entry_bin: i32,
+}
+
+// ---- pieces reused by the real-coin backtest (backtest.rs) ----
+
+/// Background random traders at the "steady" regime's level (3 trades/h, ~10 NEAR).
+pub(crate) fn noise_steady(w: &mut World, rng: &mut Rng) {
+    for _ in 0..rng.poisson(3.0) {
+        let size = 10.0 * (0.8 * rng.normal() - 0.32).exp();
+        if rng.f() < 0.5 { w.buy("noise", near(size), &[], 0.05); } else { w.sell(near(size / w.price()), 0.05); }
+    }
+}
+
+/// Random trading whose total this hour equals the coin's REAL volume (in NEAR),
+/// split into a few trades of random side. Zero real volume = nobody trades.
+pub(crate) fn noise_volume(w: &mut World, rng: &mut Rng, volume_near: f64) {
+    if volume_near <= 0.0 {
+        return;
+    }
+    let trades = 1 + rng.poisson(2.0);
+    for _ in 0..trades {
+        let size = volume_near / trades as f64;
+        if rng.f() < 0.5 { w.buy("noise", near(size), &[], 0.05); } else { w.sell(near(size / w.price()), 0.05); }
+    }
+}
+
+/// Arbitrage the pool toward an externally given fair price.
+pub(crate) fn arbitrage_to(w: &mut World, fair: f64) {
+    let mut c = Ctx { rng: Rng::new(0), fair, anchor: fair, event_pnl: 0.0, stash: 0 };
+    arbitrage(w, &mut c);
+}
+
+/// One buyer per strategy (8), small random sizes.
+pub(crate) fn make_buyers_one_each(w: &mut World, rng: &mut Rng) -> Vec<Buyer> {
+    make_buyers(w, rng, 0, BUYER_KINDS)
+}
+
+pub(crate) fn keeper_settle_pub(w: &mut World, buyers: &mut [Buyer]) {
+    keeper_settle(w, buyers)
+}
+
+pub(crate) fn defend_all(w: &mut World, buyers: &mut [Buyer], hour: u32) {
+    for b in buyers.iter_mut().filter(|b| defends(b.kind) && !b.defended && b.entry_hour < hour) {
+        defend(w, b);
+    }
+}
+
+pub(crate) fn score_buyers_pub(w: &World, buyers: &[Buyer], p: f64) -> ([f64; 8], f64) {
+    score_buyers(w, buyers, p)
 }
 
 /// Does this kind use the hybrid "defend" switch?

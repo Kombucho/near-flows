@@ -6,6 +6,7 @@
 //! simulated day, catches any panic, and prints what happened to holders.
 //! All numbers are SIMULATION output, not predictions.
 
+mod backtest;
 mod regime;
 mod rng;
 mod run;
@@ -16,6 +17,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use run::{run, Outcome};
 
 fn main() {
+    if let Ok(dir) = std::env::var("SIM_BACKTEST") {
+        return backtest::main(&dir);
+    }
     let args: Vec<String> = std::env::args().collect();
     let runs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(300);
     let fee: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
