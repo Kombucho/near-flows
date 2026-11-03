@@ -28,10 +28,15 @@ struct World {
 }
 
 async fn deploy_token(worker: &Worker<Sandbox>, owner: &Account, supply: u128, symbol: &str) -> anyhow::Result<Contract> {
+    deploy_token_with_fee(worker, owner, supply, symbol, 0).await
+}
+
+/// A token that keeps `call_fee_bps` on every ft_transfer_call (like justhoot v2).
+async fn deploy_token_with_fee(worker: &Worker<Sandbox>, owner: &Account, supply: u128, symbol: &str, call_fee_bps: u16) -> anyhow::Result<Contract> {
     let t = worker.dev_deploy(&wasm("mock_ft")).await?;
     t.call("new")
         .args_json(json!({"owner_id": owner.id(), "total_supply": supply.to_string(),
-                          "name": format!("Mock {symbol}"), "symbol": symbol, "decimals": 18}))
+                          "name": format!("Mock {symbol}"), "symbol": symbol, "decimals": 18, "call_fee_bps": call_fee_bps}))
         .transact().await?.into_result()?;
     Ok(t)
 }
@@ -70,11 +75,15 @@ async fn transfer(from: &Account, token: &Contract, to: &AccountId, amount: u128
 /// A launched native market: 4_000 mock wNEAR raised, 500M coins in the pool.
 /// Alice and Bob each hold 100 wNEAR; Bob is NOT registered on the coin.
 async fn setup() -> anyhow::Result<World> {
+    setup_with_coin_fee(0).await
+}
+
+async fn setup_with_coin_fee(coin_call_fee_bps: u16) -> anyhow::Result<World> {
     let worker = near_workspaces::sandbox().await?;
     let owner = worker.dev_create_account().await?;
     let alice = worker.dev_create_account().await?;
     let bob = worker.dev_create_account().await?;
-    let coin = deploy_token(&worker, &owner, 1_000_000_000 * ONE, "MCOIN").await?;
+    let coin = deploy_token_with_fee(&worker, &owner, 1_000_000_000 * ONE, "MCOIN", coin_call_fee_bps).await?;
     let wnear = deploy_token(&worker, &owner, 1_000_000 * ONE, "mWNEAR").await?;
     let market = worker.dev_deploy(&wasm("market")).await?;
     market.call("new")
@@ -209,4 +218,36 @@ async fn pause_blocks_buys_but_never_exits() -> anyhow::Result<()> {
     let stranger = w.alice.call(w.market.id(), "unpause").max_gas().transact().await?;
     assert!(stranger.is_failure(), "only the owner can unpause");
     Ok(())
+}
+
+#[tokio::test]
+async fn a_coin_with_a_3pct_transfer_fee_keeps_the_market_solvent() -> anyhow::Result<()> {
+    // Like justhoot v2 tokens: 3% kept on every ft_transfer_call, receiver gets net.
+    let w = setup_with_coin_fee(300).await?;
+    send(&w, &w.alice, &w.wnear, 20 * ONE, r#"{"action":"buy","min_out":"0"}"#).await?.into_result()?;
+    let coins = balance(&w.coin, w.alice.id()).await?;
+    assert!(coins > 0);
+    send(&w, &w.alice, &w.coin, coins / 2, r#"{"action":"sell","min_out":"0"}"#).await?.into_result()?;
+    send(&w, &w.alice, &w.coin, coins / 4, r#"{"action":"ladder"}"#).await?.into_result()?;
+    assert_solvent(&w).await
+}
+
+#[tokio::test]
+async fn a_relayer_buys_for_alice_and_failures_are_owed_to_her() -> anyhow::Result<()> {
+    let w = setup().await?;
+    // Bob relays a buy for Alice (Alice has storage on the market; Bob pays).
+    let msg = format!(r#"{{"action":"buy","min_out":"0","ladder":true,"for":"{}"}}"#, w.alice.id());
+    send(&w, &w.bob, &w.wnear, 10 * ONE, &msg).await?.into_result()?;
+    assert_eq!(positions(&w, w.alice.id()).await?.len(), 4, "the rungs are Alice's");
+    assert!(balance(&w.coin, w.alice.id()).await? > 0, "the coins went to Alice");
+    // A relayed buy that fails (absurd min_out) is owed to Alice, not refunded to Bob.
+    let bad = format!(r#"{{"action":"buy","min_out":"999999999999999999999999999999","for":"{}"}}"#, w.alice.id());
+    let bob_before = balance(&w.wnear, w.bob.id()).await?;
+    send(&w, &w.bob, &w.wnear, 5 * ONE, &bad).await?.into_result()?;
+    assert_eq!(balance(&w.wnear, w.bob.id()).await?, bob_before - 5 * ONE, "no refund to the relayer");
+    let owed: String = w.market.view("owed_of").args_json(json!({"token": w.wnear.id(), "account_id": w.alice.id()})).await?.json()?;
+    assert_eq!(owed, (5 * ONE).to_string(), "owed to Alice");
+    w.alice.call(w.market.id(), "withdraw_owed").args_json(json!({"token": w.wnear.id()}))
+        .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?.into_result()?;
+    assert_solvent(&w).await
 }

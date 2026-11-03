@@ -14,6 +14,7 @@
 //!   - `#[near(contract_state)]` marks the struct saved on chain between calls.
 //!   - `#[init]` is the constructor, called once at deploy time.
 
+mod delegated;
 mod payout;
 mod receiver;
 mod storage;

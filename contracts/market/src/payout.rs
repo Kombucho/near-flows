@@ -29,9 +29,7 @@ impl Market {
     #[private]
     pub fn on_payout(&mut self, token: AccountId, to: AccountId, amount: U128, #[callback_result] result: Result<(), PromiseError>) {
         if result.is_err() {
-            let key = owed_key(&token, &to);
-            let prev = self.owed.get(&key).copied().unwrap_or(0);
-            self.owed.insert(key, prev + amount.0);
+            self.add_owed(&token, &to, amount.0);
             self.emit("payout_failed", &format!(r#"{{"token":"{token}","to":"{to}","amount":"{}"}}"#, amount.0));
         }
     }
@@ -54,6 +52,13 @@ impl Market {
 }
 
 impl Market {
+    /// Record `amount` of `token` as owed to `who` (pulled later with withdraw_owed).
+    pub(crate) fn add_owed(&mut self, token: &AccountId, who: &AccountId, amount: u128) {
+        let key = owed_key(token, who);
+        let prev = self.owed.get(&key).copied().unwrap_or(0);
+        self.owed.insert(key, prev + amount);
+    }
+
     /// Send `amount` of `token` to `to`, with the failure callback attached.
     pub(crate) fn pay(&self, token: &AccountId, to: &AccountId, amount: u128) {
         if amount == 0 {

@@ -5,6 +5,9 @@
 //!   - `ft_burn`: holders can destroy their own tokens (supply goes down),
 //!     so a native coin's buyback can really burn.
 //!   - `mint_for_test`: a capped faucet so demo accounts can get tokens.
+//!   - optional `call_fee_bps`: mimics launchpad tokens (e.g. justhoot v2) that
+//!     keep a fee on every `ft_transfer_call`, so the receiver gets the net
+//!     amount. Plain `ft_transfer` stays free, as on mainnet.
 //!
 //! Most methods just forward to the library's `FungibleToken`, which does the
 //! real work; this file is mostly the wiring NEAR needs to expose them.
@@ -32,18 +35,24 @@ pub struct MockFt {
     name: String,
     symbol: String,
     decimals: u8,
+    call_fee_bps: u16,
 }
 
 #[near]
 impl MockFt {
     /// Mints the whole `total_supply` to `owner_id`.
     #[init]
-    pub fn new(owner_id: AccountId, total_supply: U128, name: String, symbol: String, decimals: u8) -> Self {
+    pub fn new(
+        owner_id: AccountId, total_supply: U128, name: String, symbol: String, decimals: u8, call_fee_bps: Option<u16>,
+    ) -> Self {
+        let call_fee_bps = call_fee_bps.unwrap_or(0);
+        require!(call_fee_bps < 10_000, "fee too high");
         let mut token = FungibleToken::new(Key::Token);
         token.internal_register_account(&owner_id);
+        token.internal_register_account(&env::current_account_id()); // collects call fees
         token.internal_deposit(&owner_id, total_supply.0);
         FtMint { owner_id: &owner_id, amount: total_supply, memo: Some("initial supply (mock)") }.emit();
-        MockFt { token, name, symbol, decimals }
+        MockFt { token, name, symbol, decimals, call_fee_bps }
     }
 
     /// Destroy `amount` of your own tokens. Total supply goes down.
@@ -71,7 +80,13 @@ impl FungibleTokenCore for MockFt {
 
     #[payable]
     fn ft_transfer_call(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>, msg: String) -> PromiseOrValue<U128> {
-        self.token.ft_transfer_call(receiver_id, amount, memo, msg)
+        let fee = amount.0 * self.call_fee_bps as u128 / 10_000;
+        if fee > 0 {
+            // Keep the fee first; the receiver is called with the NET amount.
+            let sender = env::predecessor_account_id();
+            self.token.internal_transfer(&sender, &env::current_account_id(), fee, Some("call fee (mock)".into()));
+        }
+        self.token.ft_transfer_call(receiver_id, U128(amount.0 - fee), memo, msg)
     }
 
     fn ft_total_supply(&self) -> U128 {

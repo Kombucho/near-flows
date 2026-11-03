@@ -240,3 +240,58 @@ fn only_owner_withdraws_protocol_fees() {
     as_caller("alice.testnet", 1, DAY_NS);
     m.withdraw_protocol_fees();
 }
+
+// ---------- delegated buys ("for") ----------
+
+fn owed(m: &Market, token: &str, who: &str) -> u128 {
+    m.owed_of(acc(token), acc(who)).0
+}
+
+#[test]
+fn a_relayer_can_buy_for_alice() {
+    let mut m = native_market();
+    let refund = send(&mut m, "wrap.testnet", "relayer.testnet", 10 * ONE,
+        r#"{"action":"buy","min_out":"0","ladder":true,"for":"alice.testnet"}"#);
+    assert_eq!(refund, 0);
+    assert_eq!(m.get_positions(acc("alice.testnet")).len(), 4, "Alice owns the rungs");
+    assert!(m.get_positions(acc("relayer.testnet")).is_empty());
+}
+
+#[test]
+fn a_failed_delegated_buy_is_owed_not_refunded() {
+    let mut m = native_market();
+    let price_before = m.get_config().price.0;
+    let refund = send(&mut m, "wrap.testnet", "intents.testnet", 10 * ONE,
+        r#"{"action":"buy","min_out":"999999999999999999999999999","for":"alice.testnet"}"#);
+    assert_eq!(refund, 0, "never bounced back to the sender");
+    assert_eq!(owed(&m, "wrap.testnet", "alice.testnet"), 10 * ONE, "all of it owed to Alice");
+    assert_eq!(m.get_config().price.0, price_before, "the market is exactly as before");
+}
+
+#[test]
+fn a_delegated_buy_while_paused_is_owed() {
+    let mut m = native_market();
+    as_caller("owner.testnet", 0, DAY_NS);
+    m.pause();
+    send(&mut m, "wrap.testnet", "intents.testnet", 10 * ONE, r#"{"action":"buy","min_out":"0","for":"alice.testnet"}"#);
+    assert_eq!(owed(&m, "wrap.testnet", "alice.testnet"), 10 * ONE);
+}
+
+#[test]
+fn a_delegated_buy_without_storage_is_owed_and_changes_nothing() {
+    let mut m = native_market(); // carol never deposited storage
+    let positions = m.get_stats().positions;
+    send(&mut m, "wrap.testnet", "intents.testnet", 10 * ONE,
+        r#"{"action":"buy","min_out":"0","ladder":true,"for":"carol.testnet"}"#);
+    assert_eq!(owed(&m, "wrap.testnet", "carol.testnet"), 10 * ONE);
+    assert_eq!(m.get_stats().positions, positions, "no rungs were created");
+}
+
+#[test]
+fn a_failed_delegated_buy_with_leftover_is_owed_exactly_once() {
+    let mut m = native_market(); // carol has no storage balance
+    // So big it eats every ask and leaves change; then it fails on storage.
+    send(&mut m, "wrap.testnet", "intents.testnet", 1_000_000 * ONE,
+        r#"{"action":"buy","min_out":"0","ladder":true,"for":"carol.testnet"}"#);
+    assert_eq!(owed(&m, "wrap.testnet", "carol.testnet"), 1_000_000 * ONE, "owed once, not twice");
+}

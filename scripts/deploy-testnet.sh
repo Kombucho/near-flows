@@ -43,7 +43,7 @@ make -C "$ROOT" build >/dev/null
 
 echo "2/5 mock tokens (MOCK: no value)"
 deploy "$COIN" "$ROOT/contracts/target/near/mock_ft/mock_ft.wasm" \
-  "{\"owner_id\":\"$OWNER\",\"total_supply\":\"1000000000$E18\",\"name\":\"Mock Coin (testnet)\",\"symbol\":\"MCOIN\",\"decimals\":18}"
+  "{\"owner_id\":\"$OWNER\",\"total_supply\":\"1000000000$E18\",\"name\":\"Mock Coin (testnet)\",\"symbol\":\"MCOIN\",\"decimals\":18,\"call_fee_bps\":0}"
 deploy "$WNEAR" "$ROOT/contracts/target/near/mock_ft/mock_ft.wasm" \
   "{\"owner_id\":\"$OWNER\",\"total_supply\":\"1000000$E24\",\"name\":\"Mock wNEAR (testnet)\",\"symbol\":\"mWNEAR\",\"decimals\":24}"
 

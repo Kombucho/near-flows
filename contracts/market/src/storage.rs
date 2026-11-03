@@ -51,6 +51,20 @@ impl Market {
     /// Call it at the end of every user action that can change storage.
     /// If the balance is short this panics, which on NEAR reverts the whole
     /// call (and an ft_on_transfer revert refunds the tokens).
+    /// Like charge_storage, but returns false instead of panicking when the
+    /// balance is short (delegated buys must never panic).
+    pub(crate) fn try_charge_storage(&mut self, who: &AccountId, before: u64) -> bool {
+        env::state_write(self);
+        let after = env::storage_usage();
+        let cost = after.saturating_sub(before) as u128 * env::storage_byte_cost().as_yoctonear();
+        let bal = self.storage.get(who).copied().unwrap_or(0);
+        if bal < cost {
+            return false;
+        }
+        self.storage.insert(who.clone(), bal - cost);
+        true
+    }
+
     pub(crate) fn charge_storage(&mut self, who: &AccountId, before: u64) {
         // NEAR saves the contract state only when the method returns, so
         // storage_usage() would not include this call's changes yet. Save the
