@@ -1,0 +1,11 @@
+[package]
+name = "evmtx"
+version = "0.1.0"
+edition = "2021"
+description = "Builds the EVM transactions a NEAR vault signs (EIP-1559, ERC-20 approve, Uniswap exactInputSingle), so the vault never signs bytes someone else wrote. Pure Rust."
+
+[dependencies]
+tiny-keccak = { version = "2", features = ["keccak"] }
+
+[dev-dependencies]
+serde_json = "1"
