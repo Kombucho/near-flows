@@ -9,3 +9,4 @@ node_modules/
 submission*.json
 .DS_Store
 contracts/sim-out/
+contracts/sandbox/protocols/*.wasm
