@@ -71,17 +71,6 @@ async fn open_listing(w: &World, seller: &Account, token: &Contract, ask: u128, 
     Ok(())
 }
 
-/// Move the chain's clock until the auction's close has passed.
-async fn past_close(w: &World, id: u64) -> anyhow::Result<()> {
-    for _ in 0..60 {
-        if lot(w, id).await?["open"] == false {
-            return Ok(());
-        }
-        w.worker.fast_forward(2_000).await?;
-    }
-    anyhow::bail!("auction never closed")
-}
-
 /// Alice, Bob and Carol each hold 1,000 COIN and 1,000 wNEAR and have bazaar storage.
 async fn setup() -> anyhow::Result<World> {
     let worker = near_workspaces::sandbox().await?;
@@ -90,7 +79,8 @@ async fn setup() -> anyhow::Result<World> {
     let coin = token(&worker, &owner, "COIN").await?;
     let wnear = token(&worker, &owner, "mWNEAR").await?;
     let bazaar = worker.dev_deploy(&wasm("bazaar")).await?;
-    bazaar.call("new").transact().await?.into_result()?;
+    // The owner account is the treasury; ideas get a 1-minute review here (72h by default).
+    bazaar.call("new").args_json(json!({"treasury": owner.id(), "review_ns": 60_000_000_000u64})).transact().await?.into_result()?;
     for t in [&coin, &wnear] {
         for who in [bazaar.id(), alice.id(), bob.id(), carol.id()] {
             register(&owner, t, who).await?;
@@ -116,12 +106,12 @@ async fn tokens_listed_bought_in_parts_and_the_rest_cancelled() -> anyhow::Resul
     assert_eq!(balance(&w.coin, w.bazaar.id()).await?, 1_000 * ONE, "the bag is held by the bazaar");
     assert_eq!(lot(&w, 0).await?["lore"]["title"], "Half my bag");
 
-    // Bob pays 100 wNEAR: 200 COIN at 0.5 wNEAR each. Alice is paid at once.
+    // Bob pays 100 wNEAR: 200 COIN at 0.5 wNEAR each. Alice is paid at once, minus the 5% fee.
     let r = send(&w, &w.bob, &w.wnear, 100 * ONE, r#"{"action":"buy","lot":0}"#).await?;
     println!("GAS buy part of a listing: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
     r.into_result()?;
     assert_eq!(balance(&w.coin, w.bob.id()).await?, 1_200 * ONE);
-    assert_eq!(balance(&w.wnear, w.alice.id()).await?, 1_100 * ONE);
+    assert_eq!(balance(&w.wnear, w.alice.id()).await?, 1_095 * ONE);
     // Carol tries to pay in the wrong token: refunded in full by the token contract.
     let _ = send(&w, &w.carol, &w.coin, 10 * ONE, r#"{"action":"buy","lot":0}"#).await?;
     assert_eq!(balance(&w.coin, w.carol.id()).await?, 1_000 * ONE, "wrong token refunded");
@@ -134,78 +124,56 @@ async fn tokens_listed_bought_in_parts_and_the_rest_cancelled() -> anyhow::Resul
     r.into_result()?;
     assert_eq!(balance(&w.coin, w.alice.id()).await?, 200 * ONE, "the unsold 200 came back");
     assert_eq!(balance(&w.coin, w.bazaar.id()).await?, 0, "nothing left behind");
-    assert_eq!(balance(&w.wnear, w.bazaar.id()).await?, 0, "every payment passed straight to the seller");
+    assert_eq!(balance(&w.wnear, w.alice.id()).await?, 1_380 * ONE, "Alice got 95% of the 400 paid");
+    // The only wNEAR left in the bazaar is the treasury's 5% (20), and only the treasury can take it.
+    assert_eq!(balance(&w.wnear, w.bazaar.id()).await?, 20 * ONE);
+    assert!(w.alice.call(w.bazaar.id(), "withdraw_owed").args_json(json!({"token": w.wnear.id()}))
+        .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?.is_failure());
+    let before = balance(&w.wnear, w.owner.id()).await?;
+    w.owner.call(w.bazaar.id(), "withdraw_owed").args_json(json!({"token": w.wnear.id()}))
+        .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?.into_result()?;
+    assert_eq!(balance(&w.wnear, w.owner.id()).await? - before, 20 * ONE);
+    assert_eq!(balance(&w.wnear, w.bazaar.id()).await?, 0);
     Ok(())
 }
 
 #[tokio::test]
-async fn an_nft_auction_in_near_pays_the_seller_and_refunds_the_change() -> anyhow::Result<()> {
+async fn an_nft_falling_price_sale_in_near() -> anyhow::Result<()> {
     let w = setup().await?;
     let nft = w.worker.dev_deploy(&wasm("mock_nft")).await?;
     nft.call("new").transact().await?.into_result()?;
     w.alice.call(nft.id(), "mint").args_json(json!({"token_id": "1", "title": "Genesis"}))
         .deposit(NearToken::from_millinear(20)).transact().await?.into_result()?;
+    // From 2 NEAR down to 1 NEAR over an hour.
     w.alice.call(w.bazaar.id(), "open_sale")
         .args_json(json!({"item": {"kind": "nft", "contract": nft.id(), "token_id": "1"},
-                          "terms": {"sale": "auction", "opening": (NEAR / 10).to_string(), "hours": 1}, "lore": {"title": "Genesis #1"}}))
+                          "terms": {"sale": "falling", "start": (2 * NEAR).to_string(), "floor": NEAR.to_string(), "hours": 1}, "lore": {"title": "Genesis #1"}}))
         .max_gas().transact().await?.into_result()?;
     let r = w.alice.call(nft.id(), "nft_transfer_call")
         .args_json(json!({"receiver_id": w.bazaar.id(), "token_id": "1", "msg": r#"{"action":"fund","lot":0}"#}))
         .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?;
-    println!("GAS auction an NFT: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
+    println!("GAS put an NFT up: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
     r.into_result()?;
-    let owner: Value = nft.view("nft_token").args_json(json!({"token_id": "1"})).await?.json()?;
-    assert_eq!(owner["owner_id"], w.bazaar.id().to_string(), "the NFT is held by the bazaar");
-
-    // Bob locks a 2 NEAR maximum. Carol bids 1 NEAR: outbid at once, refunded.
-    let r = w.bob.call(w.bazaar.id(), "bid").args_json(json!({"lot_id": 0})).deposit(NearToken::from_near(2)).max_gas().transact().await?;
-    println!("GAS bid: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
-    r.into_result()?;
-    let carol_before = near_of(&w.carol).await?;
-    let r = w.carol.call(w.bazaar.id(), "bid").args_json(json!({"lot_id": 0})).deposit(NearToken::from_near(1)).max_gas().transact().await?;
-    r.clone().into_result()?;
-    let carol_spent = carol_before - near_of(&w.carol).await?;
-    assert!(carol_spent < NEAR / 100, "Carol's 1 NEAR came back (she only paid gas): spent {carol_spent}");
     let l = lot(&w, 0).await?;
-    assert_eq!(l["leader"], w.bob.id().to_string());
-    assert_eq!(l["price"], (NEAR + NEAR / 10).to_string(), "Bob's price: one 10% step above Carol");
-
-    // Too early to settle.
-    assert!(w.carol.call(w.bazaar.id(), "settle").args_json(json!({"lot_id": 0})).max_gas().transact().await?.is_failure());
-    past_close(&w, 0).await?;
+    assert_eq!(l["sale"], "falling");
+    // A few blocks have passed: the price is just under 2 NEAR. Carol offers 1.5: not enough.
+    let carol_before = near_of(&w.carol).await?;
+    assert!(w.carol.call(w.bazaar.id(), "buy").args_json(json!({"lot_id": 0})).deposit(NearToken::from_millinear(1_500)).max_gas().transact().await?.is_failure());
+    assert!(carol_before - near_of(&w.carol).await? < NEAR / 100, "Carol's 1.5 NEAR came back");
+    // Bob attaches 3 NEAR and buys at the current price; the change comes back.
     let (alice_before, bob_before) = (near_of(&w.alice).await?, near_of(&w.bob).await?);
-    // Carol (anyone) settles. Alice gets 1.1 NEAR, Bob gets the NFT and 0.9 NEAR change.
-    w.carol.call(w.bazaar.id(), "settle").args_json(json!({"lot_id": 0})).max_gas().transact().await?.into_result()?;
-    assert_eq!(near_of(&w.alice).await? - alice_before, NEAR + NEAR / 10, "seller paid the public price");
-    assert_eq!(near_of(&w.bob).await? - bob_before, NEAR - NEAR / 10, "winner got the change back");
+    let r = w.bob.call(w.bazaar.id(), "buy").args_json(json!({"lot_id": 0})).deposit(NearToken::from_near(3)).max_gas().transact().await?;
+    println!("GAS buy at a falling price: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
+    let paid: u128 = r.logs().iter().find(|l| l.contains(r#""event":"buy""#)).and_then(|l| l.split(r#""paid":""#).nth(1)).and_then(|x| x.split('"').next()).unwrap().parse()?;
+    r.into_result()?;
+    println!("Bob paid {:.4} NEAR", paid as f64 / NEAR as f64);
+    assert!(paid > NEAR && paid <= 2 * NEAR);
+    let bob_spent = bob_before - near_of(&w.bob).await?;
+    assert!(bob_spent >= paid && bob_spent < paid + NEAR / 100, "Bob paid the price (+gas), not his 3 NEAR");
+    assert_eq!(near_of(&w.alice).await? - alice_before, paid - paid * 500 / 10_000, "Alice got 95% of the price");
     let owner: Value = nft.view("nft_token").args_json(json!({"token_id": "1"})).await?.json()?;
     assert_eq!(owner["owner_id"], w.bob.id().to_string(), "Bob owns the NFT");
-    assert!(w.carol.call(w.bazaar.id(), "settle").args_json(json!({"lot_id": 0})).max_gas().transact().await?.is_failure(), "only once");
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_idea_auction_below_its_reserve_refunds_the_bidder() -> anyhow::Result<()> {
-    let w = setup().await?;
-    let now_ns: u64 = w.worker.view_block().await?.timestamp();
-    let r = w.alice.call(w.bazaar.id(), "sell_idea")
-        .args_json(json!({"terms": {"sale": "auction", "opening": (10 * ONE).to_string(), "reserve": (500 * ONE).to_string(), "hours": 1},
-                          "pledge": {"amount": (1_000_000 * ONE).to_string(), "deliver_by_ns": now_ns + 240 * 3_600_000_000_000u64},
-                          "pay": w.wnear.id(), "lore": {"title": "FROG: a coin for frog people", "links": ["https://x.com/frog"]}}))
-        .max_gas().transact().await?;
-    println!("GAS sell an idea: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
-    r.into_result()?;
-    send(&w, &w.bob, &w.wnear, 300 * ONE, r#"{"action":"bid","lot":0}"#).await?.into_result()?;
-    assert_eq!(balance(&w.wnear, w.bazaar.id()).await?, 300 * ONE, "Bob's maximum is locked");
-    // The seller can't pull the auction now.
-    let pull = w.alice.call(w.bazaar.id(), "cancel").args_json(json!({"lot_id": 0}))
-        .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?;
-    assert!(pull.is_failure());
-    past_close(&w, 0).await?;
-    w.carol.call(w.bazaar.id(), "settle").args_json(json!({"lot_id": 0})).max_gas().transact().await?.into_result()?;
-    assert_eq!(balance(&w.wnear, w.bob.id()).await?, 1_000 * ONE, "reserve not met: Bob got all 300 back");
-    assert_eq!(balance(&w.wnear, w.alice.id()).await?, 1_000 * ONE, "Alice got nothing");
-    assert_eq!(balance(&w.wnear, w.bazaar.id()).await?, 0);
+    assert!(w.carol.call(w.bazaar.id(), "buy").args_json(json!({"lot_id": 0})).deposit(NearToken::from_near(3)).max_gas().transact().await?.is_failure(), "sold");
     let _ = &w.owner;
     Ok(())
 }
@@ -219,7 +187,7 @@ async fn finalize_after_review(w: &World, id: u64) -> anyhow::Result<()> {
         }
         let err = format!("{:?}", r.failures());
         anyhow::ensure!(err.contains("review still running"), "finalize failed: {err}");
-        w.worker.fast_forward(100_000).await?;
+        w.worker.fast_forward(50).await?;
     }
     anyhow::bail!("review never ended")
 }
@@ -249,18 +217,19 @@ async fn an_idea_is_funded_delivered_reviewed_and_paid() -> anyhow::Result<()> {
     r.into_result()?;
     let e: Value = w.bazaar.view("get_escrow").args_json(json!({"lot_id": 0})).await?.json()?;
     assert_eq!(e["phase"], "review");
-    // Carol objects (40%): not enough to fail it.
-    w.carol.call(w.bazaar.id(), "object").args_json(json!({"lot_id": 0})).max_gas().transact().await?.into_result()?;
+    // Carol rejects (her own 40 shares); Bob says nothing, so he accepts.
+    w.carol.call(w.bazaar.id(), "reject").args_json(json!({"lot_id": 0})).max_gas().transact().await?.into_result()?;
     finalize_after_review(&w, 0).await?;
-    assert_eq!(balance(&w.wnear, w.alice.id()).await?, 2_000 * ONE, "accepted: Alice is paid the 1,000 raised");
-    // Anyone triggers the claims; each backer gets their share of FROG.
+    assert_eq!(balance(&w.wnear, w.alice.id()).await?, 1_570 * ONE, "Alice is paid Bob's 600, minus 5%");
+    assert_eq!(balance(&frog, w.alice.id()).await?, (1_000_000_000 - 600_000) * ONE, "and gets Carol's 400k FROG back");
+    // Anyone triggers the claims: Bob gets his FROG, Carol her money.
     for who in [w.bob.id(), w.carol.id()] {
         w.owner.call(w.bazaar.id(), "claim").args_json(json!({"lot_id": 0, "account": who})).max_gas().transact().await?.into_result()?;
     }
     assert_eq!(balance(&frog, w.bob.id()).await?, 600_000 * ONE);
-    assert_eq!(balance(&frog, w.carol.id()).await?, 400_000 * ONE);
+    assert_eq!(balance(&w.wnear, w.carol.id()).await?, 1_000 * ONE, "Carol's 400 came back");
     assert_eq!(balance(&frog, w.bazaar.id()).await?, 0);
-    assert_eq!(balance(&w.wnear, w.bazaar.id()).await?, 0);
+    assert_eq!(balance(&w.wnear, w.bazaar.id()).await?, 30 * ONE, "only the treasury's 5% of 600 is left");
     Ok(())
 }
 
@@ -278,7 +247,10 @@ async fn a_rejected_delivery_refunds_backers_and_returns_the_coins() -> anyhow::
     send(&w, &w.bob, &w.wnear, 600 * ONE, r#"{"action":"buy","lot":0}"#).await?.into_result()?;
     send(&w, &w.carol, &w.wnear, 400 * ONE, r#"{"action":"buy","lot":0}"#).await?.into_result()?;
     send(&w, &w.alice, &junk, 1_000_000 * ONE, r#"{"action":"deliver","lot":0}"#).await?.into_result()?;
-    w.bob.call(w.bazaar.id(), "object").args_json(json!({"lot_id": 0})).max_gas().transact().await?.into_result()?;
+    // Both backers reject the junk.
+    for who in [&w.bob, &w.carol] {
+        who.call(w.bazaar.id(), "reject").args_json(json!({"lot_id": 0})).max_gas().transact().await?.into_result()?;
+    }
     finalize_after_review(&w, 0).await?;
     for who in [w.bob.id(), w.carol.id()] {
         w.owner.call(w.bazaar.id(), "claim").args_json(json!({"lot_id": 0, "account": who})).max_gas().transact().await?.into_result()?;

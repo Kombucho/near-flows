@@ -8,6 +8,8 @@ enum T {
     Swap(&'static str),
     Stake,
     Open,
+    /// Spends nothing, collects USDC (e.g. claim proceeds).
+    Collect,
 }
 
 impl Action for T {
@@ -16,6 +18,7 @@ impl Action for T {
             T::Swap(to) => Some(to.to_string()),
             T::Stake => Some("linear".into()),
             T::Open => None,
+            T::Collect => Some("usdc".into()),
         }
     }
     fn accepts(&self, input: &Token) -> bool {
@@ -23,6 +26,7 @@ impl Action for T {
             T::Stake => input == "near",
             T::Swap(to) => input != to,
             T::Open => true,
+            T::Collect => input == NO_INPUT,
         }
     }
 }
@@ -244,4 +248,26 @@ fn nothing_is_created_or_lost() {
             }
         }
     }
+}
+
+#[test]
+fn collectors_spend_nothing_run_on_schedule_and_pass_on_what_they_collect() {
+    const MIN: u64 = 60_000_000_000;
+    let f = vec![
+        node(NO_INPUT, T::Collect, Trigger::Every { every_ns: MIN, chunk: 1 }, &[(1, 10_000)]),
+        node("usdc", T::Swap("near"), Trigger::Now, &[]),
+    ];
+    validate(&f).unwrap();
+    let mut l = Ledger::new(f.len());
+    assert_eq!(l.fund(&f, 0, 5), Err(Error::NoInput(0)), "collectors take no money");
+    assert_eq!(l.begin(&f, 0, 0, None, false), Ok(0));
+    assert_eq!(l.finish(&f, 0, Ok(70)), Ok(vec![]));
+    assert_eq!(l.nodes[1].inbox, 70, "what it collected flows on");
+    assert_eq!(l.begin(&f, 0, MIN - 1, None, false), Err(Error::NotYet(0)), "not more often than its schedule");
+    assert_eq!(l.begin(&f, 0, MIN, None, false), Ok(0));
+    // A collector can't run in a loop ("now"), and nothing can be routed into one.
+    let looping = vec![node(NO_INPUT, T::Collect, Trigger::Now, &[])];
+    assert_eq!(validate(&looping), Err(Error::BadTrigger(0)));
+    let into = vec![node("near", T::Swap(NO_INPUT), Trigger::Now, &[(1, 100)]), node(NO_INPUT, T::Collect, Trigger::Manual, &[])];
+    assert_eq!(validate(&into), Err(Error::RouteTokenMismatch { from: 0, to: 1 }));
 }

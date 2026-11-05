@@ -1,4 +1,4 @@
-//! BAZAAR: sell anything on NEAR at your price, or auction it.
+//! BAZAAR: sell anything on NEAR at your price, or in a falling-price auction.
 //!
 //! A LOT is one thing for sale:
 //!   - tokens (any NEP-141: memecoins, bridged BTC or SOL, stablecoins...),
@@ -7,15 +7,16 @@
 //!     "10% of FROG by 1 Dec"). Buyers' money waits in escrow until the
 //!     seller delivers and buyers accept it (ideas.rs).
 //! Each lot has its LORE (title, story, image, links) and is sold either at a
-//! fixed price (a LISTING, partial buys allowed for tokens) or in an AUCTION
-//! (rules.rs). Payment is native NEAR or any token the seller chooses.
+//! fixed price (a LISTING) or at a FALLING price (a Dutch auction, rules.rs),
+//! partial buys allowed for tokens and idea shares. Payment is native NEAR or
+//! any token the seller chooses.
 //!
 //! Money safety:
-//!   - Items and bids are held by this contract until the sale ends; the
-//!     seller can cancel a listing any time, an auction only before a bid.
-//!   - `settle` can be called by anyone after an auction ends: it can only
-//!     pay the seller, the winner and the outbid, never the caller.
-//!   - Failed token payouts are kept as "owed" and can be withdrawn later.
+//!   - Items are held by this contract until sold; the seller can cancel any
+//!     time and gets back what is left.
+//!   - The item reaches the buyer BEFORE the seller is paid.
+//!   - Sellers pay a 5% fee on what they receive (kept as owed to the treasury).
+//!   - Failed payouts are kept as "owed" and can be withdrawn later.
 
 mod ideas;
 mod payout;
@@ -31,9 +32,11 @@ use near_sdk::json_types::U128;
 use near_sdk::store::LookupMap;
 use near_sdk::{env, near, require, AccountId, BorshStorageKey, NearToken, PanicOnDefault};
 
-use rules::{Auction, Close, Price, RuleError};
+use rules::{Falling, Price, RuleError};
 
 pub const HOUR_NS: u64 = 60 * 60 * 1_000_000_000;
+/// The seller's fee on every payment they receive: 5%.
+pub const FEE_BPS: u128 = 500;
 
 #[near]
 #[derive(BorshStorageKey)]
@@ -85,9 +88,9 @@ impl Lore {
 pub enum Sale {
     /// Opened by the seller, waiting for the item (`fund`). Nothing to buy yet.
     Pending(SaleTerms),
-    /// Fixed price: `price.ask` for `price.amount`; `left` still for sale.
-    Listing { price: Price, left: u128, open: bool },
-    Auction(Auction),
+    /// `price.ask` for `price.amount`; `left` still for sale. With `falling`,
+    /// the ask falls over time (a Dutch auction) and `price.ask` is the start.
+    Listing { price: Price, left: u128, open: bool, falling: Option<Falling> },
     /// The seller withdrew it before funding.
     Withdrawn,
 }
@@ -132,11 +135,12 @@ impl Lot {
 pub enum SaleTerms {
     /// `ask`: total price for everything listed.
     Listing { ask: U128 },
-    /// `hours`: 1 to 720 (default 48, like Auction Anything).
-    Auction {
-        opening: U128,
-        #[serde(default)]
-        reserve: Option<U128>,
+    /// A falling price: the total ask goes from `start` down to `floor` over
+    /// `hours` (1 to 720, default 24), then stays at the floor. The floor is
+    /// the seller's reserve: nothing ever sells below it.
+    Falling {
+        start: U128,
+        floor: U128,
         #[serde(default)]
         hours: Option<u32>,
     },
@@ -156,16 +160,26 @@ pub struct Bazaar {
     /// Ideas: the money raised per lot, and each buyer's stake ("lot|account").
     escrows: LookupMap<u64, ideas::Escrow>,
     stakes: LookupMap<String, ideas::Stake>,
-    /// Who has bought from or bid on a lot ("lot|account"): they, and the
-    /// seller, may enter the lot's private chat. Each pays for their own entry.
+    /// Who has bought from a lot ("lot|account"): they, and the seller, may
+    /// enter the lot's private chat. Each pays for their own entry.
     participants: LookupMap<String, ()>,
+    /// Where sellers' fees go.
+    treasury: AccountId,
+    /// How long backers have to accept or reject an idea's delivery.
+    review_ns: u64,
 }
 
 #[near]
 impl Bazaar {
+    /// `review_ns`: how long backers review an idea's delivery (default 72h,
+    /// at least a minute; tests use short ones).
     #[init]
-    pub fn new() -> Self {
+    pub fn new(treasury: AccountId, review_ns: Option<u64>) -> Self {
+        let review_ns = review_ns.unwrap_or(ideas::REVIEW_NS);
+        require!(review_ns >= 60_000_000_000, "review: at least a minute");
         Bazaar {
+            treasury,
+            review_ns,
             lots: LookupMap::new(Key::Lots),
             next_id: 0,
             storage: LookupMap::new(Key::Storage),
@@ -196,12 +210,12 @@ impl Bazaar {
     }
 
     /// Sell an IDEA: pledge `pledge.amount` tokens (for all `shares`) by
-    /// `pledge.deliver_by_ns`. A listing sells shares; an auction sells it whole.
+    /// `pledge.deliver_by_ns`, split into `shares` (default 1: sold whole).
     /// Buyers' money is held until delivery is accepted (ideas.rs).
     pub fn sell_idea(&mut self, terms: SaleTerms, shares: Option<U128>, pledge: ideas::Pledge, pay: Option<AccountId>, lore: Lore) -> u64 {
         let seller = env::predecessor_account_id();
         let before = env::storage_usage();
-        let shares = match terms { SaleTerms::Auction { .. } => 1, SaleTerms::Listing { .. } => shares.map_or(1, |s| s.0) };
+        let shares = shares.map_or(1, |s| s.0);
         let id = self.insert_lot(seller.clone(), Item::Idea { shares: U128(shares) }, build_sale(&terms, shares, env::block_timestamp()), pay, lore);
         self.attach_pledge(id, pledge);
         self.charge_storage(&seller, before);
@@ -219,48 +233,9 @@ impl Bazaar {
         self.pay(&None, &who, refund);
     }
 
-    /// Bid on an auction priced in native NEAR. Attach your MAXIMUM; you pay
-    /// at most that, usually less. If you are outbid it comes back at once.
-    #[payable]
-    pub fn bid(&mut self, lot_id: u64) {
-        let who = env::predecessor_account_id();
-        let amount = env::attached_deposit().as_yoctonear();
-        require!(self.lot(lot_id).pay.is_none(), "this lot is paid in a token: use ft_transfer_call");
-        self.on_bid(lot_id, &who, amount);
-    }
-
-    /// Close an auction after its end. Anyone may call it: the item goes to
-    /// the winner, the price to the seller, the change to the winner. Unsold:
-    /// the item goes back to the seller and any bid back to its bidder.
-    pub fn settle(&mut self, lot_id: u64) {
-        let mut lot = self.lot(lot_id);
-        let Sale::Auction(a) = &mut lot.sale else { env::panic_str("not an auction") };
-        let close = a.close(env::block_timestamp()).unwrap_or_else(|e| fail(e));
-        self.lots.insert(lot_id, lot.clone());
-        match close {
-            Close::Sold { winner, price, change } => {
-                let winner: AccountId = winner.parse().unwrap();
-                self.pay(&lot.pay, &winner, change);
-                if matches!(lot.item, Item::Idea { .. }) {
-                    self.escrow_add(lot_id, &winner, price, 1); // held until delivery is accepted
-                } else {
-                    self.sell_item(lot_id, &lot.item, &winner, price); // seller paid on arrival
-                }
-                self.emit("sold", &format!(r#"{{"lot":{lot_id},"winner":"{winner}","price":"{price}"}}"#));
-            }
-            Close::Unsold { refund } => {
-                if let Some((who, amount)) = refund {
-                    self.pay(&lot.pay, &who.parse().unwrap(), amount);
-                }
-                self.give(&lot.item, &lot.seller);
-                self.emit("unsold", &format!(r#"{{"lot":{lot_id}}}"#));
-            }
-        }
-    }
-
-    /// Seller only. A listing: whatever is left comes back. An auction: only
-    /// before the first bid. An idea: any time before delivery, and every
-    /// backer gets a refund. 1 yoctoNEAR proves a full-access key signed.
+    /// Seller only. A sale: whatever is left comes back. An idea: any time
+    /// before delivery, and every backer gets a refund. 1 yoctoNEAR proves a
+    /// full-access key signed.
     #[payable]
     pub fn cancel(&mut self, lot_id: u64) {
         near_sdk::assert_one_yocto();
@@ -282,10 +257,6 @@ impl Bazaar {
                 require!(*open, "already closed");
                 *open = false;
                 std::mem::take(left)
-            }
-            Sale::Auction(a) => {
-                a.cancel().unwrap_or_else(|e| fail(e));
-                lot.units()
             }
         };
         self.lots.insert(lot_id, lot.clone());
@@ -345,9 +316,11 @@ impl Bazaar {
         if idea {
             self.assert_funding(lot_id);
         }
-        let Sale::Listing { price, left, open } = &mut lot.sale else { env::panic_str("not a listing: bid instead") };
+        let Sale::Listing { price, left, open, falling } = &mut lot.sale else { env::panic_str("not for sale yet") };
         require!(*open, "listing closed");
-        let f = rules::fill(*price, *left, paid, whole).unwrap_or_else(|e| fail(e));
+        // A falling price: what the whole lot costs right now.
+        let now_price = Price { amount: price.amount, ask: falling.map_or(price.ask, |f| f.ask_at(env::block_timestamp())) };
+        let f = rules::fill(now_price, *left, paid, whole).unwrap_or_else(|e| fail(e));
         *left -= f.out;
         if *left == 0 {
             *open = false;
@@ -367,26 +340,14 @@ impl Bazaar {
         paid - f.used
     }
 
-    /// A bid of `amount` (the bidder's maximum, now held here).
-    pub(crate) fn on_bid(&mut self, lot_id: u64, who: &AccountId, amount: u128) {
-        let mut lot = self.lot(lot_id);
-        require!(&lot.seller != who, "you cannot bid on your own lot");
-        if matches!(lot.item, Item::Idea { .. }) {
-            self.assert_funding(lot_id);
+    /// Pay a seller `amount`, minus the 5% fee (kept as owed to the treasury).
+    pub(crate) fn pay_seller(&mut self, asset: &Option<AccountId>, seller: &AccountId, amount: u128) {
+        let fee = amount * FEE_BPS / 10_000;
+        if fee > 0 {
+            let t = self.treasury.clone();
+            self.add_owed(asset, &t, fee);
         }
-        let Sale::Auction(a) = &mut lot.sale else { env::panic_str("not an auction: buy instead") };
-        let r = a.bid(who.as_str(), amount, env::block_timestamp()).unwrap_or_else(|e| fail(e));
-        let ends = a.ends_ns;
-        self.lots.insert(lot_id, lot.clone());
-        // A bidder's participant entry costs storage: they pay it (so bid spam
-        // from fresh accounts cannot run up the contract's storage bill).
-        let before = env::storage_usage();
-        self.join(lot_id, who);
-        self.charge_storage(who, before);
-        if let Some((back_to, back)) = r.refund {
-            self.pay(&lot.pay, &back_to.parse().unwrap(), back);
-        }
-        self.emit("bid", &format!(r#"{{"lot":{lot_id},"bidder":"{who}","leads":{},"price":"{}","ends_ns":{ends}}}"#, r.leads, r.price));
+        self.pay(asset, seller, amount - fee);
     }
 
     fn join(&mut self, lot_id: u64, who: &AccountId) {
@@ -408,11 +369,12 @@ fn build_sale(terms: &SaleTerms, units: u128, now: u64) -> Sale {
     match terms {
         SaleTerms::Listing { ask } => {
             require!(ask.0 > 0, "price must be above 0");
-            Sale::Listing { price: Price { amount: units, ask: ask.0 }, left: units, open: true }
+            Sale::Listing { price: Price { amount: units, ask: ask.0 }, left: units, open: true, falling: None }
         }
-        SaleTerms::Auction { opening, reserve, hours } => {
-            let hours = hours.unwrap_or(48) as u64;
-            Sale::Auction(Auction::new(opening.0, reserve.map_or(0, |r| r.0), now, hours * HOUR_NS).unwrap_or_else(|e| fail(e)))
+        SaleTerms::Falling { start, floor, hours } => {
+            let hours = hours.unwrap_or(24) as u64;
+            let f = Falling::new(start.0, floor.0, now, hours * HOUR_NS).unwrap_or_else(|e| fail(e));
+            Sale::Listing { price: Price { amount: units, ask: start.0 }, left: units, open: true, falling: Some(f) }
         }
     }
 }
@@ -420,8 +382,8 @@ fn build_sale(terms: &SaleTerms, units: u128, now: u64) -> Sale {
 pub(crate) fn sale_name(s: &Sale) -> &'static str {
     match s {
         Sale::Pending(_) => "pending",
-        Sale::Listing { .. } => "listing",
-        Sale::Auction(_) => "auction",
+        Sale::Listing { falling: None, .. } => "listing",
+        Sale::Listing { falling: Some(_), .. } => "falling",
         Sale::Withdrawn => "withdrawn",
     }
 }

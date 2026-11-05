@@ -54,7 +54,7 @@ impl Bazaar {
     pub fn on_sale_delivered(&mut self, lot_id: u64, buyer: AccountId, units: U128, price: U128, #[callback_result] result: Result<(), PromiseError>) {
         let Some(lot) = self.lots.get(&lot_id).cloned() else { return };
         if result.is_ok() {
-            self.pay(&lot.pay, &lot.seller, price.0);
+            self.pay_seller(&lot.pay, &lot.seller, price.0);
             return;
         }
         self.pay(&lot.pay, &buyer, price.0);
@@ -69,12 +69,13 @@ impl Bazaar {
         self.emit("delivery_failed", &format!(r#"{{"lot":{lot_id},"buyer":"{buyer}","refund":"{}"}}"#, price.0));
     }
 
-    /// Retry a token payout that failed earlier (register on the token first).
+    /// Withdraw what you are owed: a payout that failed earlier, or (treasury)
+    /// collected fees. `token`: null for NEAR. Register on the token first.
     #[payable]
-    pub fn withdraw_owed(&mut self, token: AccountId) {
+    pub fn withdraw_owed(&mut self, token: Option<AccountId>) {
         assert_one_yocto();
         let who = env::predecessor_account_id();
-        let asset = Some(token);
+        let asset = token;
         let key = owed_key(&asset, &who);
         let amount = self.owed.get(&key).copied().unwrap_or(0);
         require!(amount > 0, "nothing owed");
@@ -93,8 +94,9 @@ impl Bazaar {
         self.give(&Item::Nft { contract: nft_contract, token_id }, &who);
     }
 
-    pub fn owed_of(&self, token: AccountId, account_id: AccountId) -> U128 {
-        U128(self.owed.get(&owed_key(&Some(token), &account_id)).copied().unwrap_or(0))
+    /// `token`: null for NEAR.
+    pub fn owed_of(&self, token: Option<AccountId>, account_id: AccountId) -> U128 {
+        U128(self.owed.get(&owed_key(&token, &account_id)).copied().unwrap_or(0))
     }
 }
 

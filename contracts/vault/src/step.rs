@@ -90,7 +90,8 @@ impl Vault {
         let left = ctx.amount.0 - in_used;
         // A call can "succeed" without doing anything: a token transfer whose receiver
         // refused it (e.g. a swap below its minimum) just refunds. Nothing spent = failed.
-        if ctx.failed || in_used == 0 {
+        let collector = self.flow(ctx.flow).nodes[ctx.node as usize].input == flow::NO_INPUT;
+        if ctx.failed || (in_used == 0 && !collector) {
             self.end(Err(left), out_amount, false)
         } else {
             self.end(Ok(out_amount), in_used, true)
@@ -159,7 +160,7 @@ impl Vault {
     /// (input token if it's a token, output token if any)
     fn tokens(&self, ctx: &StepCtx) -> (Option<AccountId>, Option<AccountId>) {
         let n = &self.flow(ctx.flow).nodes[ctx.node as usize];
-        let input = if n.input == NEAR { None } else { n.input.parse().ok() };
+        let input = if n.input == NEAR || n.input == flow::NO_INPUT { None } else { n.input.parse().ok() };
         (input, n.action.out.clone())
     }
 
@@ -227,7 +228,8 @@ impl Vault {
         let ctx = self.busy.take().unwrap();
         let (min, promises_output) = {
             let n = &self.flow(ctx.flow).nodes[ctx.node as usize];
-            (n.action.min_out_per_in.map_or(0, |m| crate::mul_div(extra, m.0, PRICE_SCALE)), n.action.out.is_some())
+            // A collector finding nothing yet is normal; only spenders must get something back.
+            (n.action.min_out_per_in.map_or(0, |m| crate::mul_div(extra, m.0, PRICE_SCALE)), n.action.out.is_some() && n.input != flow::NO_INPUT)
         };
         let f = self.flow_mut(ctx.flow);
         f.ledger.finish(&f.nodes, ctx.node, result).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));

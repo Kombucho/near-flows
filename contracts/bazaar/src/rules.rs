@@ -1,23 +1,21 @@
-//! The rules, with no blockchain in them: what a buy gets, who leads an
-//! auction, what the winner pays. The contract (lib.rs) moves the real tokens.
-//!
-//! AUCTIONS follow Auction Anything (visualizevalue/auctionanything):
-//!   - proxy bidding: you lock your MAXIMUM; the public price only rises to
-//!     one step above the runner-up's maximum, so you usually pay less;
-//!   - steps of 10%; equal maxima keep the earlier bidder;
-//!   - a bid in the last 10 minutes moves the close to 10 minutes after it;
-//!   - one live offer per bidder: bidding again raises your maximum.
-//! One difference: on a public chain your locked maximum can be read by
-//! anyone who looks. The app hides it, but it is not secret.
+//! The rules, with no blockchain in them: what a buy gets and what it costs.
+//! The contract (lib.rs) moves the real tokens.
 //!
 //! LISTINGS: a fixed price for a fixed amount. Buyers may take part of it at
 //! the same price per unit; rounding always favours the seller by < 1 unit.
+//!
+//! FALLING-PRICE AUCTIONS (Dutch): the total price starts at `start` and falls
+//! in a straight line to `floor` over the auction's duration, then stays at
+//! the floor. Whoever buys first gets it at that moment's price (for tokens
+//! and idea shares: each buyer takes what they pay for, while it lasts).
+//! Why this format: nobody's purchase changes anyone else's price, so a
+//! seller bidding against their own buyers from a second account (shill
+//! bidding) can't push the price up. The only thing a fake buyer can do is
+//! buy the item, and pay the fee on it.
 
 use math::wide::{mul_div_down, mul_div_up};
 use near_sdk::near;
 
-pub const STEP_BPS: u128 = 1_000; // 10%
-pub const SNIPE_NS: u64 = 10 * 60 * 1_000_000_000; // 10 minutes
 pub const MIN_DURATION_NS: u64 = 60 * 60 * 1_000_000_000; // 1 hour
 pub const MAX_DURATION_NS: u64 = 30 * 24 * 60 * 60 * 1_000_000_000; // 30 days
 
@@ -25,12 +23,9 @@ pub const MAX_DURATION_NS: u64 = 30 * 24 * 60 * 60 * 1_000_000_000; // 30 days
 pub enum RuleError {
     ZeroAmount,
     TooSmall,               // pays for less than one unit
-    TooLow { min: u128 },   // bid below the next allowed bid
-    Closed,
-    NotClosed { ends_ns: u64 },
-    AlreadySettled,
-    HasBids,
+    TooLow { min: u128 },   // pays less than the price of an indivisible item
     BadDuration,
+    FloorAboveStart,
 }
 
 /// What a listing still has for sale: `left` of the `amount` listed, at
@@ -70,156 +65,40 @@ pub fn fill(p: Price, left: u128, paid: u128, whole_only: bool) -> Result<Fill, 
     Ok(Fill { out, used: paid })
 }
 
+/// A falling price: the total ask goes from `start_ask` at `start_ns` to
+/// `floor_ask` at `end_ns`, in a straight line, then stays at the floor.
 #[near(serializers = [borsh])]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Bid {
-    pub who: String,
-    pub max: u128, // locked in the contract
-    pub at_ns: u64,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Falling {
+    pub start_ask: u128,
+    pub floor_ask: u128,
+    pub start_ns: u64,
+    pub end_ns: u64,
 }
 
-/// An auction's live state.
-#[near(serializers = [borsh])]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Auction {
-    pub opening: u128, // first bid must be at least this
-    pub reserve: u128, // below this at the close, nothing sells (0 = none)
-    pub ends_ns: u64,
-    pub leader: Option<Bid>,
-    pub runner_up_max: u128,
-    pub price: u128, // public price: what the leader pays if it closed now
-    pub bids: u32,
-    pub settled: bool,
-}
-
-/// What a bid did. `refund`: someone's locked maximum to send back now
-/// (the outbid leader, or the new bidder if they did not take the lead).
-#[derive(Debug, PartialEq, Eq)]
-pub struct BidResult {
-    pub leads: bool,
-    pub refund: Option<(String, u128)>,
-    pub price: u128,
-    pub extended: bool,
-}
-
-/// The close: who gets the item, and the money flows.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Close {
-    /// Sold: `winner` pays `price` to the seller and gets `change` back.
-    Sold { winner: String, price: u128, change: u128 },
-    /// Not sold (no bids, or reserve not met): item back to the seller,
-    /// and the leader's maximum (if any) back to them.
-    Unsold { refund: Option<(String, u128)> },
-}
-
-/// The next allowed public bid after `price`: +10%, rounded up, at least +1.
-pub fn next_bid(price: u128) -> u128 {
-    price + mul_div_up(price, STEP_BPS, 10_000).max(1)
-}
-
-impl Auction {
-    pub fn new(opening: u128, reserve: u128, now_ns: u64, duration_ns: u64) -> Result<Auction, RuleError> {
-        if opening == 0 {
+impl Falling {
+    pub fn new(start_ask: u128, floor_ask: u128, start_ns: u64, duration_ns: u64) -> Result<Self, RuleError> {
+        if start_ask == 0 || floor_ask == 0 {
             return Err(RuleError::ZeroAmount);
+        }
+        if floor_ask > start_ask {
+            return Err(RuleError::FloorAboveStart);
         }
         if !(MIN_DURATION_NS..=MAX_DURATION_NS).contains(&duration_ns) {
             return Err(RuleError::BadDuration);
         }
-        Ok(Auction { opening, reserve, ends_ns: now_ns + duration_ns, leader: None, runner_up_max: 0, price: 0, bids: 0, settled: false })
+        Ok(Self { start_ask, floor_ask, start_ns, end_ns: start_ns + duration_ns })
     }
 
-    /// The least a NEW bidder must lock right now.
-    pub fn min_bid(&self) -> u128 {
-        if self.leader.is_some() { next_bid(self.price) } else { self.opening }
-    }
-
-    /// `who` locks `amount` more. The current leader adding to their bid only
-    /// raises their maximum; anyone else must lock at least `min_bid()`.
-    pub fn bid(&mut self, who: &str, amount: u128, now_ns: u64) -> Result<BidResult, RuleError> {
-        if self.settled || now_ns >= self.ends_ns {
-            return Err(RuleError::Closed);
+    /// The total ask at `now` (rounded up: the seller never gets less than the line).
+    pub fn ask_at(&self, now: u64) -> u128 {
+        if now >= self.end_ns {
+            return self.floor_ask;
         }
-        if amount == 0 {
-            return Err(RuleError::ZeroAmount);
-        }
-        let mut refund = None;
-        let leads;
-        match self.leader.as_mut() {
-            Some(l) if l.who == who => {
-                l.max += amount; // one live offer per bidder: raise it
-                leads = true;
-            }
-            _ => {
-                let min = self.min_bid();
-                if amount < min {
-                    return Err(RuleError::TooLow { min });
-                }
-                let new = Bid { who: who.to_string(), max: amount, at_ns: now_ns };
-                match self.leader.take() {
-                    None => {
-                        self.price = self.opening;
-                        self.leader = Some(new);
-                        leads = true;
-                    }
-                    Some(old) if new.max > old.max => {
-                        // New leader. The old one is outbid: their maximum goes back.
-                        self.runner_up_max = self.runner_up_max.max(old.max);
-                        self.price = new.max.min(self.price.max(next_bid(self.runner_up_max)));
-                        refund = Some((old.who, old.max));
-                        self.leader = Some(new);
-                        leads = true;
-                    }
-                    Some(old) => {
-                        // Not enough to lead (ties keep the earlier bid), but it
-                        // pushes the leader's public price up to just above it.
-                        self.runner_up_max = self.runner_up_max.max(new.max);
-                        self.price = old.max.min(self.price.max(next_bid(new.max)));
-                        refund = Some((new.who, new.max));
-                        self.leader = Some(old);
-                        leads = false;
-                    }
-                }
-            }
-        }
-        // Reaching the reserve: the price jumps to it if the leader's maximum covers it.
-        let lmax = self.leader.as_ref().map_or(0, |l| l.max);
-        self.price = self.price.max(self.reserve.min(lmax));
-        self.bids += 1;
-        let extended = now_ns + SNIPE_NS > self.ends_ns;
-        if extended {
-            self.ends_ns = now_ns + SNIPE_NS;
-        }
-        Ok(BidResult { leads, refund, price: self.price, extended })
-    }
-
-    /// Close the auction (anyone, once it has ended).
-    pub fn close(&mut self, now_ns: u64) -> Result<Close, RuleError> {
-        if self.settled {
-            return Err(RuleError::AlreadySettled);
-        }
-        if now_ns < self.ends_ns {
-            return Err(RuleError::NotClosed { ends_ns: self.ends_ns });
-        }
-        self.settled = true;
-        Ok(match self.leader.clone() {
-            Some(l) if l.max >= self.reserve => {
-                Close::Sold { winner: l.who, price: self.price, change: l.max - self.price }
-            }
-            Some(l) => Close::Unsold { refund: Some((l.who, l.max)) },
-            None => Close::Unsold { refund: None },
-        })
-    }
-
-    /// The seller may cancel only before the first bid.
-    pub fn cancel(&mut self) -> Result<(), RuleError> {
-        if self.leader.is_some() {
-            return Err(RuleError::HasBids);
-        }
-        if self.settled {
-            return Err(RuleError::AlreadySettled);
-        }
-        self.settled = true;
-        Ok(())
+        let elapsed = now.saturating_sub(self.start_ns) as u128;
+        let span = (self.end_ns - self.start_ns) as u128;
+        let drop = mul_div_down(self.start_ask - self.floor_ask, elapsed, span);
+        self.start_ask - drop
     }
 }
 
@@ -228,10 +107,6 @@ mod tests {
     use super::*;
 
     const H: u64 = 60 * 60 * 1_000_000_000;
-
-    fn auction() -> Auction {
-        Auction::new(100, 0, 0, 48 * H).unwrap()
-    }
 
     #[test]
     fn a_listing_sells_in_parts_at_the_same_price_per_unit() {
@@ -253,102 +128,28 @@ mod tests {
     }
 
     #[test]
-    fn the_leader_pays_one_step_above_the_runner_up_not_their_maximum() {
-        let mut a = auction();
-        assert_eq!(a.bid("alice", 99, H), Err(RuleError::TooLow { min: 100 }));
-        let r = a.bid("alice", 1_000, H).unwrap();
-        assert!(r.leads && r.refund.is_none());
-        assert_eq!(a.price, 100, "alone: pays the opening bid");
-        let r = a.bid("bob", 200, 2 * H).unwrap();
-        assert!(!r.leads);
-        assert_eq!(r.refund, Some(("bob".into(), 200)), "bob is outbid at once and refunded");
-        assert_eq!(a.price, 220, "alice's price rises to one step above bob's maximum");
-        let r = a.bid("carol", 2_000, 3 * H).unwrap();
-        assert!(r.leads);
-        assert_eq!(r.refund, Some(("alice".into(), 1_000)), "alice's whole maximum goes back");
-        assert_eq!(a.price, 1_100);
-        a.ends_ns = 48 * H;
-        assert_eq!(a.close(48 * H), Ok(Close::Sold { winner: "carol".into(), price: 1_100, change: 900 }));
+    fn a_falling_price_drops_in_a_straight_line_then_holds_at_the_floor() {
+        let f = Falling::new(1_000, 400, 10 * H, 6 * H).unwrap();
+        assert_eq!(f.ask_at(0), 1_000, "before the start: the start price");
+        assert_eq!(f.ask_at(10 * H), 1_000);
+        assert_eq!(f.ask_at(13 * H), 700, "halfway: halfway down");
+        assert_eq!(f.ask_at(16 * H), 400);
+        assert_eq!(f.ask_at(1_000 * H), 400, "never below the floor");
+        assert_eq!(Falling::new(400, 1_000, 0, 6 * H), Err(RuleError::FloorAboveStart));
+        assert_eq!(Falling::new(1_000, 400, 0, H / 2), Err(RuleError::BadDuration));
+        assert_eq!(Falling::new(1_000, 0, 0, 6 * H), Err(RuleError::ZeroAmount));
+        assert_eq!(Falling::new(500, 500, 0, H).unwrap().ask_at(30 * H), 500, "start = floor: a plain listing");
     }
 
     #[test]
-    fn a_tie_keeps_the_earlier_bidder_at_their_full_maximum() {
-        let mut a = auction();
-        a.bid("alice", 500, H).unwrap();
-        let r = a.bid("bob", 500, 2 * H).unwrap();
-        assert!(!r.leads);
-        assert_eq!(a.price, 500, "capped at alice's maximum");
-        assert_eq!(a.leader.as_ref().unwrap().who, "alice");
-    }
-
-    #[test]
-    fn bidding_again_raises_your_own_maximum() {
-        let mut a = auction();
-        a.bid("alice", 150, H).unwrap();
-        let r = a.bid("alice", 50, 2 * H).unwrap();
-        assert!(r.leads && r.refund.is_none());
-        assert_eq!(a.leader.as_ref().unwrap().max, 200);
-        assert_eq!(a.price, 100, "raising your own maximum does not raise your price");
-    }
-
-    #[test]
-    fn a_bid_in_the_last_ten_minutes_extends_the_close() {
-        let mut a = auction();
-        let late = 48 * H - SNIPE_NS / 2;
-        let r = a.bid("alice", 100, late).unwrap();
-        assert!(r.extended);
-        assert_eq!(a.ends_ns, late + SNIPE_NS);
-        let later = late + SNIPE_NS / 2;
-        assert!(a.bid("bob", 200, later).unwrap().extended, "and again for the next late bid");
-        assert_eq!(a.ends_ns, later + SNIPE_NS);
-        assert_eq!(a.bid("carol", 1_000, a.ends_ns), Err(RuleError::Closed));
-    }
-
-    #[test]
-    fn the_reserve_is_met_or_nothing_sells() {
-        let mut a = Auction::new(100, 500, 0, 48 * H).unwrap();
-        a.bid("alice", 300, H).unwrap();
-        assert_eq!(a.close(48 * H), Ok(Close::Unsold { refund: Some(("alice".into(), 300)) }));
-        let mut a = Auction::new(100, 500, 0, 48 * H).unwrap();
-        a.bid("alice", 800, H).unwrap();
-        assert_eq!(a.price, 500, "a maximum above the reserve jumps the price to the reserve");
-        assert_eq!(a.close(48 * H), Ok(Close::Sold { winner: "alice".into(), price: 500, change: 300 }));
-    }
-
-    #[test]
-    fn closing_happens_once_and_only_after_the_end() {
-        let mut a = auction();
-        assert_eq!(a.close(H), Err(RuleError::NotClosed { ends_ns: 48 * H }));
-        assert_eq!(a.close(48 * H), Ok(Close::Unsold { refund: None }));
-        assert_eq!(a.close(49 * H), Err(RuleError::AlreadySettled));
-        let mut b = auction();
-        b.bid("alice", 100, H).unwrap();
-        assert_eq!(b.cancel(), Err(RuleError::HasBids), "no pulling the item once someone has bid");
-    }
-
-    #[test]
-    fn the_money_always_adds_up() {
-        // Random bids: at every step, locked = leader's max; refunds + locked = everything bid.
-        let mut seed = 7u64;
-        let mut rnd = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); seed >> 33 };
-        for _ in 0..200 {
-            let mut a = auction();
-            let (mut bid_total, mut refunded) = (0u128, 0u128);
-            for t in 0..30u64 {
-                let who = ["a", "b", "c", "d"][(rnd() % 4) as usize];
-                let amt = a.min_bid() + (rnd() % 500) as u128;
-                if let Ok(r) = a.bid(who, amt, t * H) {
-                    bid_total += amt;
-                    refunded += r.refund.map_or(0, |x| x.1);
-                    let l = a.leader.as_ref().unwrap();
-                    assert_eq!(bid_total - refunded, l.max, "only the leader's maximum stays locked");
-                    assert!(a.price <= l.max, "never pays more than their maximum");
-                }
-            }
-            let ends = a.ends_ns;
-            if let Ok(Close::Sold { price, change, .. }) = a.close(ends) {
-                assert_eq!(price + change, bid_total - refunded);
-            }
+    fn the_price_never_rises_whatever_anyone_does() {
+        // The ask depends on time only: no buy, bid or account can move it up.
+        let f = Falling::new(10_000, 1, 0, 30 * 24 * H).unwrap();
+        let mut last = u128::MAX;
+        for t in (0..=31 * 24).map(|h| h as u64 * H) {
+            let a = f.ask_at(t);
+            assert!(a <= last && a >= 1);
+            last = a;
         }
     }
 }

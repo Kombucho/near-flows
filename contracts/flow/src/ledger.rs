@@ -10,7 +10,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::{entries, Action, Error, Node, Token, Trigger, BPS, MAX_FAILURES};
+use crate::{entries, Action, Error, Node, Token, Trigger, BPS, MAX_FAILURES, NO_INPUT};
 
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize), serde(crate = "serde"))]
@@ -53,6 +53,9 @@ impl Ledger {
         if !entries(flow).contains(&i) {
             return Err(Error::NotEntry(i));
         }
+        if flow[i as usize].input == NO_INPUT {
+            return Err(Error::NoInput(i)); // collectors take no money
+        }
         let s = self.state(i)?;
         s.inbox = s.inbox.checked_add(amount).ok_or(Error::Insufficient)?;
         Ok(())
@@ -68,6 +71,17 @@ impl Ledger {
         let s = self.state(i)?;
         if s.failures >= MAX_FAILURES {
             return Err(Error::Paused(i));
+        }
+        if node.input == NO_INPUT {
+            // A collector: nothing to spend, only its schedule (or its owner) decides.
+            match node.when {
+                Trigger::Every { every_ns, .. } if s.runs > 0 && now_ns < s.last_run_ns.saturating_add(every_ns) => return Err(Error::NotYet(i)),
+                Trigger::Manual if !by_owner => return Err(Error::OwnerOnly(i)),
+                _ => {}
+            }
+            s.last_run_ns = now_ns;
+            self.busy = Some(i);
+            return Ok(0);
         }
         if s.inbox == 0 {
             return Err(Error::NoInput(i));

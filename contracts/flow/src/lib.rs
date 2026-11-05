@@ -33,6 +33,10 @@ use serde::{Deserialize, Serialize};
 /// A token: "near" for native NEAR, otherwise the NEP-141 contract account id.
 pub type Token = String;
 
+/// The input of a COLLECTOR node: it spends nothing and only collects (claim
+/// an idea's coin, settle positions). It runs on a schedule (`every`) or by hand.
+pub const NO_INPUT: &str = "none";
+
 pub const MAX_NODES: usize = 32;
 pub const MAX_ROUTES: usize = 8;
 pub const BPS: u32 = 10_000;
@@ -133,6 +137,9 @@ pub fn validate<A: Action>(nodes: &[Node<A>]) -> Result<(), Error> {
         if !n.action.accepts(&n.input) {
             return Err(Error::BadInput(i));
         }
+        if n.input == NO_INPUT && !matches!(n.when, Trigger::Every { .. } | Trigger::Manual) {
+            return Err(Error::BadTrigger(i)); // a collector runs on a schedule or by hand, never in a loop
+        }
         match n.when {
             Trigger::Every { every_ns, chunk } if every_ns < MIN_EVERY_NS || chunk == 0 => return Err(Error::BadTrigger(i)),
             Trigger::PriceBelow { price } | Trigger::PriceAbove { price } if price == 0 => return Err(Error::BadTrigger(i)),
@@ -151,7 +158,7 @@ pub fn validate<A: Action>(nodes: &[Node<A>]) -> Result<(), Error> {
                 return Err(Error::RouteBackwards { from: i, to: r.to });
             }
             let target = nodes.get(r.to as usize).ok_or(Error::NoSuchNode(r.to))?;
-            if Some(&target.input) != out.as_ref() {
+            if Some(&target.input) != out.as_ref() || target.input == NO_INPUT {
                 return Err(Error::RouteTokenMismatch { from: i, to: r.to });
             }
             total += r.bps as u32;

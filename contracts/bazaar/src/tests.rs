@@ -8,6 +8,7 @@ use near_sdk::test_utils::{get_logs, VMContextBuilder};
 use near_sdk::{testing_env, AccountId, NearToken};
 
 use crate::ideas::{Phase, Pledge, REVIEW_NS};
+use crate::FEE_BPS;
 use crate::{Bazaar, Lore, SaleItem, SaleTerms, HOUR_NS};
 
 fn acc(s: &str) -> AccountId {
@@ -30,7 +31,7 @@ fn lore(title: &str) -> Lore {
 /// A bazaar where `seller` has prepaid storage.
 fn bazaar(seller: &str) -> Bazaar {
     ctx("owner", 0, 0);
-    let mut b = Bazaar::new();
+    let mut b = Bazaar::new(acc("treasury.near"), None);
     ctx(seller, NearToken::from_near(1).as_yoctonear(), 0);
     b.storage_deposit(None);
     b
@@ -84,39 +85,56 @@ fn paying_with_the_wrong_token_is_refused() {
 }
 
 #[test]
-fn an_nft_auction_in_near_with_proxy_bids_and_settle() {
+fn an_nft_falling_price_sale_in_near() {
     let mut b = bazaar("alice");
     deposit(&mut b, "bob");
     deposit(&mut b, "carol");
     ctx("alice", 0, 0);
     let item = SaleItem::Nft { contract: acc("art.near"), token_id: "1".into() };
-    b.open_sale(item, SaleTerms::Auction { opening: U128(100), reserve: None, hours: Some(48) }, None, lore("Genesis #1"));
+    b.open_sale(item, SaleTerms::Falling { start: U128(1_000), floor: U128(400), hours: Some(6) }, None, lore("Genesis #1"));
     ctx("art.near", 0, 0);
     let keep = b.nft_on_transfer(acc("alice"), acc("alice"), "1".into(), r#"{"action":"fund","lot":0}"#.into());
     assert!(matches!(keep, near_sdk::PromiseOrValue::Value(false)), "the NFT stays here, for sale");
-    ctx("bob", 1_000, HOUR_NS);
-    b.bid(0);
-    ctx("carol", 300, 2 * HOUR_NS);
-    b.bid(0); // carol is outbid at once: bob's maximum is 1000
     let lot = b.get_lot(0).unwrap();
-    assert_eq!((lot.leader, lot.price), (Some(acc("bob")), Some(U128(330))));
-    ctx("dave", 1, 49 * HOUR_NS);
-    b.settle(0);
+    assert_eq!((lot.sale.as_str(), lot.ask, lot.floor), ("falling", Some(U128(1_000)), Some(U128(400))));
+    // Three hours in, the price is halfway down: 700. Bob pays 650: not enough, refused.
+    ctx("bob", 650, 3 * HOUR_NS);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.buy(0)));
+    assert!(r.is_err(), "below the current price");
+    ctx("carol", 900, 3 * HOUR_NS);
+    b.buy(0);
     let ev = events().join("\n");
-    assert!(ev.contains(r#""event":"sold""#) && ev.contains(r#""winner":"bob""#) && ev.contains(r#""price":"330""#), "{ev}");
+    assert!(ev.contains(r#""paid":"700""#), "Carol paid the price at that moment, 200 refunded: {ev}");
+    assert!(!b.get_lot(0).unwrap().open, "sold");
 }
 
 #[test]
-#[should_panic(expected = "NotClosed")]
-fn nobody_can_settle_early() {
+fn the_price_holds_at_the_floor_and_nobody_can_push_it_up() {
     let mut b = bazaar("alice");
     deposit(&mut b, "bob");
+    deposit(&mut b, "shill");
     ctx("alice", 0, 0);
-    b.sell_idea(SaleTerms::Auction { opening: U128(10), reserve: None, hours: Some(48) }, None, pledge(), None, lore("My coin idea"));
-    ctx("bob", 1_000, HOUR_NS);
-    b.bid(0);
-    ctx("bob", 0, 2 * HOUR_NS);
-    b.settle(0);
+    b.open_sale(SaleItem::Ft { token: acc("coin.near") }, SaleTerms::Falling { start: U128(1_000), floor: U128(100), hours: Some(10) }, None, lore("Coins"));
+    ctx("coin.near", 0, 0);
+    let _ = b.ft_on_transfer(acc("alice"), U128(1_000), r#"{"action":"fund","lot":0}"#.into());
+    // A "shill" buying a little at the top doesn't change the price anyone else pays.
+    ctx("shill", 100, 0);
+    b.buy(0); // 100 units at 1 per unit
+    ctx("bob", 0, 5 * HOUR_NS);
+    assert_eq!(b.get_lot(0).unwrap().ask, Some(U128(550)), "time alone sets the price");
+    ctx("bob", 0, 99 * HOUR_NS);
+    assert_eq!(b.get_lot(0).unwrap().ask, Some(U128(100)), "then it stays at the floor");
+    ctx("bob", 90, 99 * HOUR_NS);
+    b.buy(0);
+    assert_eq!(b.get_lot(0).unwrap().left, Some(U128(0)), "900 units left at 0.1 each: 90 buys them all");
+}
+
+#[test]
+#[should_panic(expected = "FloorAboveStart")]
+fn the_floor_cannot_be_above_the_start() {
+    let mut b = bazaar("alice");
+    ctx("alice", 0, 0);
+    b.sell_idea(SaleTerms::Falling { start: U128(10), floor: U128(20), hours: None }, None, pledge(), None, lore("x"));
 }
 
 #[test]
@@ -133,33 +151,20 @@ fn an_idea_listing_is_bought_whole() {
 }
 
 #[test]
-#[should_panic(expected = "HasBids")]
-fn the_seller_cannot_pull_an_auction_after_a_bid() {
-    let mut b = bazaar("alice");
-    deposit(&mut b, "bob");
-    ctx("alice", 0, 0);
-    b.sell_idea(SaleTerms::Auction { opening: U128(10), reserve: None, hours: None }, None, pledge(), None, lore("x"));
-    ctx("bob", 50, HOUR_NS);
-    b.bid(0);
-    ctx("alice", 1, 2 * HOUR_NS);
-    b.cancel(0);
-}
-
-#[test]
-#[should_panic(expected = "you cannot bid on your own lot")]
-fn no_bidding_on_your_own_lot() {
+#[should_panic(expected = "you cannot buy your own lot")]
+fn no_buying_your_own_lot() {
     let mut b = bazaar("alice");
     ctx("alice", 0, 0);
-    b.sell_idea(SaleTerms::Auction { opening: U128(10), reserve: None, hours: None }, None, pledge(), None, lore("x"));
+    b.sell_idea(SaleTerms::Listing { ask: U128(10) }, None, pledge(), None, lore("x"));
     ctx("alice", 50, HOUR_NS);
-    b.bid(0);
+    b.buy(0);
 }
 
 #[test]
 #[should_panic(expected = "not enough storage balance")]
 fn listing_needs_prepaid_storage() {
     ctx("owner", 0, 0);
-    let mut b = Bazaar::new();
+    let mut b = Bazaar::new(acc("treasury.near"), None);
     ctx("alice", 0, 0);
     b.sell_idea(SaleTerms::Listing { ask: U128(5) }, None, pledge(), None, lore("x"));
 }
@@ -206,7 +211,7 @@ fn backing_an_idea_needs_prepaid_storage() {
 }
 
 #[test]
-fn an_idea_holds_the_money_until_delivery_is_accepted() {
+fn an_idea_holds_the_money_until_delivery_and_each_backer_decides_for_themselves() {
     let mut b = funded_idea();
     let e = b.get_escrow(0).unwrap();
     assert_eq!((e.phase, e.raised, e.sold), (Phase::Funding, U128(1_000), U128(100)));
@@ -216,30 +221,55 @@ fn an_idea_holds_the_money_until_delivery_is_accepted() {
     let r = b.ft_on_transfer(acc("alice"), U128(1_000_005), r#"{"action":"deliver","lot":0}"#.into());
     assert!(matches!(r, near_sdk::PromiseOrValue::Value(U128(5))));
     assert_eq!(phase(&b), Phase::Review);
-    // Carol (40% of the money) objects: under 50%, so the delivery stands.
+    // Carol (40 shares, paid 400) rejects. Bob (60 shares) does nothing: he accepts.
     ctx("carol", 0, 3 * HOUR_NS);
-    b.object(0);
+    b.reject(0);
     ctx("dave", 0, 2 * HOUR_NS + REVIEW_NS);
     b.finalize(0);
     assert_eq!(phase(&b), Phase::Released);
-    b.claim(0, acc("bob"));
-    b.claim(0, acc("carol"));
     let ev = events().join("\n");
-    assert!(ev.contains(r#""accepted":true"#), "{ev}");
+    assert!(ev.contains(r#""paid_to_seller":"600""#) && ev.contains(r#""rejected_shares":"40""#), "{ev}");
+    // The fee: 5% of the 600 Alice receives is owed to the treasury.
+    assert_eq!(b.owed_of(None, acc("treasury.near")), U128(600 * FEE_BPS / 10_000));
+    b.claim(0, acc("bob")); // 60% of the FROG
+    b.claim(0, acc("carol")); // her 400 back
+    let ev = events().join("\n");
+    assert!(ev.contains(r#""buyer":"carol""#), "{ev}");
 }
 
 #[test]
-fn half_the_money_objecting_refunds_everyone() {
+fn fake_backers_cannot_overrule_real_ones() {
+    // The old 50% vote could be won by the seller's own accounts. Now there is
+    // nothing to win: Alice's sock puppet accepting changes nothing for Bob.
+    let mut b = bazaar("alice");
+    deposit(&mut b, "bob");
+    deposit(&mut b, "sock");
+    ctx("alice", 0, 0);
+    b.sell_idea(SaleTerms::Listing { ask: U128(1_000) }, Some(U128(100)), pledge(), None, lore("FROG"));
+    ctx("sock", 900, HOUR_NS); // the seller's puppet buys 90%
+    b.buy(0);
+    ctx("bob", 100, HOUR_NS);
+    b.buy(0);
+    ctx("frog.near", 0, 2 * HOUR_NS);
+    let _ = b.ft_on_transfer(acc("alice"), U128(1_000_000), r#"{"action":"deliver","lot":0}"#.into());
+    ctx("bob", 0, 3 * HOUR_NS);
+    b.reject(0); // a fake delivery: Bob wants his money back
+    ctx("dave", 0, 2 * HOUR_NS + REVIEW_NS);
+    b.finalize(0);
+    assert!(b.get_stake(0, acc("bob")).unwrap().rejected);
+    b.claim(0, acc("bob"));
+    let ev = events().join("\n");
+    assert!(ev.contains(r#""paid_to_seller":"900""#), "Alice only gets her own puppet's money (minus the fee): {ev}");
+}
+
+#[test]
+#[should_panic(expected = "not in review")]
+fn rejecting_after_the_review_is_too_late() {
     let mut b = funded_idea();
     ctx("frog.near", 0, 2 * HOUR_NS);
     let _ = b.ft_on_transfer(acc("alice"), U128(1_000_000), r#"{"action":"deliver","lot":0}"#.into());
-    ctx("bob", 0, 3 * HOUR_NS); // Bob paid 60%
-    b.object(0);
-    ctx("dave", 0, 2 * HOUR_NS + REVIEW_NS);
-    b.finalize(0);
-    assert_eq!(phase(&b), Phase::Refunding);
-    b.claim(0, acc("carol"));
-    assert_eq!(b.get_stake(0, acc("carol")).unwrap().claimed, true);
+    ctx("carol", 0, 2 * HOUR_NS + REVIEW_NS);
+    b.reject(0);
 }
 
 #[test]
@@ -283,12 +313,12 @@ fn only_the_seller_can_deliver() {
 
 #[test]
 #[should_panic(expected = "you hold no stake")]
-fn only_backers_can_object() {
+fn only_backers_can_reject() {
     let mut b = funded_idea();
     ctx("frog.near", 0, 2 * HOUR_NS);
     let _ = b.ft_on_transfer(acc("alice"), U128(1_000_000), r#"{"action":"deliver","lot":0}"#.into());
     ctx("mallory", 0, 3 * HOUR_NS);
-    b.object(0);
+    b.reject(0);
 }
 
 #[test]
@@ -320,13 +350,13 @@ fn the_seller_cancelling_refunds_backers() {
 }
 
 #[test]
-fn the_private_room_is_the_seller_and_everyone_who_bid() {
+fn the_private_room_is_the_seller_and_everyone_who_bought() {
     let mut b = bazaar("alice");
     deposit(&mut b, "bob");
     ctx("alice", 0, 0);
-    b.sell_idea(SaleTerms::Auction { opening: U128(10), reserve: None, hours: None }, None, pledge(), None, lore("x"));
-    ctx("bob", 50, HOUR_NS);
-    b.bid(0);
+    b.sell_idea(SaleTerms::Listing { ask: U128(100) }, Some(U128(10)), pledge(), None, lore("x"));
+    ctx("bob", 10, HOUR_NS);
+    b.buy(0);
     assert!(b.is_participant(0, acc("alice")));
     assert!(b.is_participant(0, acc("bob")));
     assert!(!b.is_participant(0, acc("mallory")));
@@ -335,12 +365,12 @@ fn the_private_room_is_the_seller_and_everyone_who_bid() {
 
 #[test]
 #[should_panic(expected = "not enough storage balance")]
-fn a_bidder_pays_for_their_own_entry() {
+fn a_buyer_pays_for_their_own_entry() {
     let mut b = bazaar("alice");
     ctx("alice", 0, 0);
-    b.sell_idea(SaleTerms::Auction { opening: U128(10), reserve: None, hours: None }, None, pledge(), None, lore("x"));
-    ctx("mallory", 50, HOUR_NS);
-    b.bid(0);
+    b.sell_idea(SaleTerms::Listing { ask: U128(100) }, Some(U128(10)), pledge(), None, lore("x"));
+    ctx("mallory", 10, HOUR_NS);
+    b.buy(0);
 }
 
 // ---- red team: attacks that must fail ----
@@ -386,7 +416,7 @@ fn funding_with_a_different_nft_is_refused() {
 }
 
 #[test]
-#[should_panic(expected = "not a listing")]
+#[should_panic(expected = "not for sale yet")]
 fn nothing_can_be_bought_before_the_item_arrives() {
     let mut b = bazaar("alice");
     deposit(&mut b, "bob");

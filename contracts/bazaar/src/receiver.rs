@@ -4,8 +4,7 @@
 //! someone else's name: `open_sale` (signed by the seller), then the item:
 //!   {"action":"fund","lot":7}     via ft_transfer_call or nft_transfer_call
 //! Tokens (`ft_transfer_call` on the token, receiver = this contract):
-//!   {"action":"buy","lot":7}      pay for a listing priced in this token (excess refunded)
-//!   {"action":"bid","lot":7}      bid on an auction priced in this token (amount = your maximum)
+//!   {"action":"buy","lot":7}      buy from a listing or falling-price sale in this token (excess refunded)
 //!   {"action":"deliver","lot":7}  seller of an idea: deliver the pledged tokens (ideas.rs)
 //!
 //! If anything fails the call aborts and the token contract refunds the
@@ -25,7 +24,6 @@ use crate::{Bazaar, BazaarExt};
 enum Msg {
     Fund { lot: u64 },
     Buy { lot: u64 },
-    Bid { lot: u64 },
     Deliver { lot: u64 },
 }
 
@@ -45,11 +43,6 @@ impl FungibleTokenReceiver for Bazaar {
             Msg::Buy { lot } => {
                 require!(self.lot(lot).pay.as_ref() == Some(&token), "this lot is not paid in this token");
                 self.on_buy(lot, &sender_id, amount.0)
-            }
-            Msg::Bid { lot } => {
-                require!(self.lot(lot).pay.as_ref() == Some(&token), "this lot is not paid in this token");
-                self.on_bid(lot, &sender_id, amount.0);
-                0
             }
             Msg::Deliver { lot } => self.deliver(lot, &sender_id, token, amount.0),
         };

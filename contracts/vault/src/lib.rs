@@ -121,10 +121,12 @@ impl Action for Recipe {
     }
     fn accepts(&self, input: &Token) -> bool {
         let spenders: Vec<&Call> = self.calls.iter().filter(|c| c.spends_input()).collect();
-        let [spender] = spenders.as_slice() else { return false };
-        let right_kind = match spender {
-            Call::Ft { .. } => input != NEAR,
-            Call::Fn { .. } => input == NEAR,
+        let right_kind = match spenders.as_slice() {
+            // A collector spends nothing and must hand something out.
+            [] => input == flow::NO_INPUT && self.out.is_some(),
+            [Call::Ft { .. }] => input != NEAR && input != flow::NO_INPUT,
+            [Call::Fn { .. }] => input == NEAR,
+            _ => false,
         };
         let total_gas: u64 = self.calls.iter().map(Call::tgas).sum();
         right_kind
@@ -419,7 +421,7 @@ impl Vault {
             Some(t) if !t.methods.iter().any(|x| x == m) => Some(format!("method {a}.{m}")),
             Some(_) => None,
         };
-        if n.input != NEAR {
+        if n.input != NEAR && n.input != flow::NO_INPUT {
             let t: AccountId = n.input.parse().unwrap_or_else(|_| env::panic_str("bad input token"));
             if let Some(w) = contract_ok(&t) {
                 return Some(w);
