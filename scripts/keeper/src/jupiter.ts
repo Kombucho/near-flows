@@ -13,7 +13,9 @@
 // The helper never holds keys or funds: the worst it can do is not show up.
 //
 // Environment: KEEPER_ACCOUNT_ID, NEAR_RPC, KEEPER_PRIVATE_KEY (or near-cli key file),
-// SOLANA_RPC (default mainnet-beta), JUPITER_API (default https://lite-api.jup.ag/swap/v1).
+// SOLANA_RPC (default mainnet-beta), JUPITER_API (default https://api.jup.ag/swap/v1; lite-api is
+// being retired). Instructions are pinned to V1: the vault refuses Jupiter's *_v2 instructions.
+// The blockhash expires ~150 blocks after the quote: the MPC round trip has to fit (it does, ~10s).
 
 import { createPublicKey, verify } from "node:crypto";
 import { parseArgs } from "node:util";
@@ -31,7 +33,7 @@ if (!o.vault || !o.in || !o.out || !o.amount) throw new Error("--vault --in --ou
 const network = process.env.NEAR_NETWORK ?? "testnet";
 const keeperId = process.env.KEEPER_ACCOUNT_ID ?? "";
 const chain = new Chain(process.env.NEAR_RPC ?? "https://test.rpc.fastnear.com", o.vault, keeperId, loadKey(network, keeperId));
-const jup = process.env.JUPITER_API ?? "https://lite-api.jup.ag/swap/v1";
+const jup = process.env.JUPITER_API ?? "https://api.jup.ag/swap/v1";
 const solRpc = process.env.SOLANA_RPC ?? "https://api.mainnet-beta.solana.com";
 const b64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
 
@@ -39,7 +41,7 @@ const sol = await chain.view<{ address: string | null }>(o.vault, "get_sol");
 if (!sol?.address) throw new Error("the vault has no Solana address yet (owner: sol_setup)");
 console.log(`vault Solana address ${sol.address}`);
 
-const q = new URLSearchParams({ inputMint: o.in, outputMint: o.out, amount: o.amount, slippageBps: o.slippage!, asLegacyTransaction: "true", platformFeeBps: "0" });
+const q = new URLSearchParams({ inputMint: o.in, outputMint: o.out, amount: o.amount, slippageBps: o.slippage!, asLegacyTransaction: "true", platformFeeBps: "0", instructionVersion: "V1" });
 const quote = await (await fetch(`${jup}/quote?${q}`)).json();
 if (!quote.outAmount) throw new Error(`no quote: ${JSON.stringify(quote).slice(0, 200)}`);
 console.log(`quote: ${o.amount} in -> ${quote.outAmount} out (min ${quote.otherAmountThreshold}), route ${quote.routePlan?.map((r: any) => r.swapInfo?.label).join(" > ")}`);

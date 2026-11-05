@@ -100,3 +100,23 @@ fn discriminators_match_anchor() {
     assert_eq!(discriminator("route").len(), 8);
     assert_ne!(discriminator("route"), discriminator("shared_accounts_route"));
 }
+
+#[test]
+fn jupiter_v2_and_exact_out_instructions_are_refused() {
+    // Discriminators from Jupiter's on-chain IDL (2026-11-05). v2 puts the amounts first, so the
+    // 19-byte tail would read the wrong numbers: refuse rather than misread.
+    let (v, usdc, sol) = (key(VAULT), key(USDC), key(SOL));
+    for (name, disc) in [("route_v2", "bb64facc31c4af14"), ("shared_accounts_route_v2", "d19853937cfed8e9"),
+                         ("exact_out_route", "d033ef977b2bed5c"), ("shared_accounts_exact_out_route", "b0d169a89a7d453e")] {
+        assert_eq!(hex_of(&discriminator(name)), disc, "{name}: our discriminator matches the IDL");
+        let tx = Tx::new(v).ix(pubkey(JUPITER_V6), shared_accounts(v, ata_of(&v, &usdc), ata_of(&v, &sol), usdc, sol, pubkey(JUPITER_V6)),
+            jup_data(name, 1_000_000, 5_000_000, 50, 0)).bytes();
+        assert!(matches!(check_swap(&tx, &policy()), Err(Refusal::Swap(ref s)) if s.contains("only route")), "{name}");
+    }
+    assert_eq!(hex_of(&discriminator("route")), "e517cb977ae3ad2a");
+    assert_eq!(hex_of(&discriminator("shared_accounts_route")), "c1209b3341d69c81");
+}
+
+fn hex_of(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
