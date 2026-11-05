@@ -146,13 +146,15 @@ pub struct Vault {
     pub flows: Vec<Option<FlowRec>>,
     /// The step in flight, if any (one per vault).
     pub busy: Option<StepCtx>,
+    /// Contracts recipes may call (and send tokens to). The vault itself never.
+    pub trusted: Vec<AccountId>,
 }
 
 #[near]
 impl Vault {
     #[init]
     pub fn new(owner: AccountId, keeper: Option<AccountId>) -> Self {
-        Self { owner, keeper, flows: Vec::new(), busy: None }
+        Self { owner, keeper, flows: Vec::new(), busy: None, trusted: Vec::new() }
     }
 
     // ---------- owner ----------
@@ -162,12 +164,30 @@ impl Vault {
         self.keeper = keeper;
     }
 
-    /// Save a flow. Returns its id.
+    /// Trust (or stop trusting) contracts that recipes may call.
+    pub fn trust(&mut self, add: Vec<AccountId>, remove: Vec<AccountId>) {
+        self.assert_owner();
+        self.trusted.retain(|a| !remove.contains(a));
+        for a in add {
+            require!(a != env::current_account_id(), "a vault never trusts itself");
+            if !self.trusted.contains(&a) {
+                self.trusted.push(a);
+            }
+        }
+        require!(self.trusted.len() <= 64, "too many trusted contracts");
+    }
+
+    /// Save a flow. Returns its id. Every contract its recipes touch must be trusted.
     pub fn save_flow(&mut self, name: String, nodes: Vec<Node<Recipe>>) -> u32 {
         self.assert_owner();
         require!(name.len() <= 60, "name too long");
         if let Err(e) = flow::validate(&nodes) {
             env::panic_str(&format!("bad flow: {e:?}"));
+        }
+        for n in &nodes {
+            if let Some(c) = self.untrusted(n) {
+                env::panic_str(&format!("untrusted contract: {c}"));
+            }
         }
         let rec = FlowRec { name, ledger: Ledger::new(nodes.len()), nodes };
         if let Some(i) = self.flows.iter().position(Option::is_none) {
@@ -293,6 +313,10 @@ impl Vault {
         self.flows.get(flow_id as usize).cloned().flatten()
     }
 
+    pub fn get_trusted(&self) -> Vec<AccountId> {
+        self.trusted.clone()
+    }
+
     pub fn get_busy(&self) -> Option<StepCtx> {
         self.busy.clone()
     }
@@ -345,6 +369,25 @@ impl Vault {
 
     fn flow_mut(&mut self, id: u32) -> &mut FlowRec {
         self.flows.get_mut(id as usize).and_then(Option::as_mut).unwrap_or_else(|| env::panic_str("no such flow"))
+    }
+
+    /// The first contract node `n` touches that isn't trusted (its input token,
+    /// every called contract, every receiver, its output token and price source).
+    pub(crate) fn untrusted(&self, n: &Node<Recipe>) -> Option<AccountId> {
+        let me = env::current_account_id();
+        let mut touched: Vec<AccountId> = Vec::new();
+        if n.input != NEAR {
+            touched.push(n.input.parse().unwrap_or_else(|_| env::panic_str("bad input token")));
+        }
+        for c in &n.action.calls {
+            touched.push(match c {
+                Call::Ft { receiver, .. } => receiver.clone(),
+                Call::Fn { contract, .. } => contract.clone(),
+            });
+        }
+        touched.extend(n.action.out.clone());
+        touched.extend(n.action.price.as_ref().map(|p| p.contract.clone()));
+        touched.into_iter().find(|a| *a == me || !self.trusted.contains(a))
     }
 
     fn credit(&mut self, flow_id: u32, node: u16, amount: u128) {

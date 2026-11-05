@@ -79,6 +79,8 @@ async fn setup() -> anyhow::Result<World> {
     }
     give(&root, &wnear, alice.id(), 10_000 * ONE).await?;
     give(&alice, &wnear, vault.id(), 1_000 * ONE).await?;
+    alice.call(vault.id(), "trust").args_json(json!({"add": [wnear.id(), usdc.id(), lst.id(), dex.id()], "remove": []}))
+        .transact().await?.into_result()?;
     let w = World { worker, alice, keeper, mallory, wnear, usdc, lst, dex, vault };
     rate(&w, &w.wnear, &w.usdc, 2 * SCALE).await?; // 1 wNEAR = 2 USDC
     rate(&w, &w.usdc, &w.wnear, SCALE / 2).await?;
@@ -235,5 +237,32 @@ async fn native_near_stakes_into_a_liquid_token() -> anyhow::Result<()> {
     // Over-funding NEAR the vault doesn't have is refused.
     assert!(fund(&w, f, 0, 1_000 * NEAR).await?.is_failure());
     let _ = &w.worker;
+    Ok(())
+}
+
+#[tokio::test]
+async fn recipes_can_only_call_trusted_contracts_and_never_the_vault_itself() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let call = |contract: &AccountId, method: &str, args: String| json!([{"input": w.wnear.id(), "action": {"label": "x",
+        "calls": [{"call": "ft", "receiver": w.dex.id(), "msg": format!(r#"{{"token_out":"{}","min_out":"0"}}"#, w.usdc.id()), "tgas": 50},
+                  {"call": "fn", "contract": contract, "method": method, "args": args, "deposit": {"kind": "none"}, "tgas": 10}],
+        "out": w.usdc.id(), "min_out_per_in": null, "price": null}, "when": {"when": "now"}}]);
+    // A shared recipe that pokes the vault's own callback to fake a step's result.
+    let r = w.alice.call(w.vault.id(), "save_flow")
+        .args_json(json!({"name": "evil", "nodes": call(w.vault.id(), "on_measured", r#"{"before":false}"#.into())})).max_gas().transact().await?;
+    assert!(format!("{:?}", r.failures()).contains("untrusted contract"), "{:?}", r.failures());
+    let r = w.alice.call(w.vault.id(), "trust").args_json(json!({"add": [w.vault.id()], "remove": []})).transact().await?;
+    assert!(r.is_failure(), "the vault can't be trusted as a recipe target");
+    // A recipe that sends tokens to a contract the owner never approved.
+    let r = w.alice.call(w.vault.id(), "save_flow")
+        .args_json(json!({"name": "evil", "nodes": call(w.mallory.id(), "anything", "{}".into())})).max_gas().transact().await?;
+    assert!(format!("{:?}", r.failures()).contains("untrusted contract"));
+    // Trust withdrawn after saving: the step refuses to run, the money stays put.
+    let f = save(&w, json!([{"input": w.wnear.id(), "action": swap(&w, &w.usdc, None), "when": {"when": "now"}}])).await?;
+    fund(&w, f, 0, 10 * ONE).await?.into_result()?;
+    w.alice.call(w.vault.id(), "trust").args_json(json!({"add": [], "remove": [w.dex.id()]})).transact().await?.into_result()?;
+    let r = step(&w, &w.keeper, f, 0).await?;
+    assert!(format!("{:?}", r.failures()).contains("untrusted contract"));
+    assert_eq!(balance(&w.wnear, w.vault.id()).await?, 1_000 * ONE);
     Ok(())
 }

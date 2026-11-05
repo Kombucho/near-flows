@@ -39,6 +39,10 @@ impl Vault {
         require!(by_owner || Some(env::predecessor_account_id()) == self.keeper, "owner or keeper only");
         require!(self.busy.is_none(), "a step is running");
         let n = self.flow(flow_id).nodes.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).clone();
+        // Trust can be withdrawn after a flow was saved: check again before every step.
+        if let Some(c) = self.untrusted(&n) {
+            env::panic_str(&format!("untrusted contract: {c}"));
+        }
         if matches!(n.when, flow::Trigger::PriceBelow { .. } | flow::Trigger::PriceAbove { .. }) {
             let src = n.action.price.clone().unwrap_or_else(|| env::panic_str("price trigger without a price source"));
             return Promise::new(src.contract)
