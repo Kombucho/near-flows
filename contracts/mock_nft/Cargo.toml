@@ -1,0 +1,12 @@
+[package]
+name = "mock_nft"
+version = "0.1.0"
+edition = "2021"
+description = "TESTNET MOCK NFT (NEP-171) for sandbox tests. Anyone can mint. Not a real asset."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = "5.30.0"
+near-contract-standards = "5.30.0"

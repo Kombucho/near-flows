@@ -5,12 +5,15 @@
 build:
 	cd contracts/market && cargo near build non-reproducible-wasm --no-abi
 	cd contracts/mock_ft && cargo near build non-reproducible-wasm --no-abi
+	cd contracts/bazaar && cargo near build non-reproducible-wasm --no-abi
+	cd contracts/mock_nft && cargo near build non-reproducible-wasm --no-abi
 
 # Unit tests: math, engine, contract. Two runs: built together, the contract's
 # "near" feature would switch the engine's own tests to on-chain storage maps.
 test:
 	cd contracts && cargo test -p math -p engine
 	cd contracts && cargo test -p market
+	cd contracts && cargo test -p bazaar
 
 # Integration tests: real wasm in a local NEAR node (downloads the sandbox binary on first run).
 sandbox: build
