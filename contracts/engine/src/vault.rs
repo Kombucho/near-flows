@@ -1,11 +1,10 @@
 //! Hold-to-earn vault: stake the coin, keep 100% exposure, earn dividends,
 //! and steer the community pot with a standing vote.
 
-use std::collections::BTreeMap;
-
 use math::acc::{accrue, owed};
 use math::fees::{PotVotes, DEFAULT_MIX};
 
+use crate::store::Map;
 use crate::{Book, Error};
 
 /// A vote: bps for (dividend, burn, deepen). Must add up to 10_000.
@@ -25,21 +24,36 @@ pub struct Staker {
     pub release_ns: u64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[cfg_attr(not(feature = "near"), derive(Clone, Debug))]
 #[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
 pub struct Vault {
     pub total_stake: u128,
     pub acc_q: u128,
     pub acc_t: u128,
     pub votes: PotVotes, // stake-weighted totals of every staker's vote
-    pub stakers: BTreeMap<String, Staker>,
+    pub stakers: Map<String, Staker>,
+    /// Running totals for the solvency audit (stakers can't be iterated on
+    /// chain): unstaked tokens waiting, and dividends paid in minus claimed.
+    /// Dividend shares round down, so these can only OVERSTATE what is owed.
+    pub total_pending: u128,
+    pub div_open_q: u128,
+    pub div_open_t: u128,
+}
+
+impl Default for Vault {
+    fn default() -> Self {
+        Vault {
+            total_stake: 0, acc_q: 0, acc_t: 0, votes: PotVotes::default(), stakers: Map::new(b"vs"),
+            total_pending: 0, div_open_q: 0, div_open_t: 0,
+        }
+    }
 }
 
 impl Vault {
     /// Move earned dividends into `owed` and bring snapshots up to date.
     fn settle(&mut self, who: &str) {
         let (acc_q, acc_t) = (self.acc_q, self.acc_t);
-        if let Some(s) = self.stakers.get_mut(who) {
+        if let Some(s) = self.stakers.get_mut(&who.to_string()) {
             s.owed_q += owed(s.stake, acc_q, s.snap_q);
             s.owed_t += owed(s.stake, acc_t, s.snap_t);
             s.snap_q = acc_q;
@@ -66,13 +80,15 @@ impl Vault {
         }
         self.acc_q = accrue(self.acc_q, q, self.total_stake);
         self.acc_t = accrue(self.acc_t, t, self.total_stake);
+        self.div_open_q += q;
+        self.div_open_t += t;
         true
     }
 
     /// Everything a staker could take out right now or later:
     /// (tokens staked + pending, dividends quote, dividends token).
     pub fn assets(&self, who: &str) -> (u128, u128, u128) {
-        let Some(s) = self.stakers.get(who) else { return (0, 0, 0) };
+        let Some(s) = self.stakers.get(&who.to_string()) else { return (0, 0, 0) };
         let dq = s.owed_q + owed(s.stake, self.acc_q, s.snap_q);
         let dt = s.owed_t + owed(s.stake, self.acc_t, s.snap_t);
         (s.stake + s.pending, dq, dt)
@@ -90,12 +106,13 @@ impl Book {
         }
         let v = &mut self.vault;
         let (acc_q, acc_t) = (v.acc_q, v.acc_t);
-        let s = v.stakers.entry(who.to_string()).or_insert_with(|| Staker {
+        let key = who.to_string();
+        let s = v.stakers.get_or_insert_with(key.clone(), || Staker {
             vote: DEFAULT_VOTE, snap_q: acc_q, snap_t: acc_t, ..Default::default()
         });
         let vote = s.vote;
         v.settle(who);
-        v.stakers.get_mut(who).expect("just inserted").stake += amount;
+        v.stakers.get_mut(&key).expect("just inserted").stake += amount;
         v.total_stake += amount;
         v.tally(amount, vote, true);
         Ok(())
@@ -107,11 +124,12 @@ impl Book {
             return Err(Error::BadVote);
         }
         let v = &mut self.vault;
-        let s = v.stakers.get(who).ok_or(Error::NotStaker)?;
+        let key = who.to_string();
+        let s = v.stakers.get(&key).ok_or(Error::NotStaker)?;
         let (stake, old) = (s.stake, s.vote);
         v.tally(stake, old, false);
         v.tally(stake, vote, true);
-        v.stakers.get_mut(who).expect("exists").vote = vote;
+        v.stakers.get_mut(&key).expect("exists").vote = vote;
         Ok(())
     }
 
@@ -120,7 +138,8 @@ impl Book {
     pub fn request_unstake(&mut self, who: &str, amount: u128, now_ns: u64) -> Result<(), Error> {
         let delay = self.cfg.unstake_delay_ns;
         let v = &mut self.vault;
-        let s = v.stakers.get(who).ok_or(Error::NotStaker)?;
+        let key = who.to_string();
+        let s = v.stakers.get(&key).ok_or(Error::NotStaker)?;
         if amount == 0 || amount > s.stake {
             return Err(Error::NotEnoughStake);
         }
@@ -128,7 +147,8 @@ impl Book {
         v.settle(who);
         v.tally(amount, vote, false);
         v.total_stake -= amount;
-        let s = v.stakers.get_mut(who).expect("exists");
+        v.total_pending += amount;
+        let s = v.stakers.get_mut(&key).expect("exists");
         s.stake -= amount;
         s.pending += amount;
         s.release_ns = now_ns + delay; // a new request restarts the wait for all pending
@@ -137,17 +157,22 @@ impl Book {
 
     /// Take back unstaked tokens once the delay has passed. Returns the amount.
     pub fn withdraw_unstaked(&mut self, who: &str, now_ns: u64) -> Result<u128, Error> {
-        let s = self.vault.stakers.get_mut(who).ok_or(Error::NotStaker)?;
+        let s = self.vault.stakers.get_mut(&who.to_string()).ok_or(Error::NotStaker)?;
         if now_ns < s.release_ns {
             return Err(Error::Locked { until_ns: s.release_ns });
         }
-        Ok(std::mem::take(&mut s.pending)) // returns pending and sets it to 0
+        let out = std::mem::take(&mut s.pending); // returns pending and sets it to 0
+        self.vault.total_pending -= out;
+        Ok(out)
     }
 
     /// Claim dividends: (quote, token).
     pub fn claim_dividends(&mut self, who: &str) -> Result<(u128, u128), Error> {
         self.vault.settle(who);
-        let s = self.vault.stakers.get_mut(who).ok_or(Error::NotStaker)?;
-        Ok((std::mem::take(&mut s.owed_q), std::mem::take(&mut s.owed_t)))
+        let s = self.vault.stakers.get_mut(&who.to_string()).ok_or(Error::NotStaker)?;
+        let (q, t) = (std::mem::take(&mut s.owed_q), std::mem::take(&mut s.owed_t));
+        self.vault.div_open_q -= q;
+        self.vault.div_open_t -= t;
+        Ok((q, t))
     }
 }

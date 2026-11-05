@@ -53,14 +53,18 @@ fn native_market() -> Market {
     send(&mut m, "wrap.testnet", "owner.testnet", 4_000 * ONE, r#"{"action":"fund"}"#);
     as_caller("owner.testnet", 0, 0);
     m.launch_native(230);
-    save(&m);
+    save(&mut m);
     deposit_storage(&mut m, "alice.testnet");
     m
 }
 
 /// On chain, NEAR saves the contract state after every call. Calling methods
 /// directly in a unit test skips that, so we save by hand after setup steps.
-fn save(m: &Market) {
+/// What NEAR does when a call returns: write the lazy entries, then the root.
+fn save(m: &mut Market) {
+    if let Some(b) = m.book.as_mut() {
+        b.flush();
+    }
     near_sdk::env::state_write(m);
 }
 
@@ -164,7 +168,7 @@ fn adopted_coins_cannot_be_staked() {
     send(&mut m, "wrap.testnet", "owner.testnet", 100 * ONE, r#"{"action":"fund"}"#);
     as_caller("owner.testnet", 0, 0);
     m.launch_adopted(U128(100_000_000_000_000), 230, 30); // price 0.0001
-    save(&m);
+    save(&mut m);
     deposit_storage(&mut m, "alice.testnet");
     send(&mut m, "coin.testnet", "alice.testnet", 1_000 * ONE, r#"{"action":"stake"}"#);
 }
@@ -194,7 +198,7 @@ fn crank_runs_and_is_rate_limited() {
 fn obligations_view_matches_what_came_in() {
     let mut m = native_market();
     send(&mut m, "wrap.testnet", "alice.testnet", 10 * ONE, r#"{"action":"buy","min_out":"0","ladder":true}"#);
-    let (q, t) = m.get_obligations();
+    let (q, t) = m.get_obligations(0, 300);
     // In: 4_000 + 10 wNEAR. Out: none yet in quote (the kept coins left the book).
     assert!(q.0 <= 4_010 * ONE, "owes {} wNEAR units", q.0);
     assert!(t.0 <= 500_000_000 * ONE);
@@ -247,51 +251,61 @@ fn owed(m: &Market, token: &str, who: &str) -> u128 {
     m.owed_of(acc(token), acc(who)).0
 }
 
+/// The relayed buy runs as its own receipt. Unit tests don't execute
+/// promises, so this runs it by hand (as the market calling itself). If it
+/// panics, NEAR would revert its changes; here we just report the panic.
+fn run_inner(m: &mut Market, who: &str, amount: u128, min_out: u128, ladder: bool) -> Result<(), String> {
+    as_caller("market.testnet", 0, DAY_NS);
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        m.delegated_buy_inner(acc(who), U128(amount), U128(min_out), ladder)
+    })).map_err(|e| e.downcast_ref::<String>().cloned().unwrap_or_default())
+}
+
+/// The callback, with the inner call's outcome.
+fn run_callback(m: &mut Market, who: &str, amount: u128, ok: bool) {
+    as_caller("market.testnet", 0, DAY_NS);
+    let r = if ok { Ok(()) } else { Err(near_sdk::PromiseError::Failed) };
+    m.on_delegated_buy(acc(who), U128(amount), r);
+}
+
 #[test]
 fn a_relayer_can_buy_for_alice() {
     let mut m = native_market();
     let refund = send(&mut m, "wrap.testnet", "relayer.testnet", 10 * ONE,
         r#"{"action":"buy","min_out":"0","ladder":true,"for":"alice.testnet"}"#);
     assert_eq!(refund, 0);
+    run_inner(&mut m, "alice.testnet", 10 * ONE, 0, true).unwrap();
+    run_callback(&mut m, "alice.testnet", 10 * ONE, true);
     assert_eq!(m.get_positions(acc("alice.testnet")).len(), 4, "Alice owns the rungs");
     assert!(m.get_positions(acc("relayer.testnet")).is_empty());
+    assert_eq!(owed(&m, "wrap.testnet", "alice.testnet"), 0, "nothing owed after a good buy");
 }
 
 #[test]
 fn a_failed_delegated_buy_is_owed_not_refunded() {
     let mut m = native_market();
-    let price_before = m.get_config().price.0;
     let refund = send(&mut m, "wrap.testnet", "intents.testnet", 10 * ONE,
         r#"{"action":"buy","min_out":"999999999999999999999999999","for":"alice.testnet"}"#);
     assert_eq!(refund, 0, "never bounced back to the sender");
+    let err = run_inner(&mut m, "alice.testnet", 10 * ONE, 999_999_999_999_999_999_999_999_999, false).unwrap_err();
+    assert!(err.contains("Slippage"), "{err}");
+    run_callback(&mut m, "alice.testnet", 10 * ONE, false);
     assert_eq!(owed(&m, "wrap.testnet", "alice.testnet"), 10 * ONE, "all of it owed to Alice");
-    assert_eq!(m.get_config().price.0, price_before, "the market is exactly as before");
 }
 
 #[test]
-fn a_delegated_buy_while_paused_is_owed() {
+fn a_delegated_buy_while_paused_fails_inside() {
     let mut m = native_market();
     as_caller("owner.testnet", 0, DAY_NS);
     m.pause();
-    send(&mut m, "wrap.testnet", "intents.testnet", 10 * ONE, r#"{"action":"buy","min_out":"0","for":"alice.testnet"}"#);
-    assert_eq!(owed(&m, "wrap.testnet", "alice.testnet"), 10 * ONE);
+    let refund = send(&mut m, "wrap.testnet", "intents.testnet", 10 * ONE, r#"{"action":"buy","min_out":"0","for":"alice.testnet"}"#);
+    assert_eq!(refund, 0, "kept even while paused (the callback owes it)");
+    assert!(run_inner(&mut m, "alice.testnet", 10 * ONE, 0, false).unwrap_err().contains("paused"));
 }
 
 #[test]
-fn a_delegated_buy_without_storage_is_owed_and_changes_nothing() {
+fn a_delegated_buy_without_storage_fails_inside() {
     let mut m = native_market(); // carol never deposited storage
-    let positions = m.get_stats().positions;
-    send(&mut m, "wrap.testnet", "intents.testnet", 10 * ONE,
-        r#"{"action":"buy","min_out":"0","ladder":true,"for":"carol.testnet"}"#);
-    assert_eq!(owed(&m, "wrap.testnet", "carol.testnet"), 10 * ONE);
-    assert_eq!(m.get_stats().positions, positions, "no rungs were created");
-}
-
-#[test]
-fn a_failed_delegated_buy_with_leftover_is_owed_exactly_once() {
-    let mut m = native_market(); // carol has no storage balance
-    // So big it eats every ask and leaves change; then it fails on storage.
-    send(&mut m, "wrap.testnet", "intents.testnet", 1_000_000 * ONE,
-        r#"{"action":"buy","min_out":"0","ladder":true,"for":"carol.testnet"}"#);
-    assert_eq!(owed(&m, "wrap.testnet", "carol.testnet"), 1_000_000 * ONE, "owed once, not twice");
+    let err = run_inner(&mut m, "carol.testnet", 10 * ONE, 0, true).unwrap_err();
+    assert!(err.contains("storage"), "{err}");
 }

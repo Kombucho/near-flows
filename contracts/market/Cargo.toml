@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 near-sdk = "5.30.0"
 near-contract-standards = "5.30.0"
-engine = { path = "../engine", features = ["borsh"] }
+engine = { path = "../engine", features = ["near"] }
 math = { path = "../math", features = ["borsh"] }
 
 [dev-dependencies]

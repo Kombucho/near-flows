@@ -8,6 +8,7 @@ use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::types::NearToken;
 use near_workspaces::{Account, AccountId, Contract, Worker};
+use anyhow::Context;
 use serde_json::{json, Value};
 
 const ONE: u128 = 1_000_000_000_000_000_000; // 1 token (18 decimals in these mocks)
@@ -109,12 +110,34 @@ async fn setup_with_coin_fee(coin_call_fee_bps: u16) -> anyhow::Result<World> {
 
 /// The market's real token balances must cover everything it owes.
 async fn assert_solvent(w: &World) -> anyhow::Result<()> {
-    let owes: Vec<String> = w.market.view("get_obligations").args_json(json!({})).await?.json()?;
-    let (owe_q, owe_t): (u128, u128) = (owes[0].parse()?, owes[1].parse()?);
+    // Paged view: the first page also counts pots, bins and stakes.
+    let stats: Value = w.market.view("get_stats").args_json(json!({})).await?.json()?;
+    let next_id = stats["next_id"].as_u64().unwrap();
+    let (mut owe_q, mut owe_t) = (0u128, 0u128);
+    let mut from = 0;
+    loop {
+        let owes: Vec<String> = w.market.view("get_obligations").args_json(json!({"from_id": from, "count": 300})).await?.json()?;
+        owe_q += owes[0].parse::<u128>()?;
+        owe_t += owes[1].parse::<u128>()?;
+        from += 300;
+        if from >= next_id { break; }
+    }
     let (has_q, has_t) = (balance(&w.wnear, w.market.id()).await?, balance(&w.coin, w.market.id()).await?);
     assert!(has_q >= owe_q, "wNEAR: holds {has_q}, owes {owe_q}");
     assert!(has_t >= owe_t, "coin: holds {has_t}, owes {owe_t}");
     Ok(())
+}
+
+/// Every settleable position id, paging through ids like the keeper does.
+async fn settleable(w: &World) -> anyhow::Result<Vec<u64>> {
+    let stats: Value = w.market.view("get_stats").args_json(json!({})).await?.json()?;
+    let next_id = stats["next_id"].as_u64().unwrap();
+    let mut ids = Vec::new();
+    for from in (0..next_id).step_by(300) {
+        let page: Vec<u64> = w.market.view("get_settleable").args_json(json!({"from_id": from, "scan": 300})).await?.json()?;
+        ids.extend(page);
+    }
+    Ok(ids)
 }
 
 async fn positions(w: &World, who: &AccountId) -> anyhow::Result<Vec<Value>> {
@@ -249,6 +272,11 @@ async fn a_relayer_buys_for_alice_and_failures_are_owed_to_her() -> anyhow::Resu
     assert_eq!(owed, (5 * ONE).to_string(), "owed to Alice");
     w.alice.call(w.market.id(), "withdraw_owed").args_json(json!({"token": w.wnear.id()}))
         .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?.into_result()?;
+    // Nobody but the market itself can run the inner buy (it spends tokens already held).
+    let sneaky = w.bob.call(w.market.id(), "delegated_buy_inner")
+        .args_json(json!({"who": w.bob.id(), "amount": (100 * ONE).to_string(), "min_out": "0", "ladder": false}))
+        .max_gas().transact().await?;
+    assert!(sneaky.is_failure(), "delegated_buy_inner must be private");
     assert_solvent(&w).await
 }
 
@@ -260,7 +288,7 @@ async fn anyone_can_settle_but_only_the_owner_gets_paid() -> anyhow::Result<()> 
     send(&w, &w.alice, &w.coin, 10_000_000 * ONE, r#"{"action":"ladder"}"#).await?.into_result()?;
     // A pump: the owner buys enough to push the price past 1.5x.
     send(&w, &w.owner, &w.wnear, 1_500 * ONE, r#"{"action":"buy","min_out":"0"}"#).await?.into_result()?;
-    let ids: Vec<u64> = w.market.view("get_settleable").args_json(json!({"limit": 100})).await?.json()?;
+    let ids = settleable(&w).await?;
     let alice_rungs: Vec<u64> = positions(&w, w.alice.id()).await?.iter().map(|p| p["id"].as_u64().unwrap()).collect();
     let filled: Vec<u64> = ids.into_iter().filter(|i| alice_rungs.contains(i)).collect();
     assert!(!filled.is_empty(), "at least Alice's 1.5x rung earned something");
@@ -271,5 +299,64 @@ async fn anyone_can_settle_but_only_the_owner_gets_paid() -> anyhow::Result<()> 
     }
     assert!(balance(&w.wnear, w.alice.id()).await? > alice_before, "Alice was paid");
     assert_eq!(balance(&w.wnear, w.bob.id()).await?, bob_before, "Bob got nothing");
+    assert_solvent(&w).await
+}
+
+/// Gas as the book grows. The whole book is one stored value, so every call
+/// reads and writes all of it: this measures how fast that gets expensive.
+/// Slow (thousands of transactions): `cargo test -p sandbox gas_vs_positions -- --ignored --nocapture`
+#[tokio::test]
+#[ignore]
+async fn gas_vs_positions() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let tg = |r: &ExecutionFinalResult| r.total_gas_burnt.as_gas() as f64 / 1e12;
+    // Ten funded makers ladder in parallel (4 positions per ladder).
+    let mut makers = Vec::new();
+    for i in 0..10 {
+        let a = w.worker.root_account()?.create_subaccount(&format!("maker{i}"))
+            .initial_balance(NearToken::from_near(500)).transact().await.context("create")?.into_result().context("create")?;
+        register(&w.owner, &w.coin, a.id()).await.context("register")?;
+        a.call(w.market.id(), "storage_deposit").args_json(json!({})).deposit(NearToken::from_near(400)).max_gas().transact().await?.into_result().context("deposit")?;
+        transfer(&w.owner, &w.coin, a.id(), 1_000_000 * ONE).await.context("transfer")?;
+        makers.push(a);
+    }
+    // Past the 24h launch window, so a plain buy adds no positions.
+    w.worker.fast_forward(100_000).await?;
+    let count = |w: &World| {
+        let m = w.market.clone();
+        async move { let s: Value = m.view("get_stats").args_json(json!({})).await?.json()?; anyhow::Ok(s) }
+    };
+    println!("stats after setup: {}", count(&w).await?);
+    let sd = w.alice.call(w.market.id(), "storage_deposit").args_json(json!({})).deposit(NearToken::from_near(1)).max_gas().transact().await?;
+    println!("GAS storage_deposit with 0 positions (only reads/writes the book): {:.1} Tgas", tg(&sd));
+    // Launch already holds 460 protocol positions (one per bin). Each extra
+    // position is a single-bin LP on a distinct (maker, bin) pair.
+    let mut have = 460usize;
+    for target in [470usize, 1_000, 2_000, 2_990] {
+        while have < target {
+            let batch = (target - have).min(makers.len());
+            let wr = &w;
+            let futs = makers.iter().take(batch).map(|m| {
+                let msg = format!(r#"{{"action":"lp","bin":{}}}"#, 1 + (have / makers.len()) % 200);
+                async move { send(wr, m, &wr.coin, 100 * ONE, &msg).await }
+            });
+            for r in futures::future::join_all(futs).await { r?.into_result().with_context(|| format!("lp at {have}"))?; }
+            have += batch;
+        }
+        let ladder = send(&w, &makers[0], &w.coin, 100 * ONE, r#"{"action":"ladder"}"#).await?;
+        let buy = send(&w, &w.bob, &w.wnear, ONE, r#"{"action":"buy","min_out":"0"}"#).await?;
+        let sell = send(&w, &w.owner, &w.coin, 10_000 * ONE, r#"{"action":"sell","min_out":"0"}"#).await?;
+        let id = positions(&w, makers[0].id()).await?[0]["id"].as_u64().unwrap();
+        let wd = makers[0].call(w.market.id(), "withdraw").args_json(json!({"position_id": id}))
+            .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?;
+        w.worker.fast_forward(50_000).await?;
+        let crank = w.bob.call(w.market.id(), "crank").max_gas().transact().await?;
+        let s = count(&w).await?;
+        println!("GAS@{:>5} positions: ladder {:5.1}  buy {:5.1}  sell {:5.1}  withdraw {:5.1}  crank {:5.1} Tgas  (ok: {} {} {} {} {})",
+            s["positions"], tg(&ladder), tg(&buy), tg(&sell), tg(&wd), tg(&crank),
+            ladder.is_success(), buy.is_success(), sell.is_success(), wd.is_success(), crank.is_success());
+        if crank.is_failure() { println!("  crank failure: {:?}", crank.failures()); }
+    }
+    println!("stats at end: {}", count(&w).await?);
     assert_solvent(&w).await
 }

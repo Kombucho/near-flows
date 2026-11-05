@@ -18,6 +18,9 @@ use crate::{Book, Error, Side};
 /// before buyback and deepen pause. 10 bins = about 10%.
 pub const MAX_DRIFT_BINS: i32 = 10;
 
+/// How far the reference may move per crank (hourly): 2 bins, about 2%.
+pub const MAX_FOLLOW_BINS: i32 = 2;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct CrankReport {
     pub dividend_q: u128,
@@ -75,14 +78,15 @@ impl Book {
         Ok(r)
     }
 
-    /// Move the reference bin a quarter of the way to the active bin (at least 1).
+    /// Move the reference toward the price, but only as far as the price has
+    /// sat on that side at both this crank and the last one (a spike pushed
+    /// right before the crank moves nothing), and at most MAX_FOLLOW_BINS.
     fn follow_price(&mut self) {
-        let gap = self.active - self.ref_bin;
-        self.ref_bin += match gap {
-            0 => 0,
-            g if g.abs() < 4 => g.signum(),
-            g => g / 4,
-        };
+        let now = self.active - self.ref_bin;
+        let before = self.prev_crank_bin - self.ref_bin;
+        self.prev_crank_bin = self.active;
+        let gap = if now.signum() != before.signum() { 0 } else if now.abs() < before.abs() { now } else { before };
+        self.ref_bin += gap.clamp(-MAX_FOLLOW_BINS, MAX_FOLLOW_BINS);
     }
 
     fn price_is_calm(&self) -> bool {
@@ -90,8 +94,10 @@ impl Book {
     }
 
     /// The protocol's LP fees are not paid to anyone: they refill the pot.
+    /// Only bins traded since the last crank can have earned anything.
     fn collect_protocol_fees(&mut self) {
-        let ids: Vec<u64> = self.protocol_pos.values().copied().collect();
+        let bins = std::mem::take(&mut self.traded_bins);
+        let ids: Vec<u64> = bins.iter().filter_map(|b| self.protocol_pos.get(b).copied()).collect();
         for id in ids {
             let (q, t) = self.claim(id, crate::book::PROTOCOL).expect("protocol owns it");
             self.pots.pot_quote += q;

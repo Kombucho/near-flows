@@ -30,7 +30,8 @@ impl Book {
         if let Some(id) = self.mergeable(owner, bin, locked_until_ns) {
             return self.top_up_tp(id, tokens, weight);
         }
-        let b = self.bins.entry(bin).or_default();
+        let (cq, ct) = (self.creator.acc_q, self.creator.acc_t);
+        let b = self.bin_mut(bin);
         // First order of a round: 1 share per token. Later: pro-rata to what is left.
         let minted = if b.tp_shares == 0 { tokens } else { mul_div_down(tokens, b.tp_shares, b.tp_token) };
         if minted == 0 {
@@ -40,18 +41,15 @@ impl Book {
         b.tp_shares += minted;
         let pos = Position {
             owner: owner.to_string(), bin, shares: minted, snap_quote: b.tp_acc, snap_token: 0,
-            locked_until_ns, creator_weight: weight, snap_cq: self.creator.acc_q, snap_ct: self.creator.acc_t,
+            locked_until_ns, creator_weight: weight, snap_cq: cq, snap_ct: ct,
             creator_owed_q: 0, creator_owed_t: 0, take_profit: true, tp_round: b.tp_round, tp_owed: 0,
             bid: false, rearm: 0,
         };
-        let id = self.next_id;
-        self.next_id += 1;
         let round = pos.tp_round;
-        self.positions.insert(id, pos);
+        let id = self.put_position(pos);
         self.tp_index.insert((owner.to_string(), bin, round), id);
         if weight > 0 {
-            self.creator.total_weight += weight;
-            self.creator.locked.insert(id);
+            self.add_creator_weight(id, weight, locked_until_ns);
         }
         Ok(id)
     }
@@ -87,8 +85,8 @@ impl Book {
         p.shares += minted;
         if weight > 0 {
             p.creator_weight += weight;
-            self.creator.total_weight += weight;
-            self.creator.locked.insert(id);
+            let until = p.locked_until_ns;
+            self.add_creator_weight(id, weight, until); // filed again: expiry handles duplicates
         }
         Ok(id)
     }
@@ -129,7 +127,7 @@ impl Book {
 
     /// Cancel / close a take-profit: returns (unsold tokens, earned quote).
     pub(crate) fn tp_close(&mut self, id: u64) -> (u128, u128) {
-        let p = self.positions.remove(&id).expect("exists");
+        let p = self.take_position(id).expect("exists");
         self.tp_index.remove(&(p.owner.clone(), p.bin, p.tp_round));
         let (token, quote) = (self.tp_remaining(&p), self.tp_earned(&p));
         let b = self.bins.get_mut(&p.bin).expect("bin exists");

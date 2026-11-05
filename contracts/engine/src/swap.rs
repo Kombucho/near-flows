@@ -168,10 +168,12 @@ impl Book {
     fn walk(&self, side: Side) -> Box<dyn Iterator<Item = (i32, u128)> + '_> {
         match side {
             // Buyers can take both layers: take-profit orders and LP tokens.
-            Side::Buy => Box::new(self.bins.range(self.active..).filter(|(_, b)| b.token + b.tp_token > 0).map(|(k, b)| (*k, b.token + b.tp_token))),
+            Side::Buy => Box::new(self.bin_ids.range(self.active..).map(|k| (*k, &self.bins[k]))
+                .filter(|(_, b)| b.token + b.tp_token > 0).map(|(k, b)| (k, b.token + b.tp_token))),
             // Sellers only ever see the LP layer's quote. Take-profit proceeds are invisible.
             // Sellers can hit both: one-way bids (filled first) and LP quote.
-            Side::Sell => Box::new(self.bins.range(..=self.active).rev().filter(|(_, b)| b.quote + b.bid_quote > 0).map(|(k, b)| (*k, b.quote + b.bid_quote))),
+            Side::Sell => Box::new(self.bin_ids.range(..=self.active).rev().map(|k| (*k, &self.bins[k]))
+                .filter(|(_, b)| b.quote + b.bid_quote > 0).map(|(k, b)| (k, b.quote + b.bid_quote))),
         }
     }
 
@@ -220,6 +222,9 @@ impl Book {
 
     /// Apply one planned step: move reserves and hand out the fee.
     fn apply(&mut self, side: Side, s: &Step) {
+        if self.protocol_pos.contains_key(&s.bin) {
+            self.traded_bins.insert(s.bin); // its protocol position earned: claim at the crank
+        }
         match side {
             Side::Buy => self.apply_buy(s),
             Side::Sell => self.apply_sell(s),

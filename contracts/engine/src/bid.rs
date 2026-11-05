@@ -43,7 +43,8 @@ impl Book {
                 return self.top_up_bid(id, quote);
             }
         }
-        let b = self.bins.entry(bin).or_default();
+        let (cq, ct) = (self.creator.acc_q, self.creator.acc_t);
+        let b = self.bin_mut(bin);
         let minted = if b.bid_shares == 0 { quote } else { mul_div_down(quote, b.bid_shares, b.bid_quote) };
         if minted == 0 {
             return Err(Error::ZeroAmount);
@@ -52,14 +53,13 @@ impl Book {
         b.bid_shares += minted;
         let pos = Position {
             owner: owner.to_string(), bin, shares: minted, snap_quote: b.bid_acc, snap_token: 0,
-            locked_until_ns, creator_weight: 0, snap_cq: self.creator.acc_q, snap_ct: self.creator.acc_t,
+            locked_until_ns, creator_weight: 0, snap_cq: cq, snap_ct: ct,
             creator_owed_q: 0, creator_owed_t: 0, take_profit: false, tp_round: b.bid_round, tp_owed: 0,
             bid: true, rearm,
         };
-        let id = self.next_id;
-        self.next_id += 1;
-        self.bid_index.insert((owner.to_string(), bin, b.bid_round), id);
-        self.positions.insert(id, pos);
+        let round = pos.tp_round;
+        let id = self.put_position(pos);
+        self.bid_index.insert((owner.to_string(), bin, round), id);
         Ok(id)
     }
 
@@ -114,7 +114,7 @@ impl Book {
 
     /// Cancel / close a bid: returns (unspent quote, bought coins).
     pub(crate) fn bid_close(&mut self, id: u64) -> (u128, u128) {
-        let p = self.positions.remove(&id).expect("exists");
+        let p = self.take_position(id).expect("exists");
         self.bid_index.remove(&(p.owner.clone(), p.bin, p.tp_round));
         let (quote, coins) = (self.bid_remaining(&p), self.bid_earned(&p));
         let b = self.bins.get_mut(&p.bin).expect("bin exists");
@@ -160,12 +160,11 @@ impl Book {
         Ok(ids)
     }
 
-    /// Bids that have bought coins and are set to rearm (for keepers).
-    pub fn rearmable(&self, limit: usize) -> Vec<u64> {
-        self.positions.iter()
-            .filter(|(_, p)| p.bid && p.rearm > 0 && self.bid_earned(p) > 0)
-            .map(|(id, _)| *id)
-            .take(limit)
+    /// Bids among ids from_id..from_id+scan that have bought coins and are
+    /// set to rearm (for keepers, who page through ids up to `next_id`).
+    pub fn rearmable(&self, from_id: u64, scan: u64) -> Vec<u64> {
+        (from_id..from_id.saturating_add(scan).min(self.next_id))
+            .filter(|id| self.positions.get(id).map_or(false, |p| p.bid && p.rearm > 0 && self.bid_earned(p) > 0))
             .collect()
     }
 

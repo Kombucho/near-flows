@@ -238,7 +238,7 @@ fn solvent_after_5000_random_actions_of_every_kind() {
             0 | 1 | 2 => if let Ok(r) = b.swap(Side::Buy, rng.next() as u128 % 200_000 + 1, 0) { q_bal += r.used; t_bal -= r.out; },
             3 | 4 => if let Ok(r) = b.swap(Side::Sell, rng.next() as u128 % 200_000 + 1, 0) { t_bal += r.used; q_bal -= r.out; },
             5 => { let a = rng.next() as u128 % 50_000 + 1; if b.stake(who, a).is_ok() { t_bal += a; } }
-            6 => { let s = b.vault.stakers.get(who).map(|s| s.stake).unwrap_or(0); if s > 0 { b.request_unstake(who, s / 2 + 1, now).ok(); } if let Ok(a) = b.withdraw_unstaked(who, now) { t_bal -= a; } }
+            6 => { let s = b.vault.stakers.get(&who.to_string()).map(|s| s.stake).unwrap_or(0); if s > 0 { b.request_unstake(who, s / 2 + 1, now).ok(); } if let Ok(a) = b.withdraw_unstaked(who, now) { t_bal -= a; } }
             7 => if let Ok((q, t)) = b.claim_dividends(who) { q_bal -= q; t_bal -= t; },
             _ => { let a = rng.next() as u128 % 50_000 + 1; if let Ok((_, placed)) = b.place_ladder(who, a, &DEFAULT_LADDER, 0, now) { t_bal += placed; } }
         }
@@ -603,12 +603,12 @@ fn settle_pays_the_owner_and_closes_a_sold_out_rung() {
     let id = b.place_take_profit("alice", 5, UNIT, 0, DAY).unwrap();
     b.swap(Side::Buy, 5 * UNIT, 0).unwrap(); // Alice's rung sells out
     // (The seeded "treasury" account's LP positions earned fees too, so they are listed as well.)
-    assert!(b.settleable(10).contains(&id), "the keeper can find it");
+    assert!(b.settleable(0, u64::MAX).contains(&id), "the keeper can find it");
     let s = b.settle(id, DAY).unwrap();
     assert_eq!(s.owner, "alice");
     assert!(s.quote > UNIT && s.closed, "paid ~1.05 per token and closed: {s:?}");
     assert!(!b.positions.contains_key(&id));
-    assert!(!b.settleable(10).contains(&id));
+    assert!(!b.settleable(0, u64::MAX).contains(&id));
 }
 
 #[test]
@@ -742,7 +742,7 @@ fn solvent_with_bids_wheels_and_settles_over_4000_random_actions() {
             0 | 1 => if let Ok(r) = b.swap(Side::Buy, amt, 0) { q_bal += r.used; t_bal -= r.out; },
             2 | 3 => if let Ok(r) = b.swap(Side::Sell, amt, 0) { t_bal += r.used; q_bal -= r.out; },
             4 => if b.place_wheel(who, amt, &[(9_800, 5_000), (9_500, 5_000)], 1 + (rng.next() % 2) as u8, 0).is_ok() { q_bal += amt; },
-            _ => for id in b.settleable(5) {
+            _ => for id in b.settleable(0, u64::MAX).into_iter().take(5) {
                 if let Ok(s) = b.settle(id, step) { q_bal -= s.quote; t_bal -= s.token; }
             },
         }
@@ -751,4 +751,55 @@ fn solvent_with_bids_wheels_and_settles_over_4000_random_actions() {
             assert!(oq <= q_bal && ot <= t_bal, "step {step}: owes ({oq},{ot}) holds ({q_bal},{t_bal})");
         }
     }
+}
+
+#[test]
+fn a_price_spike_right_before_the_crank_does_not_move_the_reference() {
+    const HOUR: u64 = 3_600 * 1_000_000_000;
+    let mut b = book();
+    b.crank(HOUR).unwrap();
+    // Someone pushes the price 40 bins up and cranks in the same breath.
+    b.active = 40;
+    b.crank(2 * HOUR).unwrap();
+    assert_eq!(b.ref_bin, 0, "one sample is not enough");
+    // The price falls back before the next crank: still nothing.
+    b.active = 0;
+    b.crank(3 * HOUR).unwrap();
+    assert_eq!(b.ref_bin, 0);
+    // A real move that holds: the reference follows, 2 bins per crank at most.
+    b.active = 40;
+    b.crank(4 * HOUR).unwrap();
+    b.crank(5 * HOUR).unwrap();
+    assert_eq!(b.ref_bin, 2);
+    b.crank(6 * HOUR).unwrap();
+    assert_eq!(b.ref_bin, 4);
+}
+
+#[test]
+fn a_big_lock_expiry_backlog_finishes_over_several_cranks() {
+    const HOUR: u64 = 3_600 * 1_000_000_000;
+    let mut b = book();
+    // 300 locked LPs (above the 200-per-crank expiry budget), all ending day 31.
+    for i in 0..300 {
+        b.add_liquidity(&format!("lp{i}"), 10, 1_000, 0, 31 * DAY, 0).unwrap();
+    }
+    assert!(b.creator.total_weight > 0);
+    b.crank(32 * DAY).unwrap();
+    assert!(b.creator.total_weight > 0, "budget used up: some are still weighted");
+    b.crank(32 * DAY + HOUR).unwrap();
+    assert_eq!(b.creator.total_weight, 0, "the next crank finished the backlog");
+}
+
+#[test]
+fn owners_see_their_positions_and_withdrawn_ones_leave_the_index() {
+    let mut b = book();
+    let a = b.add_liquidity("alice", 10, UNIT, 0, 0, 0).unwrap();
+    let c = b.add_liquidity("alice", 11, UNIT, 0, 0, 0).unwrap();
+    b.add_liquidity("bob", 12, UNIT, 0, 0, 0).unwrap();
+    assert_eq!(b.positions_of("alice", 10), vec![a, c]);
+    b.withdraw(a, "alice", 0).unwrap();
+    assert_eq!(b.positions_of("alice", 10), vec![c]);
+    b.withdraw(c, "alice", 0).unwrap();
+    assert!(b.positions_of("alice", 10).is_empty());
+    assert_eq!(b.positions_of("bob", 10).len(), 1);
 }

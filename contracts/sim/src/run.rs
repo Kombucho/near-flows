@@ -99,8 +99,8 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, 
         }
         if std::env::var("SIM_TRACE").is_ok() && hour % 24 == 23 {
             let b = &w.book;
-            let ask = b.bins.range(b.active..).find(|(_, x)| x.token > 0).map(|(k, x)| (*k, to_f(x.token)));
-            let bid = b.bins.range(..=b.active).rev().find(|(_, x)| x.quote > 0).map(|(k, x)| (*k, to_f(x.quote)));
+            let ask = b.bin_ids.range(b.active..).map(|k| (k, &b.bins[k])).find(|(_, x)| x.token > 0).map(|(k, x)| (*k, to_f(x.token)));
+            let bid = b.bin_ids.range(..=b.active).rev().map(|k| (k, &b.bins[k])).find(|(_, x)| x.quote > 0).map(|(k, x)| (*k, to_f(x.quote)));
             eprintln!("day {:>2} fair {:.3e} book {:.3e} active {} next ask {:?} next bid {:?}", hour / 24, c.fair, w.price(), b.active, ask, bid);
         }
     }
@@ -229,7 +229,7 @@ fn make_buyers(w: &mut World, rng: &mut Rng, first: usize, count: usize) -> Vec<
 /// The keeper's job each hour: settle every buyer position with something to do
 /// (wheel bids re-arm into sell liquidity; filled sells pay out to the wallet).
 fn keeper_settle(w: &mut World, buyers: &mut [Buyer]) {
-    for id in w.book.settleable(1_000) {
+    for id in w.book.settleable(0, u64::MAX).into_iter().take(1_000) {
         let Some(owner) = w.book.positions.get(&id).map(|p| p.owner.clone()) else { continue };
         let Some(b) = buyers.iter_mut().find(|b| b.name == owner) else { continue };
         if w.book.positions[&id].bid {
@@ -275,7 +275,7 @@ fn score_buyers(w: &World, buyers: &[Buyer], p: f64) -> ([f64; 8], f64) {
     let (mut wheels, mut never) = (0, 0);
     for b in buyers {
         let mut v = to_f(b.wallet_q) + to_f(b.wallet_t) * p;
-        for (id, pos) in &w.book.positions {
+        for (id, pos) in w.book.positions.iter() {
             if pos.owner == b.name {
                 if let Ok((t, q)) = w.book.position_assets(*id) {
                     v += to_f(q) + to_f(t) * p;
@@ -438,7 +438,7 @@ fn finish(r: &Regime, w: &World, c: &Ctx, holders: &[Holder], p0: f64, staked0: 
     let mut event_pnl = c.event_pnl;
     if matches!(r.event, Event::Snipe { .. }) {
         // Add what the sniper's locked ladder is still worth.
-        for (id, pos) in &w.book.positions {
+        for (id, pos) in w.book.positions.iter() {
             if pos.owner == "sniper" {
                 let (t, q) = w.book.position_assets(*id).unwrap_or((0, 0));
                 event_pnl += to_f(q) + to_f(t) * p;

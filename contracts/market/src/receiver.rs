@@ -19,7 +19,7 @@ use near_sdk::json_types::U128;
 use near_sdk::serde::Deserialize;
 use near_sdk::{env, near, require, AccountId, PromiseOrValue};
 
-use crate::{Market, MarketExt, DAY_NS, MAX_POSITIONS};
+use crate::{Market, MarketExt, DAY_NS};
 
 /// A ladder for coins you already hold: all of them, 25% on each rung.
 const FULL_LADDER: [Rung; 4] = [(15_000, 2_500), (20_000, 2_500), (30_000, 2_500), (50_000, 2_500)];
@@ -84,7 +84,6 @@ impl Market {
     fn on_action(&mut self, sender: &AccountId, is_quote: bool, amount: u128, msg: Msg) -> u128 {
         let now = env::block_timestamp();
         let who = sender.to_string();
-        require!(self.book_ref().positions.len() < MAX_POSITIONS, "market full");
         self.book().touch(now); // decay the fee's volatility memory up to now
         match msg {
             Msg::Buy { min_out, ladder, .. } => {

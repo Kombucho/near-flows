@@ -65,9 +65,15 @@ export class Chain {
     return this.signer().accountId;
   }
 
-  /** Positions with earnings waiting to be paid to their owners. */
-  settleable(limit = 20): Promise<number[]> {
-    return this.view<number[]>(this.market, "get_settleable", { limit });
+  /** Positions with earnings waiting to be paid to their owners (up to `limit`).
+   *  Position ids run 0..next_id; the market can only scan a page of them per view. */
+  async settleable(limit = 20): Promise<number[]> {
+    const { next_id } = await this.view<{ next_id: number }>(this.market, "get_stats");
+    const ids: number[] = [];
+    for (let from = 0; from < next_id && ids.length < limit; from += 300) {
+      ids.push(...(await this.view<number[]>(this.market, "get_settleable", { from_id: from, scan: 300 })));
+    }
+    return ids.slice(0, limit);
   }
 
   /** Pay a position's earnings to its OWNER (anyone may call; nothing comes to us). */

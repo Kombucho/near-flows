@@ -102,7 +102,7 @@ impl Book {
             return Ok(Withdrawal { token, quote: 0, fee_quote, fee_token });
         }
         let (fee_quote, fee_token) = self.claim(id, caller)?;
-        let p = self.positions.remove(&id).expect("exists");
+        let p = self.take_position(id).expect("exists");
         let b = self.bins.get_mut(&p.bin).expect("position's bin exists");
         // Round DOWN: any dust stays in the bin for the remaining LPs.
         let token = mul_div_down(b.token, p.shares, b.shares);
@@ -156,13 +156,12 @@ impl Book {
         Ok(Settlement { owner, quote, token, closed: done })
     }
 
-    /// Positions with something to pay out (for keepers), skipping the protocol's.
-    pub fn settleable(&self, limit: usize) -> Vec<u64> {
-        self.positions.iter()
-            .filter(|(_, p)| p.owner != crate::book::PROTOCOL)
-            .filter(|(id, _)| self.claimable(**id).map(|(q, t)| q + t > 0).unwrap_or(false))
-            .map(|(id, _)| *id)
-            .take(limit)
+    /// Positions among ids from_id..from_id+scan with something to pay out,
+    /// skipping the protocol's (for keepers, who page through ids up to `next_id`).
+    pub fn settleable(&self, from_id: u64, scan: u64) -> Vec<u64> {
+        (from_id..from_id.saturating_add(scan).min(self.next_id))
+            .filter(|id| self.positions.get(id).map_or(false, |p| p.owner != crate::book::PROTOCOL))
+            .filter(|id| self.claimable(*id).map(|(q, t)| q + t > 0).unwrap_or(false))
             .collect()
     }
 }

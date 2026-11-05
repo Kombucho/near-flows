@@ -28,11 +28,6 @@ use engine::{Book, Config};
 use near_sdk::store::LookupMap;
 use near_sdk::{env, near, require, AccountId, BorshStorageKey, PanicOnDefault};
 
-/// Hard cap on stored positions. The whole book is one stored value, so every
-/// call reads it; the cap keeps gas bounded. Raising it means moving positions
-/// into their own storage map (documented as a known limit).
-pub const MAX_POSITIONS: usize = 3_000;
-
 const DAY_NS: u64 = 86_400 * 1_000_000_000;
 
 /// Dynamic fee, chosen from the simulator (3,600 runs per policy): a low base
@@ -73,7 +68,9 @@ pub struct Market {
     fee_bps: u16,
     /// Trailing daily quote volume above which the protocol slice phases in.
     protocol_threshold: u128,
-    /// None until launched. Everything market-related lives in here.
+    /// None until launched. Everything market-related lives in here: a few KB
+    /// loaded on every call, plus bins, positions and stakers in their own
+    /// storage slots, loaded only when a call touches them (engine store.rs).
     book: Option<Book>,
     paused: bool,
     /// Tokens the owner sent before launch (they become the opening liquidity).

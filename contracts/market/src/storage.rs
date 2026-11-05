@@ -47,30 +47,25 @@ impl Market {
 }
 
 impl Market {
+    /// Write everything changed so far: the book's lazy entries, then the root
+    /// (a few KB, so writing it again at the end of the call is cheap).
+    fn save_now(&mut self) {
+        if let Some(b) = self.book.as_mut() {
+            b.flush();
+        }
+        env::state_write(self);
+    }
+
     /// Charge `who` for bytes added since `before` (or credit bytes freed).
     /// Call it at the end of every user action that can change storage.
     /// If the balance is short this panics, which on NEAR reverts the whole
     /// call (and an ft_on_transfer revert refunds the tokens).
-    /// Like charge_storage, but returns false instead of panicking when the
-    /// balance is short (delegated buys must never panic).
-    pub(crate) fn try_charge_storage(&mut self, who: &AccountId, before: u64) -> bool {
-        env::state_write(self);
-        let after = env::storage_usage();
-        let cost = after.saturating_sub(before) as u128 * env::storage_byte_cost().as_yoctonear();
-        let bal = self.storage.get(who).copied().unwrap_or(0);
-        if bal < cost {
-            return false;
-        }
-        self.storage.insert(who.clone(), bal - cost);
-        true
-    }
-
     pub(crate) fn charge_storage(&mut self, who: &AccountId, before: u64) {
         // NEAR saves the contract state only when the method returns, so
         // storage_usage() would not include this call's changes yet. Save the
         // state now so the measurement is real. (Found by the unit tests:
         // without this every action looked free and nobody paid for storage.)
-        env::state_write(self);
+        self.save_now();
         let after = env::storage_usage();
         let byte_cost = env::storage_byte_cost().as_yoctonear();
         let bal = self.storage.get(who).copied().unwrap_or(0);
