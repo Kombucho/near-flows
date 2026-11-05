@@ -721,6 +721,21 @@ fn the_wheel_buys_the_dip_then_sells_above_and_keeps_it() {
 }
 
 #[test]
+fn a_bad_wheel_is_rejected_before_anything_is_placed() {
+    let mut b = book();
+    let n = b.positions.len();
+    for dips in [&[][..], &[(9_500, 6_000)][..], &[(10_000, 10_000)][..], &[(4_000, 10_000)][..], &[(0, 10_000)][..],
+                 &[(9_500, 5_000), (9_000, 6_000)][..], &[(9_900, 2_000); 5][..]] {
+        assert_eq!(b.place_wheel("alice", UNIT, dips, 1, 0), Err(Error::BadRange), "{dips:?}");
+    }
+    assert_eq!(b.place_wheel("alice", UNIT, &[(9_500, 10_000)], 9, 0), Err(Error::WrongSide), "unknown rearm preset");
+    assert_eq!(b.positions.len(), n, "nothing half-placed");
+    // A very shallow dip still lands strictly below the price.
+    let ids = b.place_wheel("alice", UNIT, &[(9_999, 10_000)], 1, 0).unwrap();
+    assert!(b.positions[&ids[0]].bin < b.active);
+}
+
+#[test]
 fn settle_on_a_wheel_bid_rearms_instead_of_paying() {
     let mut b = book();
     let id = b.place_bid("alice", -2, UNIT, 1, 0, 0).unwrap();

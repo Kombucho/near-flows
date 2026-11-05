@@ -19,7 +19,7 @@ mod swap;
 mod tp;
 mod vault;
 
-pub use bid::WHEEL_EXITS;
+pub use bid::{DEFAULT_DIPS, MAX_DIPS, MIN_DIP, WHEEL_EXITS};
 pub use book::{Bin, Book, Config, CreatorPool, Pots, Position, PROTOCOL};
 pub use crank::CrankReport;
 pub use error::Error;

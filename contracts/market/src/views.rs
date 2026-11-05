@@ -28,6 +28,7 @@ pub struct BinView {
     pub token: U128,    // two-way LP tokens (asks)
     pub quote: U128,    // two-way LP quote (bids)
     pub tp_token: U128, // one-way take-profit tokens waiting
+    pub bid_quote: U128, // one-way bids (wheel buys) waiting
 }
 
 #[near(serializers = [json])]
@@ -36,6 +37,8 @@ pub struct PositionView {
     pub owner: String,
     pub bin: i32,
     pub take_profit: bool,
+    pub bid: bool,  // one-way bid (wheel buy)
+    pub rearm: u8,  // wheel exit preset: bought coins become asks (0 = paid out instead)
     pub locked_until_ns: u64,
     pub token: U128, // what it would return if closed now (incl. earnings)
     pub quote: U128,
@@ -86,9 +89,9 @@ impl Market {
         let b = self.book_ref();
         b.bin_ids.range(from..=to).take(200)
             .map(|id| (id, &b.bins[id]))
-            .filter(|(_, x)| x.token + x.quote + x.tp_token > 0)
+            .filter(|(_, x)| x.token + x.quote + x.tp_token + x.bid_quote > 0)
             .map(|(id, x)| BinView {
-                id: *id, price: U128(b.price(*id)), token: U128(x.token), quote: U128(x.quote), tp_token: U128(x.tp_token),
+                id: *id, price: U128(b.price(*id)), token: U128(x.token), quote: U128(x.quote), tp_token: U128(x.tp_token), bid_quote: U128(x.bid_quote),
             })
             .collect()
     }
@@ -100,7 +103,7 @@ impl Market {
                 let p = &b.positions[&id];
                 let (t, q) = b.position_assets(id).unwrap_or((0, 0));
                 PositionView {
-                    id, owner: p.owner.clone(), bin: p.bin, take_profit: p.take_profit,
+                    id, owner: p.owner.clone(), bin: p.bin, take_profit: p.take_profit, bid: p.bid, rearm: p.rearm,
                     locked_until_ns: p.locked_until_ns, token: U128(t), quote: U128(q),
                 }
             })

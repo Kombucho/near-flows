@@ -11,9 +11,15 @@
 //!   {"action":"ladder"}                               put coins you hold on a take-profit ladder
 //!   {"action":"stake"}                                stake coins (native coins only)
 //!   {"action":"lp","bin":12,"lock_days":30}           add liquidity to one bin
+//!   {"action":"lp_range","from":5,"to":40,"bins":10,"lock_in":true}
+//!        spread liquidity over a range of bins (lock_in: one-way take-profits, coins only)
+//!   {"action":"wheel"}                                buy the dip: wNEAR waits as one-way bids
+//!        below the price (default half at 0.95x, half at 0.9x); coins they buy are re-armed
+//!        as one-way asks above (1.11x / 1.33x of the fill). Optional "dips":[[9500,5000],...]
+//!        (price multiple, share, both in bps; shares sum to 10000) and "rearm":0|1|2.
 //!   {"action":"fund"}                                 owner, before launch
 
-use engine::{Rung, Side, DEFAULT_LADDER};
+use engine::{Rung, Side, DEFAULT_DIPS, DEFAULT_LADDER};
 use near_contract_standards::fungible_token::receiver::FungibleTokenReceiver;
 use near_sdk::json_types::U128;
 use near_sdk::serde::Deserialize;
@@ -40,7 +46,26 @@ enum Msg {
     Ladder,
     Stake,
     Lp { bin: i32, #[serde(default)] lock_days: u32 },
+    LpRange {
+        from: i32,
+        to: i32,
+        bins: u32,
+        #[serde(default)]
+        lock_in: bool,
+        #[serde(default)]
+        lock_days: u32,
+    },
+    Wheel {
+        #[serde(default)]
+        dips: Option<Vec<(u32, u16)>>,
+        #[serde(default = "default_rearm")]
+        rearm: u8,
+    },
     Fund,
+}
+
+fn default_rearm() -> u8 {
+    2
 }
 
 #[near]
@@ -121,6 +146,20 @@ impl Market {
                 let (t, q) = if is_quote { (0, amount) } else { (amount, 0) };
                 let id = self.book().add_liquidity(&who, bin, t, q, lock, now).unwrap_or_else(|e| fail(e));
                 self.emit("lp", &format!(r#"{{"account":"{who}","position":{id},"bin":{bin}}}"#));
+                0
+            }
+            Msg::LpRange { from, to, bins, lock_in, lock_days } => {
+                let lock = if lock_days == 0 { 0 } else { now + lock_days as u64 * DAY_NS };
+                let (t, q) = if is_quote { (0, amount) } else { (amount, 0) };
+                let ids = self.book().lp_range(&who, from, to, bins, t, q, lock_in, lock, now).unwrap_or_else(|e| fail(e));
+                self.emit("lp_range", &format!(r#"{{"account":"{who}","positions":{ids:?},"from":{from},"to":{to},"lock_in":{lock_in}}}"#));
+                0
+            }
+            Msg::Wheel { dips, rearm } => {
+                require!(is_quote, "pay with the quote token for a wheel buy");
+                let dips = dips.unwrap_or_else(|| DEFAULT_DIPS.to_vec());
+                let ids = self.book().place_wheel(&who, amount, &dips, rearm, now).unwrap_or_else(|e| fail(e));
+                self.emit("wheel", &format!(r#"{{"account":"{who}","positions":{ids:?},"in":"{amount}","rearm":{rearm}}}"#));
                 0
             }
             Msg::Fund => unreachable!("handled above"),

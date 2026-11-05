@@ -24,6 +24,12 @@ pub const WHEEL_EXITS: [&[Rung]; 3] = [
     &[(11_100, 5_000), (13_300, 5_000)],  // 2: tighter: 1.11x and 1.33x
 ];
 
+/// A wheel buy uses at most this many dips, none deeper than MIN_DIP (0.5x).
+pub const MAX_DIPS: usize = 4;
+pub const MIN_DIP: u32 = 5_000;
+/// The default wheel buy: half at 0.95x, half at 0.9x, re-armed with preset 2.
+pub const DEFAULT_DIPS: [(u32, u16); 2] = [(9_500, 5_000), (9_000, 5_000)];
+
 impl Book {
     /// Place a one-way bid of `quote` at `bin` (at or below the price).
     pub fn place_bid(
@@ -171,6 +177,16 @@ impl Book {
     /// WHEEL BUY: put `quote` as one-way bids at `dips` below the current price
     /// (dip = (multiple below, e.g. 9_000 = 0.9x, share in bps)), set to rearm.
     pub fn place_wheel(&mut self, owner: &str, quote: u128, dips: &[(u32, u16)], rearm: u8, now_ns: u64) -> Result<Vec<u64>, Error> {
+        // Check everything first: a half-placed wheel must never happen.
+        let shares: u32 = dips.iter().map(|&(_, s)| s as u32).sum();
+        let bad = dips.is_empty() || dips.len() > MAX_DIPS || shares != BPS as u32
+            || dips.iter().any(|&(below, _)| below < MIN_DIP || below >= BPS as u32);
+        if bad {
+            return Err(Error::BadRange);
+        }
+        if quote == 0 {
+            return Err(Error::ZeroAmount);
+        }
         let mut ids = Vec::new();
         let mut placed = 0u128;
         for (i, &(below, share)) in dips.iter().enumerate() {
@@ -178,7 +194,7 @@ impl Book {
             if amount == 0 { continue; }
             // bins below for a price multiple `below` (< 1.0): same distance as 1/below up.
             let up = (BPS as u64 * BPS as u64 / below as u64) as u32;
-            let bin = self.active - bins_for_multiple(self.cfg.step_bps, up);
+            let bin = (self.active - bins_for_multiple(self.cfg.step_bps, up)).min(self.active - 1); // strictly below
             ids.push(self.place_bid(owner, bin, amount, rearm, 0, now_ns)?);
             placed += amount;
         }

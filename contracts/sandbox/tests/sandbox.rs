@@ -302,6 +302,158 @@ async fn anyone_can_settle_but_only_the_owner_gets_paid() -> anyhow::Result<()> 
     assert_solvent(&w).await
 }
 
+async fn active_bin(w: &World) -> anyhow::Result<i64> {
+    let c: Value = w.market.view("get_config").args_json(json!({})).await?.json()?;
+    Ok(c["active_bin"].as_i64().unwrap())
+}
+
+fn amt(p: &Value, k: &str) -> u128 {
+    p[k].as_str().unwrap().parse().unwrap()
+}
+
+/// The market's (wNEAR, coin) balances on the token contracts.
+async fn market_balances(w: &World) -> anyhow::Result<(u128, u128)> {
+    Ok((balance(&w.wnear, w.market.id()).await?, balance(&w.coin, w.market.id()).await?))
+}
+
+/// The owner sells coins in chunks until the price is at or below `bin`.
+async fn dump_to(w: &World, bin: i64) -> anyhow::Result<()> {
+    for _ in 0..30 {
+        if active_bin(w).await? <= bin { return Ok(()); }
+        send(w, &w.owner, &w.coin, 10_000_000 * ONE, r#"{"action":"sell","min_out":"0"}"#).await?.into_result()?;
+    }
+    anyhow::bail!("price never reached bin {bin}")
+}
+
+#[tokio::test]
+async fn the_wheel_buys_the_dip_rearms_above_and_never_sells_back() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let r = send(&w, &w.alice, &w.wnear, 50 * ONE, r#"{"action":"wheel"}"#).await?;
+    println!("GAS wheel buy (whole tx): {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
+    r.into_result()?;
+    let bids = positions(&w, w.alice.id()).await?;
+    assert_eq!(bids.len(), 2, "two dip bids");
+    assert!(bids.iter().all(|p| p["bid"] == true && p["rearm"] == 2));
+    let start = active_bin(&w).await?;
+    assert!(bids.iter().all(|p| p["bin"].as_i64().unwrap() < start), "bids wait below the price");
+    assert_eq!(balance(&w.wnear, w.alice.id()).await?, 50 * ONE);
+    // A bad wheel (shares not summing to 100%) is refunded in full.
+    let _ = send(&w, &w.alice, &w.wnear, 10 * ONE, r#"{"action":"wheel","dips":[[9500,5000]]}"#).await?;
+    assert_eq!(balance(&w.wnear, w.alice.id()).await?, 50 * ONE, "bad wheel refunded");
+    assert_solvent(&w).await?;
+
+    // The dip: price falls through both bids.
+    let deepest = bids.iter().map(|p| p["bin"].as_i64().unwrap()).min().unwrap();
+    dump_to(&w, deepest - 1).await?;
+    assert_solvent(&w).await?;
+
+    // Bob (a stranger, like the keeper) settles Alice's bids: that RE-ARMS them.
+    // Nothing leaves the market and nobody's wallet changes.
+    let bid_ids: Vec<u64> = bids.iter().map(|p| p["id"].as_u64().unwrap()).collect();
+    let ready = settleable(&w).await?;
+    assert!(bid_ids.iter().all(|i| ready.contains(i)), "both bids bought coins");
+    let held = market_balances(&w).await?;
+    let wallets = (balance(&w.wnear, w.alice.id()).await?, balance(&w.coin, w.alice.id()).await?, balance(&w.wnear, w.bob.id()).await?);
+    for id in &bid_ids {
+        let r = w.bob.call(w.market.id(), "settle").args_json(json!({"position_id": id})).max_gas().transact().await?;
+        println!("GAS settle = rearm a wheel bid: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
+        r.into_result()?;
+    }
+    assert_eq!(market_balances(&w).await?, held, "rearm moved no tokens");
+    assert_eq!((balance(&w.wnear, w.alice.id()).await?, balance(&w.coin, w.alice.id()).await?, balance(&w.wnear, w.bob.id()).await?),
+        wallets, "rearm paid nobody");
+    let asks: Vec<Value> = positions(&w, w.alice.id()).await?.into_iter().filter(|p| p["take_profit"] == true).collect();
+    assert!(!asks.is_empty(), "the bought coins now sit as Alice's one-way asks");
+    let now = active_bin(&w).await?;
+    assert!(asks.iter().all(|p| p["bin"].as_i64().unwrap() > now), "asks sit above the price");
+    assert_solvent(&w).await?;
+
+    // Another dump cannot touch the asks: they sit above the price.
+    dump_to(&w, now - 5).await?;
+    for (a, b) in asks.iter().zip(positions(&w, w.alice.id()).await?.iter().filter(|p| p["take_profit"] == true)) {
+        assert_eq!(amt(a, "token"), amt(b, "token"), "asks untouched by a dump");
+    }
+
+    // The rebound sells them. Then a dump must not buy any of it back.
+    send(&w, &w.owner, &w.wnear, 3_000 * ONE, r#"{"action":"buy","min_out":"0"}"#).await?.into_result()?;
+    let filled: Vec<Value> = positions(&w, w.alice.id()).await?.into_iter().filter(|p| p["take_profit"] == true).collect();
+    assert!(filled.iter().any(|p| amt(p, "quote") > 0), "the rebound filled Alice's asks");
+    dump_to(&w, now - 10).await?;
+    let after: Vec<Value> = positions(&w, w.alice.id()).await?.into_iter().filter(|p| p["take_profit"] == true).collect();
+    for (a, b) in filled.iter().zip(after.iter()) {
+        assert_eq!(a["id"], b["id"]);
+        assert!(amt(b, "quote") >= amt(a, "quote"), "one-way: sold coins stay sold");
+        assert!(amt(b, "token") <= amt(a, "token"), "one-way: no coins bought back");
+    }
+    // Settle everything of Alice's (Bob again): the wNEAR goes to Alice.
+    let before = balance(&w.wnear, w.alice.id()).await?;
+    let bob_before = balance(&w.wnear, w.bob.id()).await?;
+    for p in &after {
+        let id = p["id"].as_u64().unwrap();
+        if settleable(&w).await?.contains(&id) {
+            w.bob.call(w.market.id(), "settle").args_json(json!({"position_id": id})).max_gas().transact().await?.into_result()?;
+        }
+    }
+    let got = balance(&w.wnear, w.alice.id()).await? - before;
+    println!("wheel round trip: 50 wNEAR in, {:.2} wNEAR back so far (+ any unsold asks / waiting bids)", got as f64 / ONE as f64);
+    assert!(got > 0, "Alice was paid");
+    assert_eq!(balance(&w.wnear, w.bob.id()).await?, bob_before, "Bob got nothing");
+    assert_solvent(&w).await
+}
+
+#[tokio::test]
+async fn lp_range_spreads_a_bag_and_lock_in_keeps_what_sold() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let a = active_bin(&w).await?;
+    transfer(&w.owner, &w.coin, w.alice.id(), 10_000_000 * ONE).await?;
+    let msg = format!(r#"{{"action":"lp_range","from":{},"to":{},"bins":10,"lock_in":true}}"#, a + 5, a + 40);
+    let r = send(&w, &w.alice, &w.coin, 10_000_000 * ONE, &msg).await?;
+    println!("GAS lp_range 10 bins (whole tx): {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
+    r.into_result()?;
+    let rungs = positions(&w, w.alice.id()).await?;
+    assert_eq!(rungs.len(), 10);
+    assert!(rungs.iter().all(|p| p["take_profit"] == true));
+    assert_eq!(balance(&w.coin, w.alice.id()).await?, 0, "the whole bag is on the range");
+    // Lock-in is coins only: wNEAR sent with lock_in is refunded.
+    let bad = format!(r#"{{"action":"lp_range","from":{},"to":{},"bins":5,"lock_in":true}}"#, a - 20, a - 1);
+    let _ = send(&w, &w.alice, &w.wnear, 10 * ONE, &bad).await?;
+    assert_eq!(balance(&w.wnear, w.alice.id()).await?, 100 * ONE, "refunded");
+    // Two-way range with wNEAR below the price.
+    let two_way = format!(r#"{{"action":"lp_range","from":{},"to":{},"bins":5}}"#, a - 20, a - 1);
+    send(&w, &w.alice, &w.wnear, 20 * ONE, &two_way).await?.into_result()?;
+    assert_eq!(positions(&w, w.alice.id()).await?.len(), 15);
+    assert_solvent(&w).await?;
+
+    // Pump through part of the range, then dump: lock-in rungs keep their sales.
+    send(&w, &w.owner, &w.wnear, 1_500 * ONE, r#"{"action":"buy","min_out":"0"}"#).await?.into_result()?;
+    let pumped: Vec<Value> = positions(&w, w.alice.id()).await?.into_iter().filter(|p| p["take_profit"] == true).collect();
+    assert!(pumped.iter().any(|p| amt(p, "quote") > 0), "some rungs sold");
+    dump_to(&w, a).await?;
+    let dumped: Vec<Value> = positions(&w, w.alice.id()).await?.into_iter().filter(|p| p["take_profit"] == true).collect();
+    for (x, y) in pumped.iter().zip(dumped.iter()) {
+        assert_eq!(x["id"], y["id"]);
+        assert!(amt(y, "quote") >= amt(x, "quote") && amt(y, "token") <= amt(x, "token"), "one-way: nothing re-traded");
+    }
+    assert_solvent(&w).await?;
+
+    // Bob settles; Alice is paid, Bob is not.
+    let (alice_before, bob_before) = (balance(&w.wnear, w.alice.id()).await?, balance(&w.wnear, w.bob.id()).await?);
+    let mine: Vec<u64> = dumped.iter().map(|p| p["id"].as_u64().unwrap()).collect();
+    for id in settleable(&w).await?.into_iter().filter(|i| mine.contains(i)) {
+        w.bob.call(w.market.id(), "settle").args_json(json!({"position_id": id})).max_gas().transact().await?.into_result()?;
+    }
+    assert!(balance(&w.wnear, w.alice.id()).await? > alice_before, "Alice was paid");
+    assert_eq!(balance(&w.wnear, w.bob.id()).await?, bob_before, "Bob got nothing");
+    // The owner can still close a two-way bin; a stranger cannot.
+    let two: Vec<u64> = positions(&w, w.alice.id()).await?.iter().filter(|p| p["take_profit"] == false).map(|p| p["id"].as_u64().unwrap()).collect();
+    let stranger = w.bob.call(w.market.id(), "withdraw").args_json(json!({"position_id": two[0]}))
+        .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?;
+    assert!(stranger.is_failure(), "only the owner withdraws");
+    w.alice.call(w.market.id(), "withdraw").args_json(json!({"position_id": two[0]}))
+        .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?.into_result()?;
+    assert_solvent(&w).await
+}
+
 /// Gas as the book grows. The whole book is one stored value, so every call
 /// reads and writes all of it: this measures how fast that gets expensive.
 /// Slow (thousands of transactions): `cargo test -p sandbox gas_vs_positions -- --ignored --nocapture`
