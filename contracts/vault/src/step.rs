@@ -100,8 +100,16 @@ impl Vault {
     #[private]
     pub fn on_call(&mut self, i: u8) -> Promise {
         let mut ctx = self.busy.clone().unwrap_or_else(|| env::panic_str("no step"));
-        let ok = result(0).is_some();
         let calls = self.recipe_calls(&ctx);
+        let ok = match (&calls[i as usize], result(0)) {
+            (_, None) => false,
+            // ft_transfer_call "succeeds" even when the receiver refuses and refunds
+            // everything: it returns the amount actually used. Zero used = refused,
+            // and the rest of the recipe must not run (e.g. never release collateral
+            // after a repay that didn't happen).
+            (Call::Ft { .. }, Some(raw)) => near_sdk::serde_json::from_slice::<U128>(&raw).map_or(false, |used| used.0 > 0),
+            (Call::Fn { .. }, Some(_)) => true,
+        };
         if ok {
             if matches!(calls[i as usize], Call::Fn { deposit: Deposit::Input, .. }) {
                 ctx.native_used = ctx.amount;
@@ -178,8 +186,10 @@ impl Vault {
         let node = self.flow(ctx.flow).nodes[ctx.node as usize].clone();
         let amount = ctx.amount.0;
         let min_out = node.action.min_out_per_in.map_or(0, |m| crate::mul_div(amount, m.0, PRICE_SCALE));
+        let scaled = node.action.scale_per_in.map_or(0, |m| crate::mul_div(amount, m.0, PRICE_SCALE));
         let fill = |s: &str| {
             s.replace("{amount}", &amount.to_string())
+                .replace("{scaled}", &scaled.to_string())
                 .replace("{min_out}", &min_out.to_string())
                 .replace("{owner}", self.owner.as_str())
                 .replace("{vault}", env::current_account_id().as_str())

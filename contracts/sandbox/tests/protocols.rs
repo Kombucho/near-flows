@@ -23,6 +23,8 @@ fn theirs(id: &str) -> Vec<u8> {
 }
 
 struct World {
+    worker: Worker<Sandbox>,
+    lp: Account,
     alice: Account,
     keeper: Account,
     wrap: Contract,
@@ -86,7 +88,7 @@ async fn setup() -> anyhow::Result<World> {
         register(&lp, t, vault.id()).await?;
     }
     alice.call(vault.id(), "trust").args_json(json!({"add": [wrap.id(), usdc.id(), rhea.id(), linear.id()], "remove": []})).transact().await?.into_result()?;
-    let w = World { alice, keeper, wrap, usdc, rhea, linear, vault, pool };
+    let w = World { worker, lp, alice, keeper, wrap, usdc, rhea, linear, vault, pool };
     Ok(w)
 }
 
@@ -207,6 +209,138 @@ async fn native_near_is_staked_with_real_linear() -> anyhow::Result<()> {
     let price: String = w.linear.view("ft_price").await?.json()?;
     println!("10 NEAR -> {:.4} LiNEAR (price {price})", got as f64 / NEAR as f64);
     assert!(got > 9 * NEAR && got <= 10 * NEAR, "{got}");
-    let _ = (&w.usdc, &w.rhea);
+    let _ = (&w.usdc, &w.rhea, &w.worker, &w.lp);
+    Ok(())
+}
+
+
+/// Real Rhea lending (its testnet build), configured like testnet: fixed default
+/// prices (wNEAR $9.60, USDC $1.00), so no oracle is needed in a local node.
+/// The liquidity provider supplies 5,000 USDC for others to borrow.
+async fn lending(w: &World) -> anyhow::Result<Contract> {
+    let lend = w.worker.dev_deploy(&theirs("contract.1689937928.burrow.testnet")).await?;
+    let booster = w.worker.dev_deploy(&ours("mock_ft")).await?;
+    let r = lend.call("new").args_json(json!({"config": {
+        "oracle_account_id": "oracle.test.near", "pyth_oracle_account_id": "pyth.test.near", "ref_exchange_id": w.rhea.id(),
+        "owner_id": w.lp.id(), "booster_token_id": booster.id(), "booster_decimals": 18, "max_num_assets": 10,
+        "maximum_recency_duration_sec": 90, "maximum_staleness_duration_sec": 15, "lp_tokens_info_valid_duration_sec": 600,
+        "pyth_price_valid_duration_sec": 60, "minimum_staking_duration_sec": 2678400, "maximum_staking_duration_sec": 31536000,
+        "x_booster_multiplier_at_maximum_staking_duration": 40000, "force_closing_enabled": true,
+        "enable_price_oracle": false, "enable_pyth_oracle": true}})).max_gas().transact().await?;
+    r.into_result()?;
+    let asset = |volatility: u32| json!({"reserve_ratio": 2500, "prot_ratio": 0, "target_utilization": 8000,
+        "target_utilization_rate": "1000000000003593629036885046", "max_utilization_rate": "1000000000039724853136740579",
+        "holding_position_fee_rate": "1000000000000000000000000000", "volatility_ratio": volatility, "extra_decimals": 0,
+        "can_deposit": true, "can_withdraw": true, "can_use_as_collateral": true, "can_borrow": true, "net_tvl_multiplier": 10000});
+    for (t, vol, decimals, mult) in [(w.wrap.id(), 6000, 24, "960"), (w.usdc.id(), 9500, 18, "10000")] {
+        w.lp.call(lend.id(), "add_asset").args_json(json!({"token_id": t, "asset_config": asset(vol)}))
+            .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?.into_result()?;
+        let price_decimals = if *t == *w.wrap.id() { 26 } else { 22 };
+        w.lp.call(lend.id(), "add_token_pyth_info").args_json(json!({"token_id": t, "token_pyth_info": {
+            "decimals": decimals, "fraction_digits": 4, "price_identifier": "00".repeat(32), "extra_call": null,
+            "default_price": {"multiplier": mult, "decimals": price_decimals}}}))
+            .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?.into_result()?;
+        register(&w.lp, t, lend.id()).await?;
+    }
+    for who in [w.lp.id(), w.vault.id()] {
+        w.lp.call(lend.id(), "storage_deposit").args_json(json!({"account_id": who})).deposit(NearToken::from_millinear(100))
+            .transact().await?.into_result()?;
+    }
+    w.lp.call(w.usdc.id(), "ft_transfer_call").args_json(json!({"receiver_id": lend.id(), "amount": (5_000 * ONE).to_string(), "msg": ""}))
+        .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?.into_result()?;
+    w.alice.call(w.vault.id(), "trust").args_json(json!({"add": [lend.id()], "remove": []})).transact().await?.into_result()?;
+    Ok(lend)
+}
+
+/// "Supply wNEAR as collateral and borrow USDC against it": one node, two calls.
+/// `usdc_per_wnear` sets how much to borrow per wNEAR supplied ({scaled}).
+fn supply_and_borrow(w: &World, lend: &Contract, usdc_per_wnear: u128) -> Value {
+    let supply = format!(r#"{{"Execute":{{"actions":[{{"IncreaseCollateral":{{"token_id":"{}","amount":null,"max_amount":null}}}}]}}}}"#, w.wrap.id());
+    let borrow = format!(r#"{{"actions":[{{"Borrow":{{"token_id":"{u}","amount":"{{scaled}}","max_amount":null}}}},{{"Withdraw":{{"token_id":"{u}","amount":null,"max_amount":"{{scaled}}"}}}}]}}"#, u = w.usdc.id());
+    json!({"label": "Borrow USDC on Rhea", "calls": [
+            {"call": "ft", "receiver": lend.id(), "msg": supply, "tgas": 60},
+            {"call": "fn", "contract": lend.id(), "method": "execute_with_pyth", "args": borrow, "deposit": {"kind": "one_yocto"}, "tgas": 120}],
+           "out": w.usdc.id(), "min_out_per_in": null, "price": null, "scale_per_in": usdc_per_wnear.to_string() /* per 1 wNEAR = per 1e24 = the scale */})
+}
+
+/// "Repay USDC and take wNEAR collateral back": `wnear_per_usdc` (scaled 1e24) sets
+/// how much collateral to release per USDC repaid.
+fn repay_and_release(w: &World, lend: &Contract, wnear_per_usdc: u128) -> Value {
+    // The testnet build predates the "OnlyRepay" shortcut: use Execute { Repay }.
+    let repay = format!(r#"{{"Execute":{{"actions":[{{"Repay":{{"token_id":"{}","amount":null,"max_amount":null}}}}]}}}}"#, w.usdc.id());
+    let release = format!(r#"{{"actions":[{{"DecreaseCollateral":{{"token_id":"{t}","amount":"{{scaled}}","max_amount":null}}}},{{"Withdraw":{{"token_id":"{t}","amount":null,"max_amount":"{{scaled}}"}}}}]}}"#, t = w.wrap.id());
+    json!({"label": "Repay on Rhea", "calls": [
+            {"call": "ft", "receiver": lend.id(), "msg": repay, "tgas": 60},
+            {"call": "fn", "contract": lend.id(), "method": "execute_with_pyth", "args": release, "deposit": {"kind": "one_yocto"}, "tgas": 120}],
+           "out": w.wrap.id(), "min_out_per_in": null, "price": null, "scale_per_in": wnear_per_usdc.to_string()})
+}
+
+#[tokio::test]
+async fn borrow_usdc_against_wnear_on_real_rhea_lending() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let lend = lending(&w).await?;
+    w.alice.transfer_near(w.vault.id(), NearToken::from_near(30)).await?.into_result()?;
+    // 10 NEAR -> wNEAR -> collateral; borrow 3 USDC per wNEAR (worth $9.60, so ~31% LTV).
+    let f = save(&w, json!([
+        {"input": "near", "action": wrap_near(&w), "when": {"when": "now"}, "next": [{"to": 1, "bps": 10000}]},
+        {"input": w.wrap.id(), "action": supply_and_borrow(&w, &lend, 3 * ONE), "when": {"when": "now"}},
+    ])).await?;
+    fund(&w, f, 0, 10 * NEAR).await?;
+    step(&w, f, 0).await?.into_result()?;
+    let r = step(&w, f, 1).await?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?}", r.logs());
+    assert_eq!(balance(&w.usdc, w.vault.id()).await?, 30 * ONE, "borrowed 30 USDC into the vault");
+    let acct: Value = lend.view("get_account").args_json(json!({"account_id": w.vault.id()})).await?.json()?;
+    println!("vault on Rhea lending: {acct}");
+    assert_eq!(acct["collateral"][0]["balance"], (10 * NEAR).to_string());
+
+    // A second borrow after interest has started (shares no longer 1:1).
+    let g = save(&w, json!([
+        {"input": "near", "action": wrap_near(&w), "when": {"when": "now"}, "next": [{"to": 1, "bps": 10000}]},
+        {"input": w.wrap.id(), "action": supply_and_borrow(&w, &lend, 3 * ONE), "when": {"when": "now"}},
+    ])).await?;
+    fund(&w, g, 0, 5 * NEAR).await?;
+    step(&w, g, 0).await?.into_result()?;
+    assert!(step(&w, g, 1).await?.logs().iter().any(|l| l.contains(r#""event":"step""#)));
+    let usdc = balance(&w.usdc, w.vault.id()).await?;
+    assert!(usdc > 45 * ONE - 1_000 && usdc <= 45 * ONE, "{usdc}");
+
+    // Too greedy: 50 USDC per wNEAR against $9.60 of collateral. Rhea refuses the
+    // loan; the wNEAR stays supplied as collateral (it left the flow), nothing borrowed.
+    let h = save(&w, json!([
+        {"input": "near", "action": wrap_near(&w), "when": {"when": "now"}, "next": [{"to": 1, "bps": 10000}]},
+        {"input": w.wrap.id(), "action": supply_and_borrow(&w, &lend, 50 * ONE), "when": {"when": "now"}},
+    ])).await?;
+    fund(&w, h, 0, 5 * NEAR).await?;
+    step(&w, h, 0).await?.into_result()?;
+    let r = step(&w, h, 1).await?;
+    assert!(r.logs().iter().any(|l| l.contains("step_failed")), "{:?}", r.logs());
+    assert_eq!(balance(&w.usdc, w.vault.id()).await?, usdc, "no new loan");
+    let acct: Value = lend.view("get_account").args_json(json!({"account_id": w.vault.id()})).await?.json()?;
+    assert_eq!(acct["collateral"][0]["balance"], (20 * NEAR).to_string(), "all 20 wNEAR is collateral");
+
+    // A repay the protocol refuses (bad message) must stop the recipe: no collateral released.
+    let mut bad = repay_and_release(&w, &lend, NEAR / 3 * (SCALE / ONE));
+    bad["calls"][0]["msg"] = json!("\"OnlyRepay\"");
+    let wrap_before = balance(&w.wrap, w.vault.id()).await?;
+    let b = save(&w, json!([{"input": w.usdc.id(), "action": bad, "when": {"when": "manual"}}])).await?;
+    fund(&w, b, 0, 30 * ONE).await?;
+    let r = w.alice.call(w.vault.id(), "step").args_json(json!({"flow_id": b, "node": 0})).max_gas().transact().await?;
+    assert!(r.logs().iter().any(|l| l.contains("step_failed")), "{:?}", r.logs());
+    assert!(!r.logs().iter().any(|l| l.contains("decrease_collateral")), "collateral must not move: {:?}", r.logs());
+    assert_eq!(balance(&w.wrap, w.vault.id()).await?, wrap_before);
+    w.alice.call(w.vault.id(), "drain").args_json(json!({"flow_id": b})).transact().await?.into_result()?;
+
+    // Repay 30 USDC and release 1/3 wNEAR per USDC: 10 wNEAR comes back to the vault.
+    let wrap_before = balance(&w.wrap, w.vault.id()).await?;
+    let back = save(&w, json!([{"input": w.usdc.id(), "action": repay_and_release(&w, &lend, NEAR / 3 * (SCALE / ONE)), "when": {"when": "manual"}}])).await?;
+    fund(&w, back, 0, 30 * ONE).await?;
+    let r = w.alice.call(w.vault.id(), "step").args_json(json!({"flow_id": back, "node": 0})).max_gas().transact().await?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?} {:?}", r.logs(), r.failures());
+    let got = balance(&w.wrap, w.vault.id()).await? - wrap_before;
+    println!("repaid 30 USDC, got {:.6} wNEAR back", got as f64 / NEAR as f64);
+    assert!(got > 10 * NEAR - 1_000_000 && got <= 10 * NEAR, "{got}");
+    let acct: Value = lend.view("get_account").args_json(json!({"account_id": w.vault.id()})).await?.json()?;
+    println!("after repay: borrowed {}", acct["borrowed"]);
     Ok(())
 }

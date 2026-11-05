@@ -60,7 +60,9 @@ pub enum Deposit {
 
 /// One contract call in a recipe. In `args` and `msg`, these are filled in:
 /// {amount} the input amount, {min_out} the least output accepted,
-/// {owner} the vault's owner, {vault} the vault itself.
+/// {scaled} the input amount times the recipe's `scale_per_in` (e.g. how much
+/// to borrow against this much collateral), {owner} the vault's owner,
+/// {vault} the vault itself.
 #[near(serializers = [borsh, json])]
 #[serde(tag = "call", rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq)]
@@ -106,6 +108,9 @@ pub struct Recipe {
     pub min_out_per_in: Option<U128>,
     /// Needed by price triggers.
     pub price: Option<PriceSource>,
+    /// Fills {scaled}: amount * scale_per_in / 1e24.
+    #[serde(default)]
+    pub scale_per_in: Option<U128>,
 }
 
 impl Action for Recipe {
