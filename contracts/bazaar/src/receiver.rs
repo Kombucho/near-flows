@@ -1,12 +1,12 @@
 //! Receiving tokens and NFTs, with a `msg` saying what to do with them.
 //!
+//! Selling tokens or an NFT takes two steps, so nobody can open a sale in
+//! someone else's name: `open_sale` (signed by the seller), then the item:
+//!   {"action":"fund","lot":7}     via ft_transfer_call or nft_transfer_call
 //! Tokens (`ft_transfer_call` on the token, receiver = this contract):
-//!   {"action":"sell","sale":"listing","ask":"5000","pay":"wrap.testnet","lore":{"title":"..."}}
-//!   {"action":"sell","sale":"auction","opening":"100","reserve":"1000","hours":48,"lore":{...}}
-//!        list or auction the tokens sent. "pay" omitted = paid in native NEAR.
 //!   {"action":"buy","lot":7}      pay for a listing priced in this token (excess refunded)
 //!   {"action":"bid","lot":7}      bid on an auction priced in this token (amount = your maximum)
-//! NFTs (`nft_transfer_call` on the NFT contract): only "sell", same fields.
+//!   {"action":"deliver","lot":7}  seller of an idea: deliver the pledged tokens (ideas.rs)
 //!
 //! If anything fails the call aborts and the token contract refunds the
 //! sender in full (for NFTs, the NFT contract gives the NFT back).
@@ -18,20 +18,15 @@ use near_sdk::json_types::U128;
 use near_sdk::serde::Deserialize;
 use near_sdk::{env, near, require, AccountId, PromiseOrValue};
 
-use crate::{Bazaar, BazaarExt, Item, Lore, SaleTerms};
+use crate::{Bazaar, BazaarExt};
 
 #[derive(Deserialize)]
 #[serde(crate = "near_sdk::serde", tag = "action", rename_all = "snake_case")]
 enum Msg {
-    Sell {
-        #[serde(flatten)]
-        terms: SaleTerms,
-        #[serde(default)]
-        pay: Option<AccountId>,
-        lore: Lore,
-    },
+    Fund { lot: u64 },
     Buy { lot: u64 },
     Bid { lot: u64 },
+    Deliver { lot: u64 },
 }
 
 fn parse(msg: &str) -> Msg {
@@ -43,10 +38,8 @@ impl FungibleTokenReceiver for Bazaar {
     fn ft_on_transfer(&mut self, sender_id: AccountId, amount: U128, msg: String) -> PromiseOrValue<U128> {
         let token = env::predecessor_account_id();
         let refund = match parse(&msg) {
-            Msg::Sell { terms, pay, lore } => {
-                let before = env::storage_usage();
-                self.create(sender_id.clone(), Item::Ft { token, amount }, terms, pay, lore);
-                self.charge_storage(&sender_id, before);
+            Msg::Fund { lot } => {
+                self.fund(lot, &sender_id, &token, amount.0, None);
                 0
             }
             Msg::Buy { lot } => {
@@ -58,6 +51,7 @@ impl FungibleTokenReceiver for Bazaar {
                 self.on_bid(lot, &sender_id, amount.0);
                 0
             }
+            Msg::Deliver { lot } => self.deliver(lot, &sender_id, token, amount.0),
         };
         PromiseOrValue::Value(U128(refund))
     }
@@ -71,10 +65,8 @@ impl NonFungibleTokenReceiver for Bazaar {
     ) -> PromiseOrValue<bool> {
         let _ = sender_id; // may be an approved operator; the seller is the owner
         let contract = env::predecessor_account_id();
-        let Msg::Sell { terms, pay, lore } = parse(&msg) else { env::panic_str("NFTs can only be sold") };
-        let before = env::storage_usage();
-        self.create(previous_owner_id.clone(), Item::Nft { contract, token_id }, terms, pay, lore);
-        self.charge_storage(&previous_owner_id, before);
+        let Msg::Fund { lot } = parse(&msg) else { env::panic_str("send an NFT only to fund a sale") };
+        self.fund(lot, &previous_owner_id, &contract, 1, Some(&token_id));
         PromiseOrValue::Value(false)
     }
 }

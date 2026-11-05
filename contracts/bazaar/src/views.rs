@@ -14,7 +14,7 @@ pub struct LotView {
     pub pay: Option<AccountId>,
     pub lore: Lore,
     pub created_ns: u64,
-    /// "listing" or "auction"
+    /// "pending" (waiting for the item), "listing", "auction" or "withdrawn"
     pub sale: String,
     /// open for buys or bids right now (an auction past its end awaits `settle`)
     pub open: bool,
@@ -43,15 +43,15 @@ impl Bazaar {
             ask: None, left: None, opening: None, reserve: None, price: None, min_bid: None,
             leader: None, bids: None, ends_ns: None, settled: None,
         };
+        v.sale = crate::sale_name(&lot.sale).into();
         match &lot.sale {
+            Sale::Pending(_) | Sale::Withdrawn => {}
             Sale::Listing { price, left, open } => {
-                v.sale = "listing".into();
                 v.open = *open;
                 v.ask = Some(U128(price.ask));
                 v.left = Some(U128(*left));
             }
             Sale::Auction(a) => {
-                v.sale = "auction".into();
                 v.open = !a.settled && now < a.ends_ns;
                 v.opening = Some(U128(a.opening));
                 v.reserve = Some(U128(a.reserve));
@@ -69,6 +69,16 @@ impl Bazaar {
     /// Lots with ids from_id..from_id+limit (limit at most 100). Page up to `next_id`.
     pub fn get_lots(&self, from_id: u64, limit: u64) -> Vec<LotView> {
         (from_id..from_id.saturating_add(limit.min(100)).min(self.next_id)).filter_map(|id| self.get_lot(id)).collect()
+    }
+
+    /// May `account_id` enter this lot's private chat? The seller, and anyone
+    /// who has bought from it or bid on it.
+    pub fn is_participant(&self, lot_id: u64, account_id: AccountId) -> bool {
+        match self.lots.get(&lot_id) {
+            Some(l) if l.seller == account_id => true,
+            Some(_) => self.participants.contains_key(&format!("{lot_id}|{account_id}")),
+            None => false,
+        }
     }
 
     pub fn next_id(&self) -> u64 {

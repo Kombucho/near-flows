@@ -55,6 +55,10 @@ impl Bazaar {
         // NEAR saves the contract state only when the method returns, so
         // storage_usage() would not include this call's changes yet: flush now.
         self.lots.flush();
+        self.escrows.flush();
+        self.stakes.flush();
+        self.owed.flush();
+        self.participants.flush();
         env::state_write(self); // lots are written as they change; this writes the root
         let after = env::storage_usage();
         let byte_cost = env::storage_byte_cost().as_yoctonear();

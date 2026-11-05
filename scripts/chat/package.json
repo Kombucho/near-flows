@@ -1,0 +1,25 @@
+{
+  "name": "bazaar-chat",
+  "version": "0.1.0",
+  "description": "Chat for the bazaar: a public room, a room per lot, and a private room per lot for its seller, bidders and buyers. Wallet sign-in (NEP-413).",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --import tsx --test src/*.test.ts",
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@noble/hashes": "^1.8.0",
+    "borsh": "^2.0.0",
+    "near-api-js": "^7.4.0",
+    "ws": "^8.22.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}

@@ -9,11 +9,13 @@ use near_contract_standards::non_fungible_token::core::ext_nft_core;
 use near_sdk::json_types::U128;
 use near_sdk::{assert_one_yocto, env, near, require, AccountId, Gas, NearToken, Promise, PromiseError};
 
-use crate::{Bazaar, BazaarExt, Item};
+use crate::{Bazaar, BazaarExt, Item, Sale};
 
 const GAS_FT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_NFT_TRANSFER: Gas = Gas::from_tgas(20);
 const GAS_CALLBACK: Gas = Gas::from_tgas(5);
+/// The sale callback may itself pay the seller (a transfer + its callback).
+const GAS_SALE_CALLBACK: Gas = Gas::from_tgas(25);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 
 fn owed_key(asset: &Option<AccountId>, who: &AccountId) -> String {
@@ -41,6 +43,30 @@ impl Bazaar {
             self.owed_nft.insert(format!("{nft_contract}|{token_id}"), to.clone());
             self.emit("nft_payout_failed", &format!(r#"{{"contract":"{nft_contract}","token_id":"{token_id}","to":"{to}"}}"#));
         }
+    }
+
+    /// After a sold item was sent to its buyer. Delivered: the seller is paid
+    /// now. Not delivered (e.g. the item's contract refuses the transfer):
+    /// the buyer gets their money back, and the item is kept as owed to the
+    /// seller. A seller can never be paid for an item the buyer didn't get.
+    /// Never panics.
+    #[private]
+    pub fn on_sale_delivered(&mut self, lot_id: u64, buyer: AccountId, units: U128, price: U128, #[callback_result] result: Result<(), PromiseError>) {
+        let Some(lot) = self.lots.get(&lot_id).cloned() else { return };
+        if result.is_ok() {
+            self.pay(&lot.pay, &lot.seller, price.0);
+            return;
+        }
+        self.pay(&lot.pay, &buyer, price.0);
+        match &lot.item {
+            Item::Ft { token, .. } => self.add_owed(&Some(token.clone()), &lot.seller, units.0),
+            Item::Nft { contract, token_id } => {
+                self.owed_nft.insert(format!("{contract}|{token_id}"), lot.seller.clone());
+            }
+            Item::Idea { .. } => {}
+        }
+        let _ = matches!(lot.sale, Sale::Listing { .. });
+        self.emit("delivery_failed", &format!(r#"{{"lot":{lot_id},"buyer":"{buyer}","refund":"{}"}}"#, price.0));
     }
 
     /// Retry a token payout that failed earlier (register on the token first).
@@ -95,6 +121,23 @@ impl Bazaar {
         }
     }
 
+    /// Send a SOLD item to its buyer; the seller's `price` waits for the
+    /// callback (on_sale_delivered) to confirm the item arrived.
+    pub(crate) fn sell_item(&self, lot_id: u64, item: &Item, buyer: &AccountId, price: u128) {
+        let units = crate::units_of(item);
+        let then = Self::ext(env::current_account_id()).with_static_gas(GAS_SALE_CALLBACK)
+            .on_sale_delivered(lot_id, buyer.clone(), U128(units), U128(price));
+        match item {
+            Item::Ft { token, amount } => ext_ft_core::ext(token.clone())
+                .with_attached_deposit(ONE_YOCTO).with_static_gas(GAS_FT_TRANSFER)
+                .ft_transfer(buyer.clone(), *amount, None).then(then).detach(),
+            Item::Nft { contract, token_id } => ext_nft_core::ext(contract.clone())
+                .with_attached_deposit(ONE_YOCTO).with_static_gas(GAS_NFT_TRANSFER)
+                .nft_transfer(buyer.clone(), token_id.clone(), None, None).then(then).detach(),
+            Item::Idea { .. } => env::panic_str("ideas settle through the escrow"),
+        }
+    }
+
     /// Hand an item to `to`. An idea has nothing to hand over.
     pub(crate) fn give(&self, item: &Item, to: &AccountId) {
         match item {
@@ -106,7 +149,7 @@ impl Bazaar {
                 .then(Self::ext(env::current_account_id()).with_static_gas(GAS_CALLBACK)
                     .on_nft_payout(contract.clone(), token_id.clone(), to.clone()))
                 .detach(),
-            Item::Idea => {}
+            Item::Idea { .. } => {} // nothing to hand over: ideas settle through the escrow
         }
     }
 }
