@@ -27,8 +27,8 @@ pub struct IntentsPair {
     pub token_in: AccountId,
     pub token_out: AccountId,
     pub max_in: U128,
-    /// least output per input, scaled 1e12
-    pub min_out_per_in_e12: U128,
+    /// least output per input, scaled 1e24 (like flow nodes: wide enough for 24- vs 6-decimal tokens)
+    pub min_out_per_in: U128,
 }
 
 #[near(serializers = [borsh, json])]
@@ -103,7 +103,7 @@ impl Vault {
             .unwrap_or_else(|| env::panic_str("refused: pair not allowed"));
         require!(amount_in.0 > 0 && amount_in.0 <= pair.max_in.0, "refused: amount over the pair's limit");
         require!((60..=MAX_VALID_SECS).contains(&valid_secs), "valid for 1 to 60 minutes");
-        let floor = crate::mul_div(amount_in.0, pair.min_out_per_in_e12.0, 1_000_000_000_000);
+        let floor = crate::mul_div(amount_in.0, pair.min_out_per_in.0, crate::PRICE_SCALE);
         let out_min = min_out.0.max(floor).max(1);
         self.charge(&format!("intents:{token_in}"), amount_in.0);
         let pending = Pending { token_in, amount_in, token_out, min_out: U128(out_min), deadline_ns: env::block_timestamp() + valid_secs * 1_000_000_000 };

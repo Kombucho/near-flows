@@ -92,7 +92,7 @@ async fn a_keyless_vault_swaps_on_real_intents_with_intents_it_signed_itself() -
         .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?.into_result()?;
 
     // 3. The owner allows A -> B with a floor of 0.95 B per A; at most 200 A per intent.
-    alice.call(vault.id(), "intents_allow").args_json(json!({"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": (200 * ONE).to_string(), "min_out_per_in_e12": "950000000000"}}))
+    alice.call(vault.id(), "intents_allow").args_json(json!({"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": (200 * ONE).to_string(), "min_out_per_in": "950000000000000000000000"}}))
         .transact().await?.into_result()?;
     // The keeper asks for 100 A -> "at least 1 wei" of B: the vault signs for at least 95 B (the floor).
     let r = keeper.call(vault.id(), "intents_sign_swap").args_json(json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600}))
