@@ -6,7 +6,11 @@
 //! Tokens can only sit above the price (asks) and quote only below it (bids),
 //! so a range that spans the price is split: tokens above, quote below.
 
-use crate::{Book, Error};
+use math::price::bins_for_multiple;
+use math::wide::mul_div_down;
+use math::{BPS, PRICE_SCALE};
+
+use crate::{Book, Error, Side};
 
 /// Most bins one range may use (bounds storage and gas per call).
 pub const MAX_RANGE_BINS: u32 = 20;
@@ -58,6 +62,89 @@ impl Book {
             ids.push(self.add_liquidity(owner, bin, 0, part, locked_until_ns, now_ns)?);
         }
         Ok(ids)
+    }
+}
+
+/// What an LP buy did: the positions it opened and the part it swapped.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LpBuy {
+    pub ids: Vec<u64>,
+    /// Dust too small to place (see `lp_place`): handed back to the buyer.
+    pub left_token: u128,
+    pub left_quote: u128,
+    pub swapped_in: u128, // quote spent buying coins (fee included)
+    pub coins: u128,      // coins bought, now sitting above the price
+    pub kept_quote: u128, // quote sitting below the price
+}
+
+impl Book {
+    /// LP BUY: one atomic action that turns `quote` into two-way liquidity
+    /// around the current price, from `down` (e.g. 7_000 = 0.7x) to `up`
+    /// (e.g. 14_000 = 1.4x), over at most `n` bins. The part above the price
+    /// is bought now (coins can only sit above it); the rest waits below as
+    /// quote. Every bin gets about the same value, so the coin share is the
+    /// share of the range that lies above the price.
+    /// `min_coins`: slippage guard on the buy.
+    pub fn lp_buy(
+        &mut self, owner: &str, quote: u128, down: u32, up: u32, n: u32, min_coins: u128, now_ns: u64,
+    ) -> Result<LpBuy, Error> {
+        if quote == 0 {
+            return Err(Error::ZeroAmount);
+        }
+        let (below, above) = self.range_bins(down, up, n)?;
+        let buy = quote * above as u128 / (above + below) as u128;
+        let r = self.swap(Side::Buy, buy, min_coins)?;
+        let kept_quote = quote - r.used;
+        let (ids, left_token, left_quote) = self.lp_place(owner, r.out, kept_quote, down, up, n, now_ns)?;
+        Ok(LpBuy { ids, left_token, left_quote, swapped_in: r.used, coins: r.out, kept_quote })
+    }
+
+    /// Place `token` above and `quote` below the current price, inside
+    /// [down, up] (multiples of the price, bps), over at most `n` bins, with no
+    /// swap. Used by `lp_buy`, and to FOLLOW the price: when it leaves a range,
+    /// the same assets are re-placed around the new price.
+    /// A side worth under 0.1% of the total is dust: it is not placed but
+    /// returned as (ids, unplaced token, unplaced quote) for the owner, so dust
+    /// can never make a follow fail halfway.
+    #[allow(clippy::too_many_arguments)]
+    pub fn lp_place(
+        &mut self, owner: &str, token: u128, quote: u128, down: u32, up: u32, n: u32, now_ns: u64,
+    ) -> Result<(Vec<u64>, u128, u128), Error> {
+        let (below, above) = self.range_bins(down, up, n)?;
+        let a = self.active;
+        let token_value = mul_div_down(token, self.price(a), PRICE_SCALE);
+        let total = token_value + quote;
+        let (mut token, mut quote, mut left_t, mut left_q) = (token, quote, 0, 0);
+        if token_value * 1_000 < total {
+            (left_t, token) = (token, 0);
+        }
+        if quote * 1_000 < total {
+            (left_q, quote) = (quote, 0);
+        }
+        let n_above = match (token > 0, quote > 0) {
+            (true, false) => n,
+            (false, true) => 0,
+            (false, false) => return Err(Error::ZeroAmount),
+            (true, true) => ((n as i64 * above as i64 + (above + below) as i64 / 2) / (above + below) as i64).clamp(1, n as i64 - 1) as u32,
+        };
+        let mut ids = Vec::new();
+        if token > 0 {
+            ids.extend(self.lp_range(owner, a + 1, a + above, n_above, token, 0, false, 0, now_ns)?);
+        }
+        if quote > 0 {
+            ids.extend(self.lp_range(owner, a - below, a - 1, n - n_above, 0, quote, false, 0, now_ns)?);
+        }
+        Ok((ids, left_t, left_q))
+    }
+
+    /// Bins below and above the price for a [down, up] range.
+    fn range_bins(&self, down: u32, up: u32, n: u32) -> Result<(i32, i32), Error> {
+        if !(1_000..BPS as u32).contains(&down) || up <= BPS as u32 || up > 100_000 || !(2..=MAX_RANGE_BINS).contains(&n) {
+            return Err(Error::BadRange);
+        }
+        let step = self.cfg.step_bps;
+        let below = bins_for_multiple(step, (BPS as u64 * BPS as u64 / down as u64) as u32).max(1);
+        Ok((below, bins_for_multiple(step, up).max(1)))
     }
 }
 

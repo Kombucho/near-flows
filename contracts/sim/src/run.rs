@@ -27,8 +27,9 @@ pub struct Outcome {
     pub event_pnl: f64, // insider, sniper or sandwich bot profit in NEAR
     /// Buyers who enter with NEAR: end value / NEAR put in, per strategy
     /// [hold, market, market+lock-in, wheel 0.9/0.8, wheel tight, hybrid,
-    ///  hybrid+defend, hybrid lock-in spot+defend].
-    pub buyers: [f64; 8],
+    ///  hybrid+defend, hybrid lock-in spot+defend, LP buy 0.7-1.4x,
+    ///  LP buy 0.7-1.4x + follow, LP buy 0.9-1.15x + follow].
+    pub buyers: [f64; BUYER_KINDS],
     /// Share of wheel buyers whose bids never filled at all (still all NEAR).
     pub wheel_never_filled: f64,
     pub lag_hours: u32, // hours the book was >25% away from fair value
@@ -80,6 +81,7 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, 
         }
         if hour >= BUYERS_ENTER {
             keeper_settle(&mut w, &mut buyers);
+            follow_all(&mut w, &mut buyers);
             // DEFEND: a sustained downtrend (>=10 bins down over 6h) flips hybrids to defence.
             if hist.len() > 6 && w.book.active - hist[hist.len() - 7] <= -10 {
                 // SIM_DEFEND=underwater: only defend buyers who are also below their entry.
@@ -112,11 +114,21 @@ pub fn run(r: &Regime, seed: u64, fee_bps: u16, bins_per_side: i32, dyn_k: u16, 
 }
 
 const BUYERS_ENTER: u32 = 25; // after the 24h launch window
-const BUYER_KINDS: usize = 8;
+pub const BUYER_KINDS: usize = 11;
+
+/// LP BUY kinds 8..=10: (floor, ceiling as price multiples in bps, bins, follow the price).
+const LP_KINDS: [(u32, u32, u32, bool); 3] = [(7_000, 14_000, 20, false), (7_000, 14_000, 20, true), (9_000, 11_500, 10, true)];
+
+fn lp_kind(kind: usize) -> Option<(u32, u32, u32, bool)> {
+    kind.checked_sub(8).and_then(|i| LP_KINDS.get(i).copied())
+}
 
 pub(crate) struct Buyer {
     name: String, kind: usize, deposit: u128, wallet_q: u128, wallet_t: u128, ever_filled: bool,
     entry_hour: u32, defended: bool, entry_bin: i32,
+    /// LP fees received (valued in NEAR when received), for the LP buy kinds.
+    fees: f64,
+    follows: u32,
 }
 
 // ---- pieces reused by the real-coin backtest (backtest.rs) ----
@@ -163,8 +175,8 @@ pub(crate) fn defend_all(w: &mut World, buyers: &mut [Buyer], hour: u32) {
     }
 }
 
-pub(crate) fn score_buyers_pub(w: &World, buyers: &[Buyer], p: f64) -> ([f64; 8], f64) {
-    score_buyers(w, buyers, p)
+pub(crate) fn score_buyers_pub(w: &World, buyers: &[Buyer], p: f64) -> (([f64; BUYER_KINDS], f64), [f64; BUYER_KINDS]) {
+    score_buyers_fees(w, buyers, p)
 }
 
 /// Does this kind use the hybrid "defend" switch?
@@ -177,7 +189,8 @@ fn make_buyers(w: &mut World, rng: &mut Rng, first: usize, count: usize) -> Vec<
         let deposit = near(0.5 + 1.5 * rng.f());
         let hour = (w.now / HOUR) as u32;
         let mut b = Buyer { name: format!("b{i}"), kind: i % BUYER_KINDS, deposit, wallet_q: deposit, wallet_t: 0,
-                            ever_filled: false, entry_hour: hour, defended: false, entry_bin: w.book.active };
+                            ever_filled: false, entry_hour: hour, defended: false, entry_bin: w.book.active,
+                            fees: 0.0, follows: 0 };
         match b.kind {
             0 => {} // hold NEAR
             1 | 2 => {
@@ -198,6 +211,22 @@ fn make_buyers(w: &mut World, rng: &mut Rng, first: usize, count: usize) -> Vec<
                 if w.book.place_wheel(&b.name, deposit, dips, preset, w.now).is_ok() {
                     b.wallet_q -= deposit;
                     w.contract_q += deposit;
+                }
+            }
+            8.. => {
+                // LP BUY: one atomic action, coins above the price and NEAR below it.
+                let (down, up, n, _) = lp_kind(b.kind).expect("lp kind");
+                match w.book.lp_buy(&b.name, deposit, down, up, n, 0, w.now) {
+                    Ok(r) => {
+                        b.wallet_q -= deposit - r.left_quote;
+                        b.wallet_t += r.left_token;
+                        w.contract_q += deposit - r.left_quote;
+                        w.contract_t -= r.left_token;
+                        w.volume_q += r.swapped_in;
+                        b.ever_filled = true;
+                    }
+                    Err(engine::Error::NoLiquidity) => {} // price ran past every bin: nothing to buy
+                    Err(e) => w.fault(format!("lp_buy: {e:?}")),
                 }
             }
             _ => {
@@ -235,11 +264,50 @@ fn keeper_settle(w: &mut World, buyers: &mut [Buyer]) {
         if w.book.positions[&id].bid {
             b.ever_filled = true;
         }
+        let two_way = !w.book.positions[&id].bid && !w.book.positions[&id].take_profit;
         if let Ok(s) = w.book.settle(id, w.now) {
+            if two_way {
+                b.fees += to_f(s.quote) + to_f(s.token) * w.price();
+            }
             b.wallet_q += s.quote;
             b.wallet_t += s.token;
             w.contract_q -= s.quote;
             w.contract_t -= s.token;
+        }
+    }
+}
+
+/// FOLLOW: when the price has left an LP buyer's range, pull the liquidity
+/// (fees included) and re-place the same coins and NEAR around the new price,
+/// same shape, no swap. Funds never leave the buyer. On chain this would be a
+/// keeper call, anchored to the crank's slow reference price.
+pub(crate) fn follow_all(w: &mut World, buyers: &mut [Buyer]) {
+    for b in buyers.iter_mut() {
+        let Some((down, up, n, true)) = lp_kind(b.kind) else { continue };
+        let mine: Vec<(u64, i32)> = w.book.positions.iter().filter(|(_, p)| p.owner == b.name).map(|(i, p)| (*i, p.bin)).collect();
+        let (Some(lo), Some(hi)) = (mine.iter().map(|x| x.1).min(), mine.iter().map(|x| x.1).max()) else { continue };
+        let a = w.book.active;
+        if a >= lo && a <= hi {
+            continue;
+        }
+        for (id, _) in mine {
+            if let Ok(wd) = w.book.withdraw(id, &b.name, w.now) {
+                b.fees += to_f(wd.fee_quote) + to_f(wd.fee_token) * w.price();
+                let (t, q) = (wd.token + wd.fee_token, wd.quote + wd.fee_quote);
+                b.wallet_t += t; b.wallet_q += q;
+                w.contract_t -= t; w.contract_q -= q;
+            }
+        }
+        let (t, q) = (b.wallet_t, b.wallet_q);
+        // Natively a failed call is NOT rolled back (on chain it would be), so any
+        // error here is a fault to investigate, not market life.
+        match w.book.lp_place(&b.name, t, q, down, up, n, w.now) {
+            Ok((_, left_t, left_q)) => {
+                b.wallet_t = left_t; b.wallet_q = left_q;
+                w.contract_t += t - left_t; w.contract_q += q - left_q;
+                b.follows += 1;
+            }
+            Err(e) => w.fault(format!("lp_place: {e:?}")),
         }
     }
 }
@@ -269,19 +337,32 @@ fn defend(w: &mut World, b: &mut Buyer) {
     }
 }
 
-fn score_buyers(w: &World, buyers: &[Buyer], p: f64) -> ([f64; 8], f64) {
-    let mut sum = [0.0; 8];
-    let mut n = [0usize; 8];
+fn score_buyers(w: &World, buyers: &[Buyer], p: f64) -> ([f64; BUYER_KINDS], f64) {
+    score_buyers_fees(w, buyers, p).0
+}
+
+/// Also returns each kind's average LP fees / deposit (received + still claimable).
+fn score_buyers_fees(w: &World, buyers: &[Buyer], p: f64) -> (([f64; BUYER_KINDS], f64), [f64; BUYER_KINDS]) {
+    let mut fees = [0.0; BUYER_KINDS];
+    let mut sum = [0.0; BUYER_KINDS];
+    let mut n = [0usize; BUYER_KINDS];
     let (mut wheels, mut never) = (0, 0);
     for b in buyers {
         let mut v = to_f(b.wallet_q) + to_f(b.wallet_t) * p;
+        let mut fee = b.fees;
         for (id, pos) in w.book.positions.iter() {
             if pos.owner == b.name {
                 if let Ok((t, q)) = w.book.position_assets(*id) {
                     v += to_f(q) + to_f(t) * p;
                 }
+                if !pos.bid && !pos.take_profit {
+                    if let Ok((q, t)) = w.book.claimable(*id) {
+                        fee += to_f(q) + to_f(t) * p;
+                    }
+                }
             }
         }
+        fees[b.kind] += fee / to_f(b.deposit);
         sum[b.kind] += v / to_f(b.deposit);
         n[b.kind] += 1;
         if b.kind == 3 || b.kind == 4 {
@@ -289,8 +370,9 @@ fn score_buyers(w: &World, buyers: &[Buyer], p: f64) -> ([f64; 8], f64) {
             if !b.ever_filled { never += 1; }
         }
     }
-    let avg = [0, 1, 2, 3, 4, 5, 6, 7].map(|k| if n[k] > 0 { sum[k] / n[k] as f64 } else { f64::NAN });
-    (avg, if wheels > 0 { never as f64 / wheels as f64 } else { 0.0 })
+    let avg: [f64; BUYER_KINDS] = std::array::from_fn(|k| if n[k] > 0 { sum[k] / n[k] as f64 } else { f64::NAN });
+    let fee: [f64; BUYER_KINDS] = std::array::from_fn(|k| if n[k] > 0 { fees[k] / n[k] as f64 } else { f64::NAN });
+    ((avg, if wheels > 0 { never as f64 / wheels as f64 } else { 0.0 }), fee)
 }
 
 fn make_holders(r: &Regime, w: &mut World, rng: &mut Rng, insider_share: f64) -> Vec<Holder> {
@@ -451,6 +533,6 @@ fn finish(r: &Regime, w: &World, c: &Ctx, holders: &[Holder], p0: f64, staked0: 
         burned_pct: to_f(w.book.burned) / SUPPLY * 100.0,
         protocol_vs_hold: protocol / hold,
         volume: to_f(w.volume_q), event_pnl, lag_hours: lag, faults: w.faults.clone(),
-        buyers: [f64::NAN; 8], wheel_never_filled: 0.0,
+        buyers: [f64::NAN; BUYER_KINDS], wheel_never_filled: 0.0,
     }
 }

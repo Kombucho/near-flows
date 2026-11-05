@@ -818,3 +818,36 @@ fn owners_see_their_positions_and_withdrawn_ones_leave_the_index() {
     assert!(b.positions_of("alice", 10).is_empty());
     assert_eq!(b.positions_of("bob", 10).len(), 1);
 }
+
+#[test]
+fn an_lp_buy_is_coins_above_and_quote_below_and_earns_both_ways() {
+    let mut b = book();
+    let a = b.active;
+    let r = b.lp_buy("alice", 10 * UNIT, 7_000, 14_000, 10, 0, 0).unwrap();
+    assert!(r.coins > 0 && r.kept_quote > 0, "part bought, part waiting");
+    assert_eq!(r.swapped_in + r.kept_quote, 10 * UNIT, "every unit accounted for");
+    let mine: Vec<_> = r.ids.iter().map(|id| b.positions[id].clone()).collect();
+    assert!(mine.iter().all(|p| !p.take_profit && !p.bid), "two-way liquidity");
+    assert!(mine.iter().any(|p| p.bin > a) && mine.iter().any(|p| p.bin < a), "both sides of the price");
+    assert!(mine.len() <= 10);
+    // Chop through the range: fees accrue to Alice on the way up AND down.
+    for _ in 0..5 {
+        b.swap(Side::Buy, 5 * UNIT, 0).unwrap();
+        b.swap(Side::Sell, 5 * UNIT * PRICE_SCALE / b.price(b.active), 0).unwrap();
+    }
+    let fees: u128 = r.ids.iter().filter_map(|id| b.claimable(*id).ok()).map(|(q, t)| q + t).sum();
+    assert!(fees > 0, "earned fees from trades through the range");
+    assert_eq!(b.lp_buy("alice", UNIT, 10_000, 14_000, 10, 0, 0).unwrap_err(), Error::BadRange, "floor must be below 1x");
+    assert_eq!(b.lp_buy("alice", UNIT, 7_000, 14_000, 1, 0, 0).unwrap_err(), Error::BadRange, "needs 2+ bins");
+}
+
+#[test]
+fn following_with_dust_on_one_side_never_fails_halfway() {
+    let mut b = book();
+    let n = b.positions.len();
+    // Coins plus 1 unit of quote dust: the dust is handed back, the coins are placed.
+    let (ids, left_t, left_q) = b.lp_place("alice", 2 * UNIT, 1, 7_000, 14_000, 10, 0).unwrap();
+    assert_eq!((left_t, left_q), (0, 1));
+    assert!(!ids.is_empty() && b.positions.len() == n + ids.len() as u64);
+    assert!(ids.iter().all(|id| b.positions[id].bin > b.active), "coins only, above the price");
+}

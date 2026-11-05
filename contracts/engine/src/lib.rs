@@ -25,7 +25,7 @@ pub use crank::CrankReport;
 pub use error::Error;
 pub use ladder::{Buy, Rung, DEFAULT_LADDER, LAUNCH_LADDER};
 pub use position::{Settlement, Withdrawal};
-pub use range::{spread, MAX_RANGE_BINS};
+pub use range::{spread, LpBuy, MAX_RANGE_BINS};
 pub use store::Map;
 pub use swap::{Side, SwapResult};
 pub use vault::{Staker, Vault, Vote, DEFAULT_VOTE};
