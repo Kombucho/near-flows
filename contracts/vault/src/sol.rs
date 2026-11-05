@@ -148,7 +148,7 @@ impl Vault {
 /// The 64-byte Ed25519 signature inside the signer's answer, whichever JSON
 /// shape it uses: {"scheme":"Ed25519","signature":[..64]} or {"signature":{"bytes":[..]}}
 /// or a hex string.
-fn signature_from(raw: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn signature_from(raw: &[u8]) -> Option<Vec<u8>> {
     use near_sdk::serde_json::Value;
     fn find(v: &Value) -> Option<Vec<u8>> {
         match v {

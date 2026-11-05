@@ -14,6 +14,7 @@ flow = { path = "../flow", features = ["borsh", "serde"] }
 math = { path = "../math" }
 solguard = { path = "../solguard" }
 evmtx = { path = "../evmtx" }
+intentsig = { path = "../intentsig" }
 hex = "0.4"
 
 [dev-dependencies]

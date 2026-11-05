@@ -19,4 +19,5 @@ base64 = "0.22"
 bs58 = "0.5"
 hex = "0.4"
 evmtx = { path = "../evmtx" }
+intentsig = { path = "../intentsig" }
 k256 = { version = "0.13", features = ["ecdsa"] }

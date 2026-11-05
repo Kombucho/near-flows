@@ -1564,6 +1564,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "intentsig"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3278,6 +3287,7 @@ dependencies = [
  "evmtx",
  "futures",
  "hex",
+ "intentsig",
  "k256",
  "near-workspaces",
  "serde_json",
@@ -4261,6 +4271,7 @@ dependencies = [
  "evmtx",
  "flow",
  "hex",
+ "intentsig",
  "math",
  "near-contract-standards",
  "near-sdk",

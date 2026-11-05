@@ -1,0 +1,12 @@
+[package]
+name = "intentsig"
+version = "0.1.0"
+edition = "2021"
+description = "Builds the NEAR Intents messages a vault signs (token_diff, NEP-413, versioned nonces), so the vault only ever signs intents it wrote itself. Pure Rust."
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+ed25519-dalek = "2"

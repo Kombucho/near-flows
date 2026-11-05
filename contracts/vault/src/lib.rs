@@ -21,6 +21,7 @@
 //! (one step at a time per vault, so the difference is that step's).
 
 pub mod evm;
+pub mod intents;
 mod limits;
 pub mod sol;
 mod step;
@@ -155,9 +156,18 @@ pub struct Trust {
 /// trusted or not: tokens leave only through the step's own metered transfer,
 /// or by the owner's withdraw.
 pub const NEVER_CALL: &[&str] = &[
+    // Tokens and NFTs out.
     "ft_transfer", "ft_transfer_call", "nft_transfer", "nft_transfer_call", "mt_transfer", "mt_transfer_call",
     "mt_batch_transfer", "mt_batch_transfer_call", "near_withdraw", "storage_withdraw", "storage_unregister",
     "nft_approve", "ft_approve", "mt_approve",
+    // NEAR Intents: withdrawals to any receiver, and keys that control the vault's Intents account.
+    // (Only the vault's typed actions touch these, with the receiver fixed to the vault.)
+    "ft_withdraw", "mt_withdraw", "nft_withdraw", "native_withdraw", "add_public_key", "remove_public_key",
+    "execute_intents", "set_auth_by_predecessor_id", "invalidate_nonces",
+    // Chain Signatures: a direct `sign` would skip the byte checks of sol.rs / evm.rs / intents.rs.
+    "sign", "sign_v2", "request_app_private_key",
+    // Lending withdrawals that take a recipient.
+    "simple_withdraw",
 ];
 
 #[near(serializers = [borsh, json])]
@@ -186,13 +196,15 @@ pub struct Vault {
     pub sol: Option<sol::SolConfig>,
     /// One EVM chain via Chain Signatures (evm.rs).
     pub evm: Option<evm::EvmConfig>,
+    /// NEAR Intents, signed via Chain Signatures (intents.rs).
+    pub intents: Option<intents::IntentsConfig>,
 }
 
 #[near]
 impl Vault {
     #[init]
     pub fn new(owner: AccountId, keeper: Option<AccountId>) -> Self {
-        Self { owner, keeper, flows: Vec::new(), busy: None, trusted: Vec::new(), limits: Vec::new(), pending: Vec::new(), sol: None, evm: None }
+        Self { owner, keeper, flows: Vec::new(), busy: None, trusted: Vec::new(), limits: Vec::new(), pending: Vec::new(), sol: None, evm: None, intents: None }
     }
 
     // ---------- owner ----------
