@@ -334,3 +334,23 @@ async fn spending_limits_cap_what_flows_can_spend_and_loosening_waits_a_day() ->
     }
     anyhow::bail!("the window never reset")
 }
+
+#[tokio::test]
+async fn a_step_with_too_little_gas_is_refused_up_front_and_never_leaves_the_vault_stuck() -> anyhow::Result<()> {
+    // Found on testnet: a step that ran out of gas halfway left the vault "busy".
+    let w = setup().await?;
+    let f = save(&w, json!([{"input": w.wnear.id(), "action": swap(&w, &w.usdc, None), "when": {"when": "now"}}])).await?;
+    fund(&w, f, 0, 10 * ONE).await?.into_result()?;
+    let r = w.keeper.call(w.vault.id(), "step").args_json(json!({"flow_id": f, "node": 0}))
+        .gas(near_workspaces::types::Gas::from_tgas(100)).transact().await?;
+    assert!(format!("{:?}", r.failures()).contains("attach at least 125 Tgas"), "{:?}", r.failures());
+    let busy: Option<Value> = w.vault.view("get_busy").await?.json()?;
+    assert!(busy.is_none(), "not stuck");
+    // Just enough gas: it runs and finishes.
+    let r = w.keeper.call(w.vault.id(), "step").args_json(json!({"flow_id": f, "node": 0}))
+        .gas(near_workspaces::types::Gas::from_tgas(130)).transact().await?;
+    println!("{:?}", r.logs());
+    let busy: Option<Value> = w.vault.view("get_busy").await?.json()?;
+    assert!(busy.is_none(), "the step finished (or closed itself) either way");
+    Ok(())
+}

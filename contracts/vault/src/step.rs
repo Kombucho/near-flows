@@ -16,6 +16,9 @@ use crate::{Call, Deposit, Vault, VaultExt, NEAR, PRICE_SCALE};
 
 const GAS_VIEW: Gas = Gas::from_tgas(5);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
+/// What a step needs on top of its recipe's calls: our views and callbacks.
+const STEP_OVERHEAD_TGAS: u64 = 60;
+const PER_CALL_OVERHEAD_TGAS: u64 = 15;
 
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
@@ -39,6 +42,10 @@ impl Vault {
         require!(by_owner || Some(env::predecessor_account_id()) == self.keeper, "owner or keeper only");
         require!(self.busy.is_none(), "a step is running");
         let n = self.flow(flow_id).nodes.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).clone();
+        // Refuse up front if the caller attached too little gas: a step that runs out
+        // halfway would leave the vault busy (found on testnet).
+        let need: u64 = n.action.calls.iter().map(|c| match c { Call::Ft { tgas, .. } | Call::Fn { tgas, .. } => *tgas + PER_CALL_OVERHEAD_TGAS }).sum::<u64>() + STEP_OVERHEAD_TGAS;
+        require!(env::prepaid_gas().as_tgas() >= need, format!("attach at least {need} Tgas for this step"));
         // Trust can be withdrawn after a flow was saved: check again before every step.
         if let Some(why) = self.untrusted(&n) {
             env::panic_str(&format!("untrusted: {why}"));
@@ -46,7 +53,7 @@ impl Vault {
         if matches!(n.when, flow::Trigger::PriceBelow { .. } | flow::Trigger::PriceAbove { .. }) {
             let src = n.action.price.clone().unwrap_or_else(|| env::panic_str("price trigger without a price source"));
             return Promise::new(src.contract)
-                .function_call(src.method, src.args.into_bytes(), NearToken::from_yoctonear(0), GAS_VIEW)
+                .function_call_weight(src.method, src.args.into_bytes(), NearToken::from_yoctonear(0), GAS_VIEW, GasWeight(0))
                 .then(self.cb().on_price(flow_id, node, by_owner, src.per));
         }
         self.start(flow_id, node, None, by_owner)
@@ -174,19 +181,30 @@ impl Vault {
         let (input, out) = self.tokens(&ctx);
         let me = env::current_account_id();
         let views: Vec<Promise> =
-            input.into_iter().chain(out).map(|t| ext_ft_core::ext(t).with_static_gas(GAS_VIEW).ft_balance_of(me.clone())).collect();
+            // Weight 0: the views get exactly GAS_VIEW, and all the rest goes to the callback,
+            // which must still launch the recipe's calls (testnet: it ran dry when they shared it).
+            input.into_iter().chain(out).map(|t| ext_ft_core::ext(t).with_static_gas(GAS_VIEW).with_unused_gas_weight(0).ft_balance_of(me.clone())).collect();
         let mut it = views.into_iter();
         let joint = match it.next() {
             Some(first) => it.fold(first, |acc, p| acc.and(p)),
             // Nothing to measure (NEAR in, nothing out): a no-op view keeps the chain uniform.
-            None => Promise::new(me.clone()).function_call("get_owner".to_string(), b"{}".to_vec(), NearToken::from_yoctonear(0), GAS_VIEW),
+            None => Promise::new(me.clone()).function_call_weight("get_owner".to_string(), b"{}".to_vec(), NearToken::from_yoctonear(0), GAS_VIEW, GasWeight(0)),
         };
         joint.then(self.cb().on_measured(before))
     }
 
     fn run_call(&mut self, i: u8) -> Promise {
-        let ctx = self.busy.clone().unwrap();
+        let mut ctx = self.busy.clone().unwrap();
         let node = self.flow(ctx.flow).nodes[ctx.node as usize].clone();
+        // Not enough gas left to launch this call and come back: close the step as
+        // failed (measuring what moved) rather than leave the vault stuck.
+        let tgas = match &node.action.calls[i as usize] { Call::Ft { tgas, .. } | Call::Fn { tgas, .. } => *tgas };
+        let left = env::prepaid_gas().as_tgas().saturating_sub(env::used_gas().as_tgas());
+        if left < tgas + 2 * PER_CALL_OVERHEAD_TGAS + 20 {
+            ctx.failed = true;
+            self.busy = Some(ctx);
+            return self.measure(false);
+        }
         let amount = ctx.amount.0;
         let min_out = node.action.min_out_per_in.map_or(0, |m| crate::mul_div(amount, m.0, PRICE_SCALE));
         let scaled = node.action.scale_per_in.map_or(0, |m| crate::mul_div(amount, m.0, PRICE_SCALE));
@@ -256,6 +274,6 @@ impl Vault {
             ),
         );
         // Promise chains need a promise; a self-view is the cheapest no-op.
-        Promise::new(env::current_account_id()).function_call("get_owner".to_string(), b"{}".to_vec(), NearToken::from_yoctonear(0), GAS_VIEW)
+        Promise::new(env::current_account_id()).function_call_weight("get_owner".to_string(), b"{}".to_vec(), NearToken::from_yoctonear(0), GAS_VIEW, GasWeight(0))
     }
 }
