@@ -14,9 +14,10 @@ set -euo pipefail
 : "${SUFFIX:?set SUFFIX}"
 FACTORY="nf-factory-$SUFFIX.testnet"
 BAZAAR="nf-bazaar-$SUFFIX.testnet"
-OWNER="nf-owner-$SUFFIX.testnet"
+OWNER="${OWNER_ID:-nf-owner-$SUFFIX.testnet}"   # the demo vault's owner (one vault per owner)
 KEEPER="nf-keeper-$SUFFIX.testnet"
-VAULT="pedro.$FACTORY"
+VAULT_NAME="${VAULT_NAME:-pedro}"
+VAULT="$VAULT_NAME.$FACTORY"
 WRAP="wrap.testnet"
 RHEA="ref-finance-101.testnet"
 LINEAR="linear-protocol.testnet"
@@ -51,16 +52,16 @@ if want factory; then
 fi
 
 if want bazaar; then
-  echo "== bazaar (treasury: $OWNER, idea review: 15 minutes for the demo; 72h by default)"
+  echo "== bazaar (treasury: nf-owner-$SUFFIX.testnet, idea review: 15 minutes for the demo; 72h by default)"
   near contract deploy "$BAZAAR" use-file "$WASM/bazaar/bazaar.wasm" with-init-call new \
-    json-args "{\"treasury\":\"$OWNER\",\"review_ns\":900000000000}" \
+    json-args "{\"treasury\":\"nf-owner-$SUFFIX.testnet\",\"review_ns\":900000000000}" \
     prepaid-gas '100.0 Tgas' attached-deposit '0 NEAR' network-config testnet sign-with-legacy-keychain send >/dev/null
   echo "  ok: bazaar deployed"
 fi
 
 if want vault; then
   echo "== demo vault $VAULT (owner $OWNER, keeper $KEEPER)"
-  call "$OWNER" "$FACTORY" create_vault "{\"name\":\"pedro\",\"keeper\":\"$KEEPER\"}" '1 NEAR' '100.0 Tgas'
+  call "$OWNER" "$FACTORY" create_vault "{\"name\":\"$VAULT_NAME\",\"keeper\":\"$KEEPER\"}" '1 NEAR' '100.0 Tgas'
   for t in "$WRAP" "$USDT" "$MEME"; do
     call "$OWNER" "$t" storage_deposit "{\"account_id\":\"$VAULT\",\"registration_only\":true}" '0.0125 NEAR'
   done
