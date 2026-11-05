@@ -1,0 +1,13 @@
+[package]
+name = "mock_signer"
+version = "0.1.0"
+edition = "2021"
+description = "Test-only stand-in for the NEAR MPC signer: derived_public_key and sign (Ed25519), with a fixed key per caller."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = "5.30.0"
+ed25519-dalek = { version = "2", default-features = false }
+hex = "0.4"

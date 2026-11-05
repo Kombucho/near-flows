@@ -1,0 +1,16 @@
+[package]
+name = "solguard"
+version = "0.1.0"
+edition = "2021"
+description = "Checks a Solana transaction message byte by byte before a NEAR vault asks Chain Signatures to sign it. Pure Rust."
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+bs58 = { version = "0.5", default-features = false, features = ["alloc"] }
+
+[features]
+# Message builders for tests (the sandbox tests use them too).
+testkit = []
+
+[dev-dependencies]
+base64 = "0.22"

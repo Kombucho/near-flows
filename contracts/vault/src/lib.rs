@@ -21,6 +21,7 @@
 //! (one step at a time per vault, so the difference is that step's).
 
 mod limits;
+pub mod sol;
 mod step;
 #[cfg(test)]
 mod tests;
@@ -180,13 +181,15 @@ pub struct Vault {
     /// Per-token spending limits on what steps may spend, and loosenings waiting out their delay.
     pub limits: Vec<Limit>,
     pub pending: Vec<PendingLimit>,
+    /// Solana via Chain Signatures (sol.rs).
+    pub sol: Option<sol::SolConfig>,
 }
 
 #[near]
 impl Vault {
     #[init]
     pub fn new(owner: AccountId, keeper: Option<AccountId>) -> Self {
-        Self { owner, keeper, flows: Vec::new(), busy: None, trusted: Vec::new(), limits: Vec::new(), pending: Vec::new() }
+        Self { owner, keeper, flows: Vec::new(), busy: None, trusted: Vec::new(), limits: Vec::new(), pending: Vec::new(), sol: None }
     }
 
     // ---------- owner ----------

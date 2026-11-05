@@ -808,6 +808,7 @@ version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
+ "pkcs8",
  "signature",
 ]
 
@@ -820,8 +821,10 @@ dependencies = [
  "curve25519-dalek",
  "ed25519",
  "rand_core 0.6.4",
+ "serde",
  "sha2 0.10.9",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -1904,6 +1907,15 @@ name = "mock_nft"
 version = "0.1.0"
 dependencies = [
  "near-contract-standards",
+ "near-sdk",
+]
+
+[[package]]
+name = "mock_signer"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
  "near-sdk",
 ]
 
@@ -3237,9 +3249,14 @@ name = "sandbox"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "bs58 0.5.1",
+ "ed25519-dalek",
  "futures",
+ "hex",
  "near-workspaces",
  "serde_json",
+ "solguard",
  "tokio",
 ]
 
@@ -3622,6 +3639,15 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "solguard"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bs58 0.5.1",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -4199,9 +4225,11 @@ name = "vault"
 version = "0.1.0"
 dependencies = [
  "flow",
+ "hex",
  "math",
  "near-contract-standards",
  "near-sdk",
+ "solguard",
 ]
 
 [[package]]
