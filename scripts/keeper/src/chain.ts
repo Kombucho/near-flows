@@ -86,6 +86,11 @@ export class Chain {
     return this.signer().callFunction({ contractId, methodName, args, gas });
   }
 
+  /** A call whose full outcome (all receipts and logs) we need, waiting for finality. */
+  callRaw(contractId: string, methodName: string, args: Record<string, unknown>, gas: bigint) {
+    return this.signer().callFunctionRaw({ contractId, methodName, args, gas, waitUntil: "FINAL" });
+  }
+
   crank() {
     return this.signer().callFunction({ contractId: this.market, methodName: "crank", args: {}, gas: 100n * TGAS });
   }

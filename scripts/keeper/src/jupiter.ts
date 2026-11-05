@@ -15,6 +15,7 @@
 // Environment: KEEPER_ACCOUNT_ID, NEAR_RPC, KEEPER_PRIVATE_KEY (or near-cli key file),
 // SOLANA_RPC (default mainnet-beta), JUPITER_API (default https://lite-api.jup.ag/swap/v1).
 
+import { createPublicKey, verify } from "node:crypto";
 import { parseArgs } from "node:util";
 import { Chain, loadKey } from "./chain.ts";
 import { messageOf, withSignature } from "./solana.ts";
@@ -50,13 +51,19 @@ const swap = await (await fetch(`${jup}/swap`, {
 if (!swap.swapTransaction) throw new Error(`no transaction: ${JSON.stringify(swap).slice(0, 200)}`);
 const message = messageOf(Buffer.from(swap.swapTransaction, "base64"));
 
-const r: any = await chain.call(o.vault, "sol_sign_swap", { message: b64(message) }, 300n * 10n ** 12n);
+const r: any = await chain.callRaw(o.vault, "sol_sign_swap", { message: b64(message) }, 300n * 10n ** 12n);
 const logs: string[] = (r?.receipts_outcome ?? []).flatMap((x: any) => x.outcome.logs);
 const signed = logs.find((l) => l.includes('"sol_signed"'));
 if (!signed) throw new Error(`not signed: ${logs.join(" | ").slice(0, 400)}`);
 const sigHex = /"signature":"([0-9a-f]{128})"/.exec(signed)![1];
-const tx = withSignature(message, Buffer.from(sigHex, "hex"));
-console.log(`signed by the vault (${sigHex.slice(0, 16)}...)`);
+const sig = Buffer.from(sigHex, "hex");
+// Never pass on a signature we can't verify: Ed25519 over the exact message, by the vault's Solana key.
+const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const pub = Buffer.from([...sol.address].reduce((n, c) => n * 58n + BigInt(B58.indexOf(c)), 0n).toString(16).padStart(64, "0"), "hex");
+const spki = createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), pub]), format: "der", type: "spki" });
+if (!verify(null, message, spki, sig)) throw new Error("the signature does not verify: not broadcasting");
+const tx = withSignature(message, sig);
+console.log(`signed by the vault (${sigHex.slice(0, 16)}...), Ed25519 signature verified against ${sol.address}`);
 
 const method = o.broadcast ? "sendTransaction" : "simulateTransaction";
 const params = o.broadcast ? [b64(tx), { encoding: "base64" }] : [b64(tx), { encoding: "base64", sigVerify: true, replaceRecentBlockhash: false }];
