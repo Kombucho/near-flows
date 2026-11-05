@@ -1760,6 +1760,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "k256"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6e3919bbaa2945715f0bb6d3934a173d1e9a59ac23767fbaaef277265a7411b"
+dependencies = [
+ "cfg-if 1.0.5",
+ "ecdsa",
+ "elliptic-curve",
+ "once_cell",
+ "sha2 0.10.9",
+ "signature",
+]
+
+[[package]]
 name = "keccak"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1924,6 +1938,7 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
+ "k256",
  "near-sdk",
 ]
 
@@ -3260,8 +3275,10 @@ dependencies = [
  "base64 0.22.1",
  "bs58 0.5.1",
  "ed25519-dalek",
+ "evmtx",
  "futures",
  "hex",
+ "k256",
  "near-workspaces",
  "serde_json",
  "solguard",
@@ -4241,6 +4258,7 @@ checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
 name = "vault"
 version = "0.1.0"
 dependencies = [
+ "evmtx",
  "flow",
  "hex",
  "math",

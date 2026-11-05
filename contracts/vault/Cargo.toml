@@ -13,6 +13,7 @@ near-contract-standards = "5.30.0"
 flow = { path = "../flow", features = ["borsh", "serde"] }
 math = { path = "../math" }
 solguard = { path = "../solguard" }
+evmtx = { path = "../evmtx" }
 hex = "0.4"
 
 [dev-dependencies]

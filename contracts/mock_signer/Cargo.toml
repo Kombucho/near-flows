@@ -11,3 +11,4 @@ crate-type = ["cdylib", "rlib"]
 near-sdk = "5.30.0"
 ed25519-dalek = { version = "2", default-features = false }
 hex = "0.4"
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }

@@ -20,6 +20,7 @@
 //! A step's output is measured as the vault's balance after minus before
 //! (one step at a time per vault, so the difference is that step's).
 
+pub mod evm;
 mod limits;
 pub mod sol;
 mod step;
@@ -183,13 +184,15 @@ pub struct Vault {
     pub pending: Vec<PendingLimit>,
     /// Solana via Chain Signatures (sol.rs).
     pub sol: Option<sol::SolConfig>,
+    /// One EVM chain via Chain Signatures (evm.rs).
+    pub evm: Option<evm::EvmConfig>,
 }
 
 #[near]
 impl Vault {
     #[init]
     pub fn new(owner: AccountId, keeper: Option<AccountId>) -> Self {
-        Self { owner, keeper, flows: Vec::new(), busy: None, trusted: Vec::new(), limits: Vec::new(), pending: Vec::new(), sol: None }
+        Self { owner, keeper, flows: Vec::new(), busy: None, trusted: Vec::new(), limits: Vec::new(), pending: Vec::new(), sol: None, evm: None }
     }
 
     // ---------- owner ----------
