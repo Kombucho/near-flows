@@ -8,6 +8,7 @@ build:
 	cd contracts/bazaar && cargo near build non-reproducible-wasm --no-abi
 	cd contracts/mock_nft && cargo near build non-reproducible-wasm --no-abi
 	cd contracts/vault && cargo near build non-reproducible-wasm --no-abi
+	cd contracts/factory && cargo near build non-reproducible-wasm --no-abi
 	cd contracts/mock_dex && cargo near build non-reproducible-wasm --no-abi
 
 # Unit tests: math, engine, contract. Two runs: built together, the contract's
