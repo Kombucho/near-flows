@@ -101,7 +101,7 @@ fn wrap_near(w: &World) -> Value {
 
 /// A Rhea v1 instant swap, exactly the msg the Rhea SDK builds.
 fn rhea_swap(w: &World, from: &Contract, to: &Contract, min_out_per_in: Option<u128>) -> Value {
-    let msg = format!(r#"{{"force":0,"actions":[{{"pool_id":{},"token_in":"{}","token_out":"{}","amount_in":"{{amount}}","min_amount_out":"{{min_out}}"}}]}}"#,
+    let msg = format!(r#"{{"force":0,"actions":[{{"pool_id":{},"token_in":"{}","token_out":"{}","amount_in":"{{amount}}","min_amount_out":"{{min_out}}"}}],"skip_unwrap_near":true}}"#,
         w.pool, from.id(), to.id());
     json!({"label": "Swap on Rhea", "calls": [{"call": "ft", "receiver": w.rhea.id(), "msg": msg, "tgas": 120}],
            "out": to.id(), "min_out_per_in": min_out_per_in.map(|m| m.to_string()),
