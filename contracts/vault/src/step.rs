@@ -40,8 +40,8 @@ impl Vault {
         require!(self.busy.is_none(), "a step is running");
         let n = self.flow(flow_id).nodes.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).clone();
         // Trust can be withdrawn after a flow was saved: check again before every step.
-        if let Some(c) = self.untrusted(&n) {
-            env::panic_str(&format!("untrusted contract: {c}"));
+        if let Some(why) = self.untrusted(&n) {
+            env::panic_str(&format!("untrusted: {why}"));
         }
         if matches!(n.when, flow::Trigger::PriceBelow { .. } | flow::Trigger::PriceAbove { .. }) {
             let src = n.action.price.clone().unwrap_or_else(|| env::panic_str("price trigger without a price source"));
@@ -141,6 +141,8 @@ impl Vault {
         let now = env::block_timestamp();
         let f = self.flow_mut(flow_id);
         let amount = f.ledger.begin(&f.nodes, node, now, price, by_owner).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
+        let input = f.nodes[node as usize].input.clone();
+        self.charge(&input, amount);
         self.busy = Some(StepCtx {
             flow: flow_id,
             node,
@@ -223,15 +225,17 @@ impl Vault {
     /// `extra` is the input used (success) or stray output (failure), for the event.
     fn end(&mut self, result: Result<u128, u128>, extra: u128, ok: bool) -> Promise {
         let ctx = self.busy.take().unwrap();
-        let min = {
+        let (min, promises_output) = {
             let n = &self.flow(ctx.flow).nodes[ctx.node as usize];
-            n.action.min_out_per_in.map_or(0, |m| crate::mul_div(extra, m.0, PRICE_SCALE))
+            (n.action.min_out_per_in.map_or(0, |m| crate::mul_div(extra, m.0, PRICE_SCALE)), n.action.out.is_some())
         };
         let f = self.flow_mut(ctx.flow);
         f.ledger.finish(&f.nodes, ctx.node, result).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
         let mut paused = false;
         if let Ok(out) = result {
-            if out < min {
+            // Less than its minimum, or nothing at all when it promised an output
+            // (e.g. a message that sends the proceeds elsewhere): stop and wait for the owner.
+            if out < min || (promises_output && out == 0) {
                 f.ledger.pause(ctx.node).ok();
                 paused = true;
             }

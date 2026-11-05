@@ -20,6 +20,7 @@
 //! A step's output is measured as the vault's balance after minus before
 //! (one step at a time per vault, so the difference is that step's).
 
+mod limits;
 mod step;
 #[cfg(test)]
 mod tests;
@@ -30,6 +31,7 @@ use near_contract_standards::fungible_token::receiver::FungibleTokenReceiver;
 use near_sdk::json_types::U128;
 use near_sdk::{env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise, PromiseOrValue};
 
+pub use limits::{Limit, PendingLimit};
 pub use step::StepCtx;
 
 pub const MAX_FLOWS: usize = 16;
@@ -135,6 +137,25 @@ impl Action for Recipe {
     }
 }
 
+/// A trusted contract: recipes may send it tokens (ft_transfer_call), use it as
+/// a token, and call exactly these methods on it.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Trust {
+    pub contract: AccountId,
+    #[serde(default)]
+    pub methods: Vec<String>,
+}
+
+/// Methods that move tokens or NEAR out. Never callable directly by a recipe,
+/// trusted or not: tokens leave only through the step's own metered transfer,
+/// or by the owner's withdraw.
+pub const NEVER_CALL: &[&str] = &[
+    "ft_transfer", "ft_transfer_call", "nft_transfer", "nft_transfer_call", "mt_transfer", "mt_transfer_call",
+    "mt_batch_transfer", "mt_batch_transfer_call", "near_withdraw", "storage_withdraw", "storage_unregister",
+    "nft_approve", "ft_approve", "mt_approve",
+];
+
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug)]
 pub struct FlowRec {
@@ -151,15 +172,19 @@ pub struct Vault {
     pub flows: Vec<Option<FlowRec>>,
     /// The step in flight, if any (one per vault).
     pub busy: Option<StepCtx>,
-    /// Contracts recipes may call (and send tokens to). The vault itself never.
-    pub trusted: Vec<AccountId>,
+    /// Contracts recipes may touch, and the methods they may call on each.
+    /// The vault itself never.
+    pub trusted: Vec<Trust>,
+    /// Per-token spending limits on what steps may spend, and loosenings waiting out their delay.
+    pub limits: Vec<Limit>,
+    pub pending: Vec<PendingLimit>,
 }
 
 #[near]
 impl Vault {
     #[init]
     pub fn new(owner: AccountId, keeper: Option<AccountId>) -> Self {
-        Self { owner, keeper, flows: Vec::new(), busy: None, trusted: Vec::new() }
+        Self { owner, keeper, flows: Vec::new(), busy: None, trusted: Vec::new(), limits: Vec::new(), pending: Vec::new() }
     }
 
     // ---------- owner ----------
@@ -169,15 +194,20 @@ impl Vault {
         self.keeper = keeper;
     }
 
-    /// Trust (or stop trusting) contracts that recipes may call.
-    pub fn trust(&mut self, add: Vec<AccountId>, remove: Vec<AccountId>) {
+    /// Trust contracts (and the methods recipes may call on them), or stop
+    /// trusting them. Trusting a contract again replaces its method list.
+    pub fn trust(&mut self, add: Vec<Trust>, remove: Vec<AccountId>) {
         self.assert_owner();
-        self.trusted.retain(|a| !remove.contains(a));
-        for a in add {
-            require!(a != env::current_account_id(), "a vault never trusts itself");
-            if !self.trusted.contains(&a) {
-                self.trusted.push(a);
+        self.trusted.retain(|t| !remove.contains(&t.contract));
+        for t in add {
+            require!(t.contract != env::current_account_id(), "a vault never trusts itself");
+            for m in &t.methods {
+                require!(!NEVER_CALL.contains(&m.as_str()), format!("{m} moves funds: recipes can never call it"));
+                require!(!m.is_empty() && m.len() <= 64, "bad method");
             }
+            require!(t.methods.len() <= 16, "too many methods");
+            self.trusted.retain(|x| x.contract != t.contract);
+            self.trusted.push(t);
         }
         require!(self.trusted.len() <= 64, "too many trusted contracts");
     }
@@ -190,8 +220,8 @@ impl Vault {
             env::panic_str(&format!("bad flow: {e:?}"));
         }
         for n in &nodes {
-            if let Some(c) = self.untrusted(n) {
-                env::panic_str(&format!("untrusted contract: {c}"));
+            if let Some(why) = self.untrusted(n) {
+                env::panic_str(&format!("untrusted: {why}"));
             }
         }
         let rec = FlowRec { name, ledger: Ledger::new(nodes.len()), nodes };
@@ -318,7 +348,7 @@ impl Vault {
         self.flows.get(flow_id as usize).cloned().flatten()
     }
 
-    pub fn get_trusted(&self) -> Vec<AccountId> {
+    pub fn get_trusted(&self) -> Vec<Trust> {
         self.trusted.clone()
     }
 
@@ -360,7 +390,7 @@ pub(crate) fn mul_div(a: u128, b: u128, d: u128) -> u128 {
 }
 
 impl Vault {
-    fn assert_owner(&self) {
+    pub(crate) fn assert_owner(&self) {
         require!(env::predecessor_account_id() == self.owner, "owner only");
     }
 
@@ -376,23 +406,38 @@ impl Vault {
         self.flows.get_mut(id as usize).and_then(Option::as_mut).unwrap_or_else(|| env::panic_str("no such flow"))
     }
 
-    /// The first contract node `n` touches that isn't trusted (its input token,
-    /// every called contract, every receiver, its output token and price source).
-    pub(crate) fn untrusted(&self, n: &Node<Recipe>) -> Option<AccountId> {
+    /// Why node `n` isn't allowed to run, if it isn't: a contract it touches
+    /// (input/output token, receiver, called contract, price source) isn't
+    /// trusted, or it calls a method that isn't trusted on that contract.
+    pub(crate) fn untrusted(&self, n: &Node<Recipe>) -> Option<String> {
         let me = env::current_account_id();
-        let mut touched: Vec<AccountId> = Vec::new();
+        let trust = |a: &AccountId| self.trusted.iter().find(|t| t.contract == *a && *a != me);
+        let contract_ok = |a: &AccountId| trust(a).map_or(Some(format!("contract {a}")), |_| None);
+        let method_ok = |a: &AccountId, m: &str| match trust(a) {
+            None => Some(format!("contract {a}")),
+            Some(_) if NEVER_CALL.contains(&m) => Some(format!("{a}.{m} moves funds")),
+            Some(t) if !t.methods.iter().any(|x| x == m) => Some(format!("method {a}.{m}")),
+            Some(_) => None,
+        };
         if n.input != NEAR {
-            touched.push(n.input.parse().unwrap_or_else(|_| env::panic_str("bad input token")));
+            let t: AccountId = n.input.parse().unwrap_or_else(|_| env::panic_str("bad input token"));
+            if let Some(w) = contract_ok(&t) {
+                return Some(w);
+            }
         }
         for c in &n.action.calls {
-            touched.push(match c {
-                Call::Ft { receiver, .. } => receiver.clone(),
-                Call::Fn { contract, .. } => contract.clone(),
-            });
+            let why = match c {
+                Call::Ft { receiver, .. } => contract_ok(receiver),
+                Call::Fn { contract, method, .. } => method_ok(contract, method),
+            };
+            if why.is_some() {
+                return why;
+            }
         }
-        touched.extend(n.action.out.clone());
-        touched.extend(n.action.price.as_ref().map(|p| p.contract.clone()));
-        touched.into_iter().find(|a| *a == me || !self.trusted.contains(a))
+        if let Some(w) = n.action.out.as_ref().and_then(|o| contract_ok(o)) {
+            return Some(w);
+        }
+        n.action.price.as_ref().and_then(|p| method_ok(&p.contract, &p.method))
     }
 
     fn credit(&mut self, flow_id: u32, node: u16, amount: u128) {

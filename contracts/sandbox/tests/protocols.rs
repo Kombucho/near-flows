@@ -87,7 +87,9 @@ async fn setup() -> anyhow::Result<World> {
     for t in [wrap.id(), usdc.id()] {
         register(&lp, t, vault.id()).await?;
     }
-    alice.call(vault.id(), "trust").args_json(json!({"add": [wrap.id(), usdc.id(), rhea.id(), linear.id()], "remove": []})).transact().await?.into_result()?;
+    alice.call(vault.id(), "trust").args_json(json!({"add": [
+        {"contract": wrap.id(), "methods": ["near_deposit"]}, {"contract": usdc.id()},
+        {"contract": rhea.id(), "methods": ["get_return"]}, {"contract": linear.id(), "methods": ["deposit_and_stake"]}], "remove": []})).transact().await?.into_result()?;
     let w = World { worker, lp, alice, keeper, wrap, usdc, rhea, linear, vault, pool };
     Ok(w)
 }
@@ -248,7 +250,7 @@ async fn lending(w: &World) -> anyhow::Result<Contract> {
     }
     w.lp.call(w.usdc.id(), "ft_transfer_call").args_json(json!({"receiver_id": lend.id(), "amount": (5_000 * ONE).to_string(), "msg": ""}))
         .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?.into_result()?;
-    w.alice.call(w.vault.id(), "trust").args_json(json!({"add": [lend.id()], "remove": []})).transact().await?.into_result()?;
+    w.alice.call(w.vault.id(), "trust").args_json(json!({"add": [{"contract": lend.id(), "methods": ["execute_with_pyth"]}], "remove": []})).transact().await?.into_result()?;
     Ok(lend)
 }
 

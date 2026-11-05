@@ -53,7 +53,7 @@ async fn one_click_one_keyless_vault_per_user() -> anyhow::Result<()> {
     // It works: Alice can save a flow in it, Bob (keeper) can't.
     let nodes = json!([{"input": "near", "action": {"label": "x", "calls": [{"call": "fn", "contract": "wrap.test.near", "method": "near_deposit",
         "args": "{}", "deposit": {"kind": "input"}, "tgas": 10}], "out": "wrap.test.near", "min_out_per_in": null, "price": null}, "when": {"when": "now"}}]);
-    alice.call(&vault_id, "trust").args_json(json!({"add": ["wrap.test.near"], "remove": []})).transact().await?.into_result()?;
+    alice.call(&vault_id, "trust").args_json(json!({"add": [{"contract": "wrap.test.near", "methods": ["near_deposit"]}], "remove": []})).transact().await?.into_result()?;
     alice.call(&vault_id, "save_flow").args_json(json!({"name": "first", "nodes": nodes})).max_gas().transact().await?.into_result()?;
     assert!(bob.call(&vault_id, "save_flow").args_json(json!({"name": "x", "nodes": nodes})).max_gas().transact().await?.is_failure());
 

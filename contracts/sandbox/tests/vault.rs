@@ -79,7 +79,8 @@ async fn setup() -> anyhow::Result<World> {
     }
     give(&root, &wnear, alice.id(), 10_000 * ONE).await?;
     give(&alice, &wnear, vault.id(), 1_000 * ONE).await?;
-    alice.call(vault.id(), "trust").args_json(json!({"add": [wnear.id(), usdc.id(), lst.id(), dex.id()], "remove": []}))
+    alice.call(vault.id(), "trust").args_json(json!({"add": [{"contract": wnear.id()}, {"contract": usdc.id()}, {"contract": lst.id()},
+        {"contract": dex.id(), "methods": ["deposit_and_stake", "get_return"]}], "remove": []}))
         .transact().await?.into_result()?;
     let w = World { worker, alice, keeper, mallory, wnear, usdc, lst, dex, vault };
     rate(&w, &w.wnear, &w.usdc, 2 * SCALE).await?; // 1 wNEAR = 2 USDC
@@ -250,19 +251,86 @@ async fn recipes_can_only_call_trusted_contracts_and_never_the_vault_itself() ->
     // A shared recipe that pokes the vault's own callback to fake a step's result.
     let r = w.alice.call(w.vault.id(), "save_flow")
         .args_json(json!({"name": "evil", "nodes": call(w.vault.id(), "on_measured", r#"{"before":false}"#.into())})).max_gas().transact().await?;
-    assert!(format!("{:?}", r.failures()).contains("untrusted contract"), "{:?}", r.failures());
-    let r = w.alice.call(w.vault.id(), "trust").args_json(json!({"add": [w.vault.id()], "remove": []})).transact().await?;
+    assert!(format!("{:?}", r.failures()).contains("untrusted: contract"), "{:?}", r.failures());
+    let r = w.alice.call(w.vault.id(), "trust").args_json(json!({"add": [{"contract": w.vault.id(), "methods": ["on_measured"]}], "remove": []})).transact().await?;
     assert!(r.is_failure(), "the vault can't be trusted as a recipe target");
     // A recipe that sends tokens to a contract the owner never approved.
     let r = w.alice.call(w.vault.id(), "save_flow")
         .args_json(json!({"name": "evil", "nodes": call(w.mallory.id(), "anything", "{}".into())})).max_gas().transact().await?;
-    assert!(format!("{:?}", r.failures()).contains("untrusted contract"));
+    assert!(format!("{:?}", r.failures()).contains("untrusted: contract"));
+    // Moving tokens directly (around the ledger and the spending limit) is never allowed,
+    // even on a trusted token, and can't be trusted either.
+    let r = w.alice.call(w.vault.id(), "save_flow").args_json(json!({"name": "evil", "nodes": call(w.wnear.id(), "ft_transfer_call",
+        format!(r#"{{"receiver_id":"{}","amount":"1000","msg":""}}"#, w.dex.id()))})).max_gas().transact().await?;
+    assert!(format!("{:?}", r.failures()).contains("moves funds"), "{:?}", r.failures());
+    let r = w.alice.call(w.vault.id(), "trust").args_json(json!({"add": [{"contract": w.wnear.id(), "methods": ["ft_transfer"]}], "remove": []})).transact().await?;
+    assert!(format!("{:?}", r.failures()).contains("moves funds"));
+    // A trusted contract, but a method nobody approved.
+    let r = w.alice.call(w.vault.id(), "save_flow").args_json(json!({"name": "evil", "nodes": call(w.dex.id(), "set_broken", "{}".into())})).max_gas().transact().await?;
+    assert!(format!("{:?}", r.failures()).contains("untrusted: method"), "{:?}", r.failures());
+    // A recipe that promises USDC but whose proceeds go elsewhere (here: a swap into a
+    // token other than the one it declared) pauses at once instead of repeating.
+    let mut liar = swap(&w, &w.lst, None);
+    liar["out"] = json!(w.usdc.id());
+    w.alice.call(w.dex.id(), "set_rate").args_json(json!({"token_in": w.wnear.id(), "token_out": w.lst.id(), "rate": SCALE.to_string()})).transact().await?.into_result()?;
+    let l = save(&w, json!([{"input": w.wnear.id(), "action": liar, "when": {"when": "now"}}])).await?;
+    fund(&w, l, 0, 20 * ONE).await?.into_result()?;
+    w.alice.call(w.vault.id(), "set_limit").args_json(json!({"token": w.wnear.id(), "max": (10 * ONE).to_string(), "window_ns": 3_600_000_000_000u64})).transact().await?.into_result()?;
+    w.alice.call(w.vault.id(), "fund").args_json(json!({"flow_id": l, "node": 0, "amount": "1"})).max_gas().transact().await?;
+    let r = step(&w, &w.keeper, l, 0).await?;
+    assert!(format!("{:?}", r.failures()).contains("spending limit"), "20 wNEAR at once is over the 10/hour limit");
+    w.alice.call(w.vault.id(), "set_limit").args_json(json!({"token": w.wnear.id(), "max": (25 * ONE).to_string(), "window_ns": 3_600_000_000_000u64})).transact().await?;
+    let _ = w.alice.call(w.vault.id(), "drain").args_json(json!({"flow_id": l})).transact().await?;
+    w.alice.call(w.vault.id(), "set_limit").args_json(json!({"token": w.wnear.id(), "max": (10 * ONE).to_string(), "window_ns": 3_600_000_000_000u64})).transact().await?.into_result()?;
+    fund(&w, l, 0, 5 * ONE).await?.into_result()?;
+    let r = step(&w, &w.keeper, l, 0).await?;
+    assert!(r.logs().iter().any(|x| x.contains(r#""paused":true"#)), "{:?}", r.logs());
+    fund(&w, l, 0, 5 * ONE).await?.into_result()?;
+    assert!(format!("{:?}", step(&w, &w.keeper, l, 0).await?.failures()).contains("Paused"), "it won't run again by itself");
+    w.alice.call(w.vault.id(), "set_limit").args_json(json!({"token": w.wnear.id(), "max": null, "window_ns": 0})).transact().await?.into_result()?;
     // Trust withdrawn after saving: the step refuses to run, the money stays put.
     let f = save(&w, json!([{"input": w.wnear.id(), "action": swap(&w, &w.usdc, None), "when": {"when": "now"}}])).await?;
     fund(&w, f, 0, 10 * ONE).await?.into_result()?;
     w.alice.call(w.vault.id(), "trust").args_json(json!({"add": [], "remove": [w.dex.id()]})).transact().await?.into_result()?;
     let r = step(&w, &w.keeper, f, 0).await?;
-    assert!(format!("{:?}", r.failures()).contains("untrusted contract"));
-    assert_eq!(balance(&w.wnear, w.vault.id()).await?, 1_000 * ONE);
+    assert!(format!("{:?}", r.failures()).contains("untrusted"));
+    // 995: the lying recipe above cost one 5 wNEAR step (under the limit) before it paused.
+    assert_eq!(balance(&w.wnear, w.vault.id()).await?, 995 * ONE);
     Ok(())
+}
+
+#[tokio::test]
+async fn spending_limits_cap_what_flows_can_spend_and_loosening_waits_a_day() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let minute = 60_000_000_000u64;
+    let set = |max: Option<u128>, window: u64| w.alice.call(w.vault.id(), "set_limit")
+        .args_json(json!({"token": w.wnear.id(), "max": max.map(|m| m.to_string()), "window_ns": window})).transact();
+    set(Some(15 * ONE), minute).await?.into_result()?;
+    let f = save(&w, json!([{"input": w.wnear.id(), "action": swap(&w, &w.usdc, None), "when": {"when": "now"}}])).await?;
+    fund(&w, f, 0, 10 * ONE).await?.into_result()?;
+    assert!(step(&w, &w.keeper, f, 0).await?.is_success());
+    fund(&w, f, 0, 10 * ONE).await?.into_result()?;
+    let r = step(&w, &w.keeper, f, 0).await?;
+    assert!(format!("{:?}", r.failures()).contains("spending limit: 5000000000000000000"), "{:?}", r.failures());
+    assert!(step(&w, &w.alice, f, 0).await?.is_failure(), "the owner's steps count too");
+    // Loosening (or removing) waits 24h; trying to apply it early fails, the old cap holds.
+    set(Some(1_000 * ONE), minute).await?.into_result()?;
+    set(None, minute).await?.into_result()?;
+    let early = w.mallory.call(w.vault.id(), "apply_limit").args_json(json!({"token": w.wnear.id()})).transact().await?;
+    assert!(format!("{:?}", early.failures()).contains("waits 24h"));
+    assert!(step(&w, &w.keeper, f, 0).await?.is_failure(), "still capped");
+    // Tightening is immediate (and clears the pending loosening).
+    set(Some(12 * ONE), 2 * minute).await?.into_result()?;
+    let (limits, pending): (Value, Value) = w.vault.view("get_limits").await?.json()?;
+    assert_eq!(limits[0]["max"], (12 * ONE).to_string());
+    assert_eq!(pending, json!([]));
+    // A new period starts once the window has passed.
+    for _ in 0..30 {
+        w.worker.fast_forward(100).await?;
+        if step(&w, &w.keeper, f, 0).await?.is_success() {
+            assert_eq!(balance(&w.usdc, w.vault.id()).await?, 40 * ONE);
+            return Ok(());
+        }
+    }
+    anyhow::bail!("the window never reset")
 }
