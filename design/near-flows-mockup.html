@@ -1,0 +1,392 @@
+<title>NEAR Flows</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Klee+One:wght@400;600&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
+<style>
+/* Layout: an engineering notebook. Graph-paper canvas in the middle, an index-card inspector on the side, tabs as notebook dividers. */
+:root {
+  --paper: #f4f7f5;
+  --sheet: #ffffff;
+  --grid: #dfe8e3;
+  --ink: #23305c;
+  --ink-soft: #5a6488;
+  --line: #c5cfe0;
+  --marker: #fff0a0;
+  --mint: #cfeedd;
+  --mint-ink: #1f6b4a;
+  --sky: #dbe7ff;
+  --stamp: #c8402e;
+  --stamp-soft: #fbe3de;
+  --violet: #e7defd;
+  --f-display: "DotGothic16", "Zen Kaku Gothic New", system-ui, sans-serif;
+  --f-body: "Zen Kaku Gothic New", system-ui, -apple-system, sans-serif;
+  --f-hand: "Klee One", "Zen Kaku Gothic New", cursive;
+  --f-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --paper: #161b2b; --sheet: #1d2336; --grid: #252c43; --ink: #e6eaf7; --ink-soft: #a3abc7; --line: #39425f;
+  --marker: #5a5222; --mint: #1f3d33; --mint-ink: #8fe0b8; --sky: #253457; --stamp: #ff7a63; --stamp-soft: #4a2622; --violet: #352d55;
+  color-scheme: dark } }
+:root[data-theme="dark"] {
+  --paper: #161b2b; --sheet: #1d2336; --grid: #252c43; --ink: #e6eaf7; --ink-soft: #a3abc7; --line: #39425f;
+  --marker: #5a5222; --mint: #1f3d33; --mint-ink: #8fe0b8; --sky: #253457; --stamp: #ff7a63; --stamp-soft: #4a2622; --violet: #352d55;
+  color-scheme: dark }
+
+* { box-sizing: border-box }
+body { background: var(--paper); color: var(--ink); font-family: var(--f-body); font-size: 15px; line-height: 1.5; }
+.wrap { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 18px 40px; max-width: 1360px; margin: 0 auto; display: grid; gap: 16px; }
+h1, h2, h3 { text-wrap: balance; margin: 0 }
+.label { font-family: var(--f-display); letter-spacing: .06em; font-size: 12px; color: var(--ink-soft); text-transform: uppercase }
+.hand { font-family: var(--f-hand); color: var(--ink-soft) }
+.num { font-variant-numeric: tabular-nums }
+
+/* Top bar */
+.top { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; }
+.brand { display: flex; align-items: center; gap: 12px }
+.hanko { width: 44px; height: 44px; border: 2.5px solid var(--stamp); border-radius: 50%; color: var(--stamp); display: grid; place-items: center; font-family: var(--f-display); font-size: 13px; line-height: 1; transform: rotate(-8deg) }
+.brand h1 { font-family: var(--f-display); font-size: 26px; font-weight: 400 }
+.brand p { margin: 0; font-size: 13px; color: var(--ink-soft) }
+.pills { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto }
+.pill { border: 1px solid var(--line); background: var(--sheet); border-radius: 999px; padding: 4px 12px; font-size: 13px; display: inline-flex; align-items: center; gap: 6px }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mint-ink) }
+
+/* Notebook dividers (tabs) */
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 2px solid var(--ink) }
+.tab { font: inherit; font-weight: 500; color: var(--ink-soft); background: var(--grid); border: 2px solid transparent; border-bottom: none; border-radius: 10px 10px 0 0; padding: 8px 16px; cursor: pointer; margin-bottom: -2px }
+.tab[aria-selected="true"] { background: var(--sheet); color: var(--ink); border-color: var(--ink) }
+.tab:focus-visible, button:focus-visible, textarea:focus-visible { outline: 3px solid var(--marker); outline-offset: 2px }
+
+.view { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) 340px; align-items: start }
+@media (max-width: 980px) { .view { grid-template-columns: minmax(0, 1fr) } }
+
+/* Graph paper */
+.paper { background-color: var(--sheet); background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px); background-size: 22px 22px; border: 1px solid var(--line); border-radius: 6px; }
+.canvas-scroll { overflow-x: auto; border-radius: 6px }
+.canvas { position: relative; width: 1060px; height: 560px }
+.canvas svg { position: absolute; inset: 0; width: 100%; height: 100% }
+.edge { fill: none; stroke: var(--ink-soft); stroke-width: 2; }
+.edge-label { font-family: var(--f-display); font-size: 12px; fill: var(--ink) }
+.edge-label-bg { fill: var(--sheet); stroke: var(--line) }
+
+.node { position: absolute; width: 200px; background: var(--sheet); border: 2px solid var(--ink); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; cursor: pointer; text-align: left; font: inherit; color: var(--ink); box-shadow: 3px 3px 0 var(--line) }
+.node:hover { transform: translate(-1px, -1px); box-shadow: 4px 4px 0 var(--line) }
+.node[aria-pressed="true"] { box-shadow: 0 0 0 4px var(--marker), 3px 3px 0 var(--line) }
+.node .head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline }
+.node b { font-size: 14px }
+.proto { font-family: var(--f-display); font-size: 11px; padding: 1px 6px; border-radius: 3px; white-space: nowrap }
+.p-rhea { background: var(--sky) } .p-linear { background: var(--mint) } .p-bazaar { background: var(--marker) } .p-market { background: var(--violet) } .p-vault { background: var(--grid) }
+.chips { display: flex; flex-wrap: wrap; gap: 4px }
+.chip { font-size: 11.5px; border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; color: var(--ink-soft) }
+.state { font-size: 12px; display: flex; align-items: center; gap: 6px }
+.s-done::before, .s-wait::before, .s-pause::before { content: ""; width: 9px; height: 9px; border-radius: 50%; display: inline-block }
+.s-done::before { background: var(--mint-ink) } .s-wait::before { background: var(--ink-soft) } .s-pause::before { background: var(--stamp) }
+.collector { border-style: dashed }
+
+.annot { position: absolute; font-family: var(--f-hand); font-size: 15px; color: var(--stamp); transform: rotate(-3deg) }
+
+/* Index card inspector */
+.card { background: var(--sheet); border: 1px solid var(--line); border-radius: 6px; padding: 16px; display: grid; gap: 12px; min-width: 0 }
+.card h2 { font-size: 17px }
+.tape { justify-self: start; background: var(--marker); padding: 2px 10px; font-family: var(--f-display); font-size: 12px; transform: rotate(-1.5deg) }
+pre { margin: 0; background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 10px; font-family: var(--f-mono); font-size: 11.5px; line-height: 1.45; overflow-x: auto; white-space: pre }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13.5px }
+.kv dt { color: var(--ink-soft) } .kv dd { margin: 0; min-width: 0 }
+.trust-list { display: grid; gap: 6px; padding: 0; margin: 0; list-style: none; font-size: 13px }
+.trust-list li { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap }
+code { font-family: var(--f-mono); font-size: 12px; background: var(--paper); padding: 0 4px; border-radius: 3px; overflow-wrap: anywhere }
+.btn { font: inherit; font-weight: 500; border: 2px solid var(--ink); background: var(--sheet); color: var(--ink); border-radius: 6px; padding: 7px 14px; cursor: pointer }
+.btn.primary { background: var(--ink); color: var(--sheet) }
+.btn.stamp { border-color: var(--stamp); color: var(--stamp) }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
+.note { font-size: 13px; color: var(--ink-soft) }
+.toast { font-size: 13px; background: var(--marker); padding: 6px 10px; border-radius: 4px }
+
+/* Agent canvas */
+.prompt { display: grid; gap: 10px }
+textarea { font: inherit; color: var(--ink); background: var(--sheet); border: 2px solid var(--ink); border-radius: 8px; padding: 12px; min-height: 92px; resize: vertical; width: 100% }
+.plan { display: grid; gap: 8px; counter-reset: s; padding: 0; margin: 0; list-style: none }
+.plan li { counter-increment: s; display: grid; grid-template-columns: 30px 1fr; gap: 10px; align-items: start; background: var(--sheet); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px }
+.plan li::before { content: counter(s); font-family: var(--f-display); width: 26px; height: 26px; border: 2px solid var(--ink); border-radius: 50%; display: grid; place-items: center; font-size: 13px }
+.new { color: var(--stamp); font-weight: 700 }
+
+/* Bazaar */
+.lots { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 14px }
+.lot { background: var(--sheet); border: 1px solid var(--line); border-radius: 6px; padding: 14px; display: grid; gap: 10px; align-content: start }
+.lot h3 { font-size: 16px }
+.price { font-family: var(--f-display); font-size: 22px }
+.bar { height: 10px; background: var(--grid); border-radius: 999px; overflow: hidden }
+.bar > span { display: block; height: 100%; background: var(--mint-ink) }
+.bar.warn > span { background: var(--stamp) }
+.spark { width: 100%; height: 70px }
+.spark .axis { stroke: var(--line); stroke-width: 1 }
+.spark .line { stroke: var(--ink); stroke-width: 2; fill: none }
+.spark .past { stroke: var(--ink-soft); stroke-dasharray: 3 3 }
+.spark .now { fill: var(--stamp) }
+.spark text { font-family: var(--f-display); font-size: 10px; fill: var(--ink-soft) }
+.status { font-size: 12px; font-family: var(--f-display); padding: 2px 8px; border-radius: 3px; justify-self: start }
+.st-review { background: var(--stamp-soft); color: var(--stamp) } .st-live { background: var(--mint); color: var(--mint-ink) } .st-list { background: var(--sky) }
+
+/* Guard */
+table { width: 100%; border-collapse: collapse; font-size: 13.5px }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top }
+th { font-family: var(--f-display); font-weight: 400; font-size: 12px; color: var(--ink-soft); letter-spacing: .04em }
+.tbl { overflow-x: auto }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; align-items: start }
+.log { display: grid; gap: 6px; font-size: 13px; padding: 0; margin: 0; list-style: none }
+.log li { display: grid; grid-template-columns: 64px 1fr; gap: 8px }
+.ok { color: var(--mint-ink) } .bad { color: var(--stamp) }
+
+footer { font-size: 13px; color: var(--ink-soft); border-top: 1px dashed var(--line); padding-top: 12px }
+@media (prefers-reduced-motion: reduce) { .node:hover { transform: none } }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <div class="hanko" aria-hidden="true">流<br>N</div>
+      <div>
+        <h1>NEAR Flows</h1>
+        <p>Compose your investing as flows. Real protocols, your own vault.</p>
+      </div>
+    </div>
+    <div class="pills">
+      <span class="pill"><span class="dot"></span>testnet</span>
+      <span class="pill">vault <code>pedro.flows.testnet</code></span>
+      <span class="pill num">free 41.2 NEAR</span>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button class="tab" role="tab" id="t-human" aria-selected="true" aria-controls="v-human">Human canvas</button>
+    <button class="tab" role="tab" id="t-agent" aria-selected="false" aria-controls="v-agent">Agent canvas</button>
+    <button class="tab" role="tab" id="t-bazaar" aria-selected="false" aria-controls="v-bazaar">Bazaar</button>
+    <button class="tab" role="tab" id="t-guard" aria-selected="false" aria-controls="v-guard">Vault guard</button>
+  </nav>
+
+  <!-- HUMAN CANVAS -->
+  <section class="view" id="v-human" role="tabpanel" aria-labelledby="t-human">
+    <div class="paper canvas-scroll">
+      <div class="canvas" id="canvas">
+        <svg aria-hidden="true" id="edges"></svg>
+        <span class="annot" style="left:28px; top:520px">“Weekend memecoin plan” · 6 nodes · one per step</span>
+        <span class="annot" style="left:770px; top:300px">collector: claims when FROG is delivered</span>
+      </div>
+    </div>
+    <aside class="card" id="inspector" aria-live="polite"></aside>
+  </section>
+
+  <!-- AGENT CANVAS -->
+  <section class="view" id="v-agent" role="tabpanel" aria-labelledby="t-agent" hidden>
+    <div class="prompt">
+      <span class="tape">Tell your agent</span>
+      <label for="ask" class="note">Your agent knows your vault, your trusted contracts and your limits. It writes a flow; you review it before anything is saved.</label>
+      <textarea id="ask">Put 40% of my NEAR into staking. Back the FROG idea with 20 NEAR, and when the coin arrives sell half on Rhea if it pays at least 0.0012 NEAR, and LP the other half.</textarea>
+      <div class="row"><button class="btn primary" id="draft">Draft the flow</button><span class="hand">uses only nodes from the library</span></div>
+      <ol class="plan" id="plan">
+        <li><div><b>Stake with LiNEAR</b> · 40 NEAR · now<br><span class="note">linear-protocol.testnet · deposit_and_stake</span></div></li>
+        <li><div><b>Wrap NEAR</b> · 20 NEAR · now → 100% to step 3</div></li>
+        <li><div><b>Back an idea: FROG</b> · 20 wNEAR · lot #12, 2 shares at the current falling price</div></li>
+        <li><div><b>Claim FROG</b> · collector · every hour · 50% → 5, 50% → 6</div></li>
+        <li><div><b>Sell on Rhea</b> · when price ≥ 0.0012 · never less than 0.00114 (5% slippage)</div></li>
+        <li><div><b>LP your bag</b> · take-profit steps at 1.5×, 2×, 3×, 5×</div></li>
+      </ol>
+    </div>
+    <aside class="card">
+      <span class="tape">Before you save</span>
+      <h2>This flow will talk to</h2>
+      <ul class="trust-list">
+        <li>✓ <code>linear-protocol.testnet</code> deposit_and_stake</li>
+        <li>✓ <code>wrap.testnet</code> near_deposit</li>
+        <li>✓ <code>bazaar.flows.testnet</code> claim</li>
+        <li>✓ <code>ref-finance-101.testnet</code> get_return</li>
+        <li class="new">＋ <code>market.flows.testnet</code> (not trusted yet)</li>
+      </ul>
+      <dl class="kv">
+        <dt>Spends now</dt><dd class="num">60 NEAR of 100</dd>
+        <dt>Daily limit</dt><dd class="num">wNEAR 50 / day (unchanged)</dd>
+        <dt>Keeper can</dt><dd>run steps 1 to 6 when their triggers fire</dd>
+        <dt>Keeper can't</dt><dd>withdraw, change this flow, trust contracts</dd>
+      </dl>
+      <div class="row"><button class="btn primary" id="save">Trust market and save</button><button class="btn">Edit on canvas</button></div>
+      <p class="toast" id="saved" hidden>Mockup: nothing was sent. In the app this is one signed transaction.</p>
+    </aside>
+  </section>
+
+  <!-- BAZAAR -->
+  <section id="v-bazaar" role="tabpanel" aria-labelledby="t-bazaar" hidden style="display:grid; gap:16px">
+    <div class="row"><span class="tape">Bazaar</span><span class="note">Sell anything at your price, or at a falling price. Nobody's purchase moves anyone else's price, so shill bidding has nothing to push. Sellers pay 5%.</span></div>
+    <div class="lots">
+      <article class="lot">
+        <span class="status st-live">idea · funding</span>
+        <h3>FROG: a coin for frog people</h3>
+        <p class="note" style="margin:0">Pledge: 1,000,000 FROG for all 1,000 shares, delivered by 1 Dec. Money waits in escrow until delivery.</p>
+        <svg class="spark" viewBox="0 0 300 70" role="img" aria-label="Price per share falling from 2.0 to 0.8 NEAR over 24 hours, now 1.40">
+          <line class="axis" x1="20" y1="60" x2="290" y2="60"/>
+          <polyline class="line past" points="20,10 155,35"/>
+          <polyline class="line" points="155,35 290,60"/>
+          <circle class="now" cx="155" cy="35" r="5"/>
+          <text x="20" y="8">2.0</text><text x="262" y="55">0.8</text><text x="140" y="27">now</text>
+        </svg>
+        <div class="row" style="justify-content:space-between"><span class="price num">1.40 NEAR</span><span class="note">per share · floor 0.80</span></div>
+        <div class="bar"><span style="width:64%"></span></div>
+        <div class="row" style="justify-content:space-between"><span class="note num">640 / 1,000 shares sold</span><span class="note num">11h 52m left</span></div>
+        <div class="row"><button class="btn primary">Back it</button><button class="btn">Add as a node</button><button class="btn">Chat (412)</button></div>
+      </article>
+      <article class="lot">
+        <span class="status st-review">idea · review</span>
+        <h3>SHRMP · delivered</h3>
+        <p class="note" style="margin:0">The seller delivered 400,000 SHRMP for your 40 shares. Accept and claim the coin, or reject and get your 52 wNEAR back. Only your stake is affected.</p>
+        <dl class="kv"><dt>Your stake</dt><dd class="num">40 shares · paid 52 wNEAR</dd><dt>Review ends</dt><dd class="num">in 2d 7h</dd><dt>Rejected so far</dt><dd class="num">18% of the money</dd></dl>
+        <div class="row"><button class="btn primary">Accept</button><button class="btn stamp">Reject, refund me</button></div>
+        <p class="hand" style="margin:0">no vote: fake backers can't overrule you</p>
+      </article>
+      <article class="lot">
+        <span class="status st-list">NFT · falling price</span>
+        <h3>Genesis #1</h3>
+        <p class="note" style="margin:0">From 2 NEAR to 1 NEAR over an hour, then holds at the floor until someone buys.</p>
+        <div class="row" style="justify-content:space-between"><span class="price num">1.62 NEAR</span><span class="note">floor 1.00</span></div>
+        <div class="bar"><span style="width:38%"></span></div>
+        <div class="row"><button class="btn primary">Buy at 1.62</button><button class="btn">Auto-buy at…</button></div>
+      </article>
+      <article class="lot">
+        <span class="status st-list">tokens · listing</span>
+        <h3>Half my bag · 1,000 COIN</h3>
+        <p class="note" style="margin:0">500 wNEAR for all of it; buy any part at 0.5 wNEAR per COIN.</p>
+        <div class="row" style="justify-content:space-between"><span class="price num">0.50 wNEAR</span><span class="note num">800 left</span></div>
+        <div class="bar"><span style="width:20%"></span></div>
+        <div class="row"><button class="btn primary">Buy</button><button class="btn">Lore &amp; links</button></div>
+      </article>
+    </div>
+  </section>
+
+  <!-- VAULT GUARD -->
+  <section id="v-guard" role="tabpanel" aria-labelledby="t-guard" hidden style="display:grid; gap:16px">
+    <div class="row"><span class="tape">Vault guard</span><span class="note">Your vault has no keys: nobody, us included, can change its code. These rules hold for every flow, whoever wrote it.</span></div>
+    <div class="grid2">
+      <div class="card">
+        <h2>Trusted contracts</h2>
+        <div class="tbl"><table>
+          <thead><tr><th>Contract</th><th>Methods recipes may call</th></tr></thead>
+          <tbody>
+            <tr><td><code>ref-finance-101.testnet</code></td><td>get_return · tokens via swap</td></tr>
+            <tr><td><code>contract.1689937928.burrow.testnet</code></td><td>execute_with_pyth</td></tr>
+            <tr><td><code>linear-protocol.testnet</code></td><td>deposit_and_stake</td></tr>
+            <tr><td><code>wrap.testnet</code></td><td>near_deposit</td></tr>
+            <tr><td><code>bazaar.flows.testnet</code></td><td>claim · reject</td></tr>
+          </tbody>
+        </table></div>
+        <p class="note" style="margin:0">Never callable, trusted or not: <code>ft_transfer</code>, <code>ft_transfer_call</code>, <code>nft_transfer</code>, <code>near_withdraw</code>, <code>storage_withdraw</code>. Money leaves only to you.</p>
+      </div>
+      <div class="card">
+        <h2>Spending limits</h2>
+        <dl class="kv"><dt>wNEAR</dt><dd class="num">31 of 50 this day</dd></dl>
+        <div class="bar"><span style="width:62%"></span></div>
+        <dl class="kv"><dt>NEAR</dt><dd class="num">60 of 60 this week</dd></dl>
+        <div class="bar warn"><span style="width:100%"></span></div>
+        <p class="note" style="margin:0">Raising to 200 NEAR / week: <b>waiting 18h 40m</b>. Tightening applies at once; loosening waits 24 hours, so a hijacked agent key can't raise the cap and drain the vault.</p>
+        <h2>Rhea lending</h2>
+        <dl class="kv"><dt>Collateral</dt><dd class="num">20 wNEAR ($192)</dd><dt>Borrowed</dt><dd class="num">45 USDC</dd><dt>Health</dt><dd class="num ok">2.43 (shared by all flows)</dd></dl>
+      </div>
+      <div class="card">
+        <h2>Keeper</h2>
+        <p style="margin:0"><code>keeper.flows.testnet</code> may run a step only when its trigger has fired.</p>
+        <ul class="trust-list"><li class="ok">✓ run fired steps</li><li class="bad">✕ withdraw</li><li class="bad">✕ save or change flows</li><li class="bad">✕ trust contracts</li><li class="bad">✕ run manual nodes</li></ul>
+        <h2>Recent steps</h2>
+        <ul class="log num">
+          <li><span>14:02</span><span class="ok">Sell on Rhea: 150k FROG → 151.2 wNEAR</span></li>
+          <li><span>13:58</span><span class="ok">Claim FROG: 300,000 FROG, 50% routed</span></li>
+          <li><span>12:00</span><span class="bad">Swap paused: promised USDC, received nothing</span></li>
+          <li><span>09:15</span><span class="ok">Stake with LiNEAR: 40 NEAR → 39.6 LiNEAR</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>Mockup with example numbers. Behind it, the contracts exist and are tested on a local NEAR node against the real Rhea, Rhea lending, LiNEAR and wNEAR code: vault, factory, flows, Bazaar. Nothing is deployed yet.</footer>
+</div>
+
+<script>
+(function () {
+  const nodes = [
+    { id: "src", x: 24, y: 210, title: "Deposit", proto: "Vault", cls: "p-vault", when: "manual", amt: "100 NEAR", state: ["s-done", "funded"],
+      recipe: null, trust: [], note: "Money enters a flow only at an entry node, from the vault's free balance." },
+    { id: "stake", x: 290, y: 60, title: "Stake with LiNEAR", proto: "LiNEAR", cls: "p-linear", when: "now", amt: "40 NEAR", state: ["s-done", "39.6 LiNEAR out"],
+      recipe: { label: "Stake with LiNEAR", calls: [{ call: "fn", contract: "linear-protocol.testnet", method: "deposit_and_stake", args: "{}", deposit: { kind: "input" }, tgas: 50 }], out: "linear-protocol.testnet" },
+      trust: ["linear-protocol.testnet · deposit_and_stake"], note: "Tested against LiNEAR's real code: 10 NEAR in, 10 LiNEAR out." },
+    { id: "wrap", x: 290, y: 330, title: "Wrap NEAR", proto: "wNEAR", cls: "p-vault", when: "now", amt: "60 NEAR", state: ["s-done", "60 wNEAR out"],
+      recipe: { label: "Wrap NEAR", calls: [{ call: "fn", contract: "wrap.testnet", method: "near_deposit", args: "{}", deposit: { kind: "input" }, tgas: 10 }], out: "wrap.testnet" },
+      trust: ["wrap.testnet · near_deposit"], note: "60% of the deposit comes here. Its wNEAR is split on: 35% to FROG, 50% to dip buys, 15% back to free." },
+    { id: "idea", x: 560, y: 250, title: "Back an idea: FROG", proto: "Bazaar", cls: "p-bazaar", when: "now", amt: "21 wNEAR", state: ["s-done", "15 shares held"],
+      recipe: { label: "Back an idea", calls: [{ call: "ft", receiver: "bazaar.flows.testnet", msg: "{\"action\":\"buy\",\"lot\":12}", tgas: 80 }], out: null },
+      trust: ["bazaar.flows.testnet", "wrap.testnet"], note: "Money waits in the Bazaar's escrow. If FROG is never delivered, it comes back." },
+    { id: "dip", x: 560, y: 430, title: "Dip buy", proto: "Market", cls: "p-market", when: "price ≤ 0.95×", amt: "30 wNEAR", state: ["s-wait", "waiting below price"],
+      recipe: { label: "Dip buy", calls: [{ call: "ft", receiver: "market.flows.testnet", msg: "{\"action\":\"wheel\"}", tgas: 100 }], out: null },
+      trust: ["market.flows.testnet", "wrap.testnet"], note: "One-way bids at 0.95× and 0.9×; what they buy is re-armed as asks above." },
+    { id: "claim", x: 830, y: 230, title: "Claim FROG", proto: "Bazaar", cls: "p-bazaar", when: "every 1h", amt: "collector", state: ["s-done", "300,000 FROG"], collector: true,
+      recipe: { label: "Claim the coin", calls: [{ call: "fn", contract: "bazaar.flows.testnet", method: "claim", args: "{\"lot_id\":12,\"account\":\"{vault}\"}", deposit: { kind: "none" }, tgas: 60 }], out: "frog.flows.testnet" },
+      trust: ["bazaar.flows.testnet · claim", "frog.flows.testnet"], note: "Spends nothing. Finding nothing yet is normal and never pauses it." },
+    { id: "sell", x: 830, y: 40, title: "Sell on Rhea", proto: "Rhea", cls: "p-rhea", when: "price ≥ 0.0012", amt: "150k FROG", state: ["s-done", "151.2 wNEAR"],
+      recipe: { label: "Swap on Rhea", calls: [{ call: "ft", receiver: "ref-finance-101.testnet", msg: "{\"force\":0,\"actions\":[{\"pool_id\":88,\"token_in\":\"frog…\",\"token_out\":\"wrap.testnet\",\"amount_in\":\"{amount}\",\"min_amount_out\":\"{min_out}\"}],\"skip_unwrap_near\":true}", tgas: 120 }], out: "wrap.testnet", min_out_per_in: "0.00114 (scaled)" },
+      trust: ["ref-finance-101.testnet · get_return", "frog.flows.testnet"], note: "Rhea refuses anything below the minimum and the FROG stays in this node." },
+    { id: "lp", x: 830, y: 420, title: "LP your bag", proto: "Market", cls: "p-market", when: "now", amt: "150k FROG", state: ["s-pause", "paused: trust market"],
+      recipe: { label: "LP your bag", calls: [{ call: "ft", receiver: "market.flows.testnet", msg: "{\"action\":\"ladder\"}", tgas: 100 }], out: null },
+      trust: ["market.flows.testnet", "frog.flows.testnet"], note: "Take-profit steps at 1.5×, 2×, 3×, 5×. Paused: the vault doesn't trust the market contract yet." },
+  ];
+  const edges = [["src", "stake", "40%"], ["src", "wrap", "60%"], ["wrap", "idea", "35%"], ["wrap", "dip", "50%"], ["idea", "claim", "on delivery"], ["claim", "sell", "50%"], ["claim", "lp", "50%"]];
+  const canvas = document.getElementById("canvas"), svg = document.getElementById("edges"), insp = document.getElementById("inspector");
+  const W = 200, H = 112;
+  const el = {};
+  nodes.forEach(n => {
+    const b = document.createElement("button");
+    b.className = "node" + (n.collector ? " collector" : "");
+    b.style.left = n.x + "px"; b.style.top = n.y + "px";
+    b.setAttribute("aria-pressed", "false");
+    b.innerHTML = `<div class="head"><b>${n.title}</b><span class="proto ${n.cls}">${n.proto}</span></div>
+      <div class="chips"><span class="chip">${n.when}</span><span class="chip num">${n.amt}</span></div>
+      <div class="state ${n.state[0]}">${n.state[1]}</div>`;
+    b.addEventListener("click", () => select(n.id));
+    canvas.appendChild(b); el[n.id] = b;
+  });
+  const ns = "http://www.w3.org/2000/svg";
+  edges.forEach(([a, b, label]) => {
+    const A = nodes.find(n => n.id === a), B = nodes.find(n => n.id === b);
+    const x1 = A.x + W, y1 = A.y + H / 2, x2 = B.x, y2 = B.y + H / 2, mx = (x1 + x2) / 2;
+    const p = document.createElementNS(ns, "path");
+    p.setAttribute("d", `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 6},${y2}`);
+    p.setAttribute("class", "edge"); p.setAttribute("marker-end", "url(#arr)");
+    svg.appendChild(p);
+    const tw = label.length * 7.5 + 12, tx = mx - tw / 2, ty = (y1 + y2) / 2 - 10;
+    const r = document.createElementNS(ns, "rect");
+    r.setAttribute("x", tx); r.setAttribute("y", ty); r.setAttribute("width", tw); r.setAttribute("height", 20); r.setAttribute("rx", 4); r.setAttribute("class", "edge-label-bg");
+    const t = document.createElementNS(ns, "text");
+    t.setAttribute("x", mx); t.setAttribute("y", ty + 14); t.setAttribute("text-anchor", "middle"); t.setAttribute("class", "edge-label"); t.textContent = label;
+    svg.appendChild(r); svg.appendChild(t);
+  });
+  const defs = document.createElementNS(ns, "defs");
+  defs.innerHTML = '<marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--ink-soft)"/></marker>';
+  svg.prepend(defs);
+
+  function esc(s) { return String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+  function select(id) {
+    const n = nodes.find(x => x.id === id);
+    Object.entries(el).forEach(([k, b]) => b.setAttribute("aria-pressed", String(k === id)));
+    insp.innerHTML = `<span class="tape">${n.collector ? "Collector node" : "Node"}</span>
+      <h2>${esc(n.title)}</h2>
+      <dl class="kv"><dt>Protocol</dt><dd>${esc(n.proto)}</dd><dt>Trigger</dt><dd>${esc(n.when)}</dd><dt>Amount</dt><dd class="num">${esc(n.amt)}</dd><dt>State</dt><dd>${esc(n.state[1])}</dd></dl>
+      <p class="note" style="margin:0">${esc(n.note)}</p>
+      ${n.trust.length ? `<div class="label">Needs trust</div><ul class="trust-list">${n.trust.map(t => `<li><code>${esc(t)}</code></li>`).join("")}</ul>` : ""}
+      ${n.recipe ? `<div class="label">Recipe (what the vault will call)</div><pre>${esc(JSON.stringify(n.recipe, null, 2))}</pre>` : ""}
+      <div class="row"><button class="btn">Run now</button><button class="btn">Pause</button></div>`;
+  }
+  select("sell");
+
+  // Tabs
+  const tabs = [...document.querySelectorAll(".tab")];
+  tabs.forEach(t => t.addEventListener("click", () => {
+    tabs.forEach(x => { const on = x === t; x.setAttribute("aria-selected", String(on)); document.getElementById(x.getAttribute("aria-controls")).hidden = !on; });
+  }));
+  document.getElementById("save").addEventListener("click", () => { document.getElementById("saved").hidden = false; });
+  document.getElementById("draft").addEventListener("click", () => {
+    const plan = document.getElementById("plan"); plan.style.opacity = .4; setTimeout(() => plan.style.opacity = 1, 250);
+  });
+})();
+</script>
