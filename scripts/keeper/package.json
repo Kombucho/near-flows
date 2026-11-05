@@ -5,7 +5,8 @@
   "scripts": {
     "test": "node --import tsx --test src/*.test.ts",
     "keeper": "tsx src/main.ts",
-    "flows": "tsx src/flows-main.ts"
+    "flows": "tsx src/flows-main.ts",
+    "jupiter": "tsx src/jupiter.ts"
   },
   "author": "",
   "license": "MIT",
