@@ -952,6 +952,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "flow"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "serde",
+]
+
+[[package]]
 name = "fluent-uri"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1865,6 +1873,15 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mock_dex"
+version = "0.1.0"
+dependencies = [
+ "math",
+ "near-contract-standards",
+ "near-sdk",
 ]
 
 [[package]]
@@ -4169,6 +4186,16 @@ name = "utf_types"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
+
+[[package]]
+name = "vault"
+version = "0.1.0"
+dependencies = [
+ "flow",
+ "math",
+ "near-contract-standards",
+ "near-sdk",
+]
 
 [[package]]
 name = "vcpkg"

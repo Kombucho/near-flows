@@ -1,0 +1,13 @@
+[package]
+name = "mock_dex"
+version = "0.1.0"
+edition = "2021"
+description = "Test-only: a fixed-rate swap (Rhea-shaped msg) and a 1:1 staking pool, for vault tests."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = "5.30.0"
+near-contract-standards = "5.30.0"
+math = { path = "../math" }

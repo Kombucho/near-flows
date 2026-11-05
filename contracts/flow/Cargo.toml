@@ -1,0 +1,14 @@
+[package]
+name = "flow"
+version = "0.1.0"
+edition = "2021"
+description = "Flows: a graph of investing steps run from a user's own vault. Pure Rust, no near-sdk."
+
+[dependencies]
+borsh = { version = "1", features = ["derive"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+# Lets the vault contract store flows on chain and take them as JSON. Off by default.
+borsh = ["dep:borsh"]
+serde = ["dep:serde"]

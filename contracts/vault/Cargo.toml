@@ -1,0 +1,17 @@
+[package]
+name = "vault"
+version = "0.1.0"
+edition = "2021"
+description = "NEAR contract: one user's own vault that runs their flows (graphs of call recipes)."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = "5.30.0"
+near-contract-standards = "5.30.0"
+flow = { path = "../flow", features = ["borsh", "serde"] }
+math = { path = "../math" }
+
+[dev-dependencies]
+near-sdk = { version = "5.30.0", features = ["unit-testing"] }

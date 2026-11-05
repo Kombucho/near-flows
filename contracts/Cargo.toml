@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["math", "engine", "sim", "market", "bazaar", "mock_ft", "mock_nft", "sandbox"]
+members = ["math", "engine", "flow", "sim", "market", "bazaar", "vault", "mock_ft", "mock_nft", "mock_dex", "sandbox"]
 
 # Contracts handle money: an overflow must abort the call, never wrap around silently.
 [profile.release]
