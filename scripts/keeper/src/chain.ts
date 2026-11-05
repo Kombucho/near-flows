@@ -82,8 +82,8 @@ export class Chain {
   }
 
   /** Any call, as the keeper (flow keeper: the vault's `step`). */
-  call(contractId: string, methodName: string, args: Record<string, unknown>, gas: bigint) {
-    return this.signer().callFunction({ contractId, methodName, args, gas });
+  call(contractId: string, methodName: string, args: Record<string, unknown>, gas: bigint, deposit = 0n) {
+    return this.signer().callFunction({ contractId, methodName, args, gas, deposit });
   }
 
   /** A call whose full outcome (all receipts and logs) we need, waiting for finality. */

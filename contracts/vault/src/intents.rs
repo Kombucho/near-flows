@@ -27,8 +27,10 @@ pub struct IntentsPair {
     pub token_in: AccountId,
     pub token_out: AccountId,
     pub max_in: U128,
-    /// least output per input, scaled 1e24 (like flow nodes: wide enough for 24- vs 6-decimal tokens)
-    pub min_out_per_in: U128,
+    /// The floor as a ratio: at least `floor_out` of token_out for every `floor_per_in` of
+    /// token_in (e.g. 0.25 wNEAR per 1 USDC = 25e22 per 1e6). Exact for any decimals.
+    pub floor_out: U128,
+    pub floor_per_in: U128,
 }
 
 #[near(serializers = [borsh, json])]
@@ -83,6 +85,7 @@ impl Vault {
     /// Owner: allow a pair, or remove it with `max_in: "0"`.
     pub fn intents_allow(&mut self, pair: IntentsPair) {
         self.assert_owner();
+        require!(pair.floor_per_in.0 > 0 && pair.floor_out.0 > 0, "set a floor");
         let cfg = self.intents.as_mut().unwrap_or_else(|| env::panic_str("run intents_setup first"));
         cfg.pairs.retain(|p| !(p.token_in == pair.token_in && p.token_out == pair.token_out));
         if pair.max_in.0 > 0 {
@@ -103,7 +106,7 @@ impl Vault {
             .unwrap_or_else(|| env::panic_str("refused: pair not allowed"));
         require!(amount_in.0 > 0 && amount_in.0 <= pair.max_in.0, "refused: amount over the pair's limit");
         require!((60..=MAX_VALID_SECS).contains(&valid_secs), "valid for 1 to 60 minutes");
-        let floor = crate::mul_div(amount_in.0, pair.min_out_per_in.0, crate::PRICE_SCALE);
+        let floor = crate::mul_div(amount_in.0, pair.floor_out.0, pair.floor_per_in.0);
         let out_min = min_out.0.max(floor).max(1);
         self.charge(&format!("intents:{token_in}"), amount_in.0);
         let pending = Pending { token_in, amount_in, token_out, min_out: U128(out_min), deadline_ns: env::block_timestamp() + valid_secs * 1_000_000_000 };

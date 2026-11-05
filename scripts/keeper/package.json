@@ -6,7 +6,8 @@
     "test": "node --import tsx --test src/*.test.ts",
     "keeper": "tsx src/main.ts",
     "flows": "tsx src/flows-main.ts",
-    "jupiter": "tsx src/jupiter.ts"
+    "jupiter": "tsx src/jupiter.ts",
+    "intents": "tsx src/intents-solver.ts"
   },
   "author": "",
   "license": "MIT",

@@ -415,5 +415,34 @@
       },
       "tested": "sandbox/tests/sandbox.rs market_nodes_run_inside_a_vault_flow"
     }
+  ],
+  "actions": [
+    {
+      "id": "intents_swap",
+      "label": "Swap via NEAR Intents",
+      "kind": "vault action (not a recipe): the vault builds and MPC-signs its own token_diff intent",
+      "setup": "intents_setup(verifier, signer) once; intents_allow({token_in, token_out, max_in, floor_out, floor_per_in})",
+      "call": "intents_sign_swap({token_in, token_out, amount_in, min_out, valid_secs}) -> event intents_signed {signed}; a solver matches and submits execute_intents",
+      "guards": "only allowed pairs; amount <= max_in and the spending limit 'intents:<token>'; minimum = max(min_out, owner floor); salt read from the verifier; withdrawals only to the vault",
+      "tested": "sandbox/tests/intents.rs (real intents.near v0.4.5 wasm); LIVE testnet: intvault.nf-owner-ksleb.testnet on verifier.tidepool-sandbox.testnet, real MPC signature, settled tx EDqZApU7fKJwx5S3F1mYndztvnjMx1mc7TFnvAqcbghj"
+    },
+    {
+      "id": "solana_jupiter_swap",
+      "label": "Swap on Solana via Jupiter",
+      "kind": "vault action: the vault checks every byte of a Jupiter message, then MPC-signs it (Ed25519)",
+      "setup": "sol_setup(signer, max_cu_price, max_cu_limit); sol_allow({in_mint, out_mint, max_in, min_out_per_in_e12})",
+      "call": "sol_sign_swap({message}) -> event sol_signed {signature}; helper: scripts/keeper `npm run jupiter` (simulates; --broadcast to send)",
+      "guards": "solguard: one signer (the vault), no lookup tables, only ComputeBudget/ATA/Jupiter v1 routes, proceeds to the vault's own accounts, no platform fee, floor after slippage, size and fee caps",
+      "tested": "contracts/solguard (synthetic attacks + real Jupiter txs), sandbox/tests/sol.rs; LIVE: solvault.nf-keeper-ksleb.testnet, real MPC signature over a live Jupiter route, verified; Jupiter is mainnet-only so not broadcast"
+    },
+    {
+      "id": "evm_uniswap_swap",
+      "label": "Swap on an EVM chain via Uniswap",
+      "kind": "vault action: the vault BUILDS the transaction (approve / exactInputSingle), then MPC-signs it (secp256k1)",
+      "setup": "evm_setup(signer, chain_id, router, max_fee, max_tip, gas_cap); evm_allow({token_in, token_out, fee, max_in, min_out_per_in_e12})",
+      "call": "evm_approve(...) / evm_swap(...) -> event evm_signed {raw}; broadcast with eth_sendRawTransaction",
+      "guards": "router fixed, recipient = the vault, minimum = max(quote, owner floor), gas caps, low-s",
+      "tested": "contracts/evmtx (byte-for-byte vs viem), sandbox/tests/evm.rs; LIVE: evmvault.nf-keeper-ksleb.testnet, real MPC-signed Sepolia swap, Sepolia node accepted the signature (unfunded)"
+    }
   ]
 }
