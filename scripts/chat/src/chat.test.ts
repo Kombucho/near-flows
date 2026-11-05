@@ -12,7 +12,7 @@ import { startServer } from "./server.ts";
 
 const RECIPIENT = "bazaar-chat.test";
 
-/** A fake chain: alice owns `fullKeys`, lot 7 exists, alice sold it, bob bid on it. */
+/** A fake chain: alice owns `fullKeys`, lot 7 exists, alice sold it, bob bought from it. */
 class FakeChain {
   fullKeys = new Map<string, string>(); // publicKey -> account
   async isFullAccessKey(accountId: string, publicKey: string) {
@@ -119,7 +119,7 @@ test("you speak as yourself: a claimed sender is ignored", async () => {
   t.server.close();
 });
 
-test("private rooms are for the seller, buyers and bidders only", async () => {
+test("private rooms are for the seller and buyers only", async () => {
   const t = await setup();
   const mallory = await t.connect((await t.login("mallory.test")).json.token);
   mallory.send({ type: "join", room: "private:7" });
@@ -131,7 +131,7 @@ test("private rooms are for the seller, buyers and bidders only", async () => {
   // The public room of the same lot is open to everyone.
   mallory.send({ type: "join", room: "lot:7" });
   assert.equal((await mallory.next((f) => f.type === "joined")).room, "lot:7");
-  // Bob (a bidder) and Alice (the seller) are in.
+  // Bob (a buyer) and Alice (the seller) are in.
   const bob = await t.connect((await t.login("bob.test")).json.token);
   bob.send({ type: "join", room: "private:7" });
   await bob.next((f) => f.type === "history");

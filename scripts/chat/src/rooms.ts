@@ -3,7 +3,7 @@
 //
 //   "public"       everyone signed in
 //   "lot:<id>"     everyone signed in: the lot's public discussion (its lore, its community)
-//   "private:<id>" only the lot's seller and the accounts that bought from it or bid on it,
+//   "private:<id>" only the lot's seller and the accounts that bought from it,
 //                  as recorded ON CHAIN (bazaar view `is_participant`)
 
 import { DatabaseSync } from "node:sqlite";
@@ -16,7 +16,7 @@ const MEMBER_CACHE_MS = 30_000;
 export interface Membership {
   /** Does lot `lotId` exist on chain? */
   lotExists(lotId: number): Promise<boolean>;
-  /** Seller, buyer or bidder of the lot (on chain). */
+  /** Seller or buyer of the lot (on chain). */
   isParticipant(lotId: number, accountId: string): Promise<boolean>;
 }
 
@@ -68,7 +68,7 @@ export class Rooms {
     if (!(await this.cached(`lot|${r.lot}`, () => this.chain.lotExists(r.lot)))) throw new Error("no such lot");
     if (r.kind === "lot") return;
     if (!(await this.cached(`p|${r.lot}|${accountId}`, () => this.chain.isParticipant(r.lot, accountId)))) {
-      throw new Error("private room: only the seller, buyers and bidders of this lot");
+      throw new Error("private room: only the seller and buyers of this lot");
     }
   }
 

@@ -265,6 +265,12 @@ fn collectors_spend_nothing_run_on_schedule_and_pass_on_what_they_collect() {
     assert_eq!(l.nodes[1].inbox, 70, "what it collected flows on");
     assert_eq!(l.begin(&f, 0, MIN - 1, None, false), Err(Error::NotYet(0)), "not more often than its schedule");
     assert_eq!(l.begin(&f, 0, MIN, None, false), Ok(0));
+    // Failing ("nothing to collect yet") never pauses a collector.
+    for k in 0..5u64 {
+        l.finish(&f, 0, Err(0)).unwrap();
+        assert_eq!(l.begin(&f, 0, (k + 2) * MIN, None, false), Ok(0));
+    }
+    l.finish(&f, 0, Ok(0)).unwrap();
     // A collector can't run in a loop ("now"), and nothing can be routed into one.
     let looping = vec![node(NO_INPUT, T::Collect, Trigger::Now, &[])];
     assert_eq!(validate(&looping), Err(Error::BadTrigger(0)));

@@ -139,7 +139,11 @@ impl Ledger {
                 // The step failed: whatever came back returns to the inbox; anything
                 // that did NOT come back is gone (the contract reports it).
                 s.inbox += left.min(ran);
-                s.failures += 1;
+                // A collector failing usually means "nothing to collect yet": it spends
+                // nothing and its schedule limits it, so it never pauses itself.
+                if node.input != NO_INPUT {
+                    s.failures += 1;
+                }
             }
             Ok(out) => {
                 s.failures = 0;

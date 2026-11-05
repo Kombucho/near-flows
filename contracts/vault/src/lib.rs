@@ -332,6 +332,19 @@ impl Vault {
             .ft_transfer(self.owner.clone(), amount, None)
     }
 
+    /// A one-off call by the owner (e.g. "reject this idea's delivery", "settle my
+    /// positions"), under the same rules as recipes: a trusted contract, a
+    /// trusted method, never a method that moves funds, at most 1 yoctoNEAR.
+    pub fn act(&mut self, target: AccountId, method: String, json_args: String, one_yocto: bool) -> Promise {
+        self.assert_owner();
+        self.assert_idle();
+        let t = self.trusted.iter().find(|t| t.contract == target).unwrap_or_else(|| env::panic_str("untrusted: contract"));
+        require!(!NEVER_CALL.contains(&method.as_str()), "that method moves funds: use withdraw");
+        require!(t.methods.iter().any(|m| *m == method), "untrusted: method");
+        let deposit = NearToken::from_yoctonear(if one_yocto { 1 } else { 0 });
+        Promise::new(target).function_call(method, json_args.into_bytes(), deposit, Gas::from_tgas(100))
+    }
+
     // ---------- views ----------
 
     pub fn get_owner(&self) -> AccountId {
