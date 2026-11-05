@@ -23,7 +23,7 @@ use engine::{Book, Config};
 
 use crate::rng::Rng;
 use crate::run::BUYER_KINDS;
-use crate::world::{near, World, HOUR};
+use crate::world::{near, to_f, World, HOUR};
 
 const ENTRIES: [usize; 3] = [1, 6, 24];
 const HORIZON: usize = 168;
@@ -150,6 +150,9 @@ pub fn main(dir: &str) {
         coins = coins.into_iter().skip(only).take(1).collect(); // debug one coin
     }
     let split: i64 = std::env::var("SIM_SPLIT_TS").ok().and_then(|v| v.parse().ok()).unwrap_or(SPLIT_TS);
+    if std::env::var("SIM_TUNE").is_ok() {
+        return tune(&coins, split);
+    }
     let early = coins.iter().filter(|c| c.first_ts < split).count();
     println!("BACKTEST: {} coins with a first trade ({} of {} files; dead ones included). {} first traded before the split date, {} after.",
         coins.len(), coins.len(), files.len(), early, coins.len() - early);
@@ -236,4 +239,154 @@ fn bootstrap_mean(runs: &[Run], k: usize, n_coins: usize) -> (f64, f64) {
 fn manifest_files(path: &str) -> Vec<String> {
     let text = fs::read_to_string(path).expect("manifest.json (run scripts/backtest/fetch.py first)");
     text.split("\"file\": \"").skip(1).filter_map(|s| s.split('"').next().map(String::from)).collect()
+}
+
+// ---- TUNING: search LP buy settings on the first half, test once on the second ----
+
+#[derive(Clone, Copy, Debug)]
+struct LpCfg { down: u32, up: u32, follow: bool, tp: f64, fee: u16, market: bool }
+
+impl LpCfg {
+    fn name(&self) -> String {
+        if self.market { return format!("market buy (fee {:.1}%)", self.fee as f64 / 100.0); }
+        format!("LP {:.2}-{:.2}x{}{} fee {:.1}%", self.down as f64 / 1e4, self.up as f64 / 1e4,
+            if self.follow { " follow" } else { "" },
+            if self.tp > 0.0 { format!(" TP {:.2}", self.tp) } else { String::new() }, self.fee as f64 / 100.0)
+    }
+}
+
+fn grid() -> Vec<LpCfg> {
+    let mut g = Vec::new();
+    for fee in [30u16, 100] {
+        g.push(LpCfg { down: 0, up: 0, follow: false, tp: 0.0, fee, market: true });
+        for down in [5_000u32, 7_000, 8_500, 9_500] {
+            for up in [11_000u32, 12_500, 15_000, 20_000, 30_000] {
+                for follow in [false, true] {
+                    for tp in [0.0, 1.05, 1.1, 1.2] {
+                        g.push(LpCfg { down, up, follow, tp, fee, market: false });
+                    }
+                }
+            }
+        }
+    }
+    g
+}
+
+/// One buyer with 1 NEAR, one setting, CAPPED mode. Returns end value / NEAR in.
+fn replay_lp(c: &Coin, entry: usize, k: LpCfg, seed: u64) -> f64 {
+    let mut cfg = Config::standard(1, k.fee);
+    cfg.dyn_k = 2;
+    cfg.max_fee_bps = 500.max(k.fee);
+    cfg.launch_window_ns = 0;
+    let book = Book::graduate(cfg, near(4_000.0), near(5e8), 230, 0);
+    let mut w = World { book, now: 0, contract_q: near(4_000.0), contract_t: near(5e8), faults: Default::default(), volume_q: 0 };
+    let mut rng = Rng::new(seed);
+    let p0 = w.price();
+    let fair_at = |h: usize| p0 * c.price[h.min(c.price.len() - 1)] / c.price[0];
+    let deposit = near(1.0);
+    let (mut wq, mut wt) = (deposit, 0u128);
+    let mut done = false; // took profit: all NEAR, out of the market
+    for hour in 0..=(entry + HORIZON) {
+        w.now = hour as u64 * HOUR;
+        w.book.touch(w.now);
+        trade_capped(&mut w, &mut rng, fair_at(hour), c.vol[hour.min(c.vol.len() - 1)]);
+        if hour == entry {
+            if k.market {
+                if let Some((kept, used, _)) = w.buy("me", deposit, &[], 1.0) { wq -= used; wt += kept; }
+            } else if let Ok(r) = w.book.lp_buy("me", deposit, k.down, k.up, 20, 0, w.now) {
+                wq = r.left_quote;
+                wt = r.left_token;
+                w.contract_q += deposit - r.left_quote;
+                w.contract_t -= r.left_token;
+            }
+        }
+        if hour > entry && !k.market && !done {
+            let mine: Vec<(u64, i32)> = w.book.positions.iter().filter(|(_, p)| p.owner == "me").map(|(i, p)| (*i, p.bin)).collect();
+            let p = w.price().min(fair_at(hour));
+            let value = to_f(wq) + to_f(wt) * p + mine.iter().filter_map(|(id, _)| w.book.position_assets(*id).ok())
+                .map(|(t, q)| to_f(q) + to_f(t) * p).sum::<f64>();
+            let out = !mine.is_empty() && {
+                let (lo, hi) = (mine.iter().map(|x| x.1).min().unwrap_or(0), mine.iter().map(|x| x.1).max().unwrap_or(0));
+                w.book.active < lo || w.book.active > hi
+            };
+            let take = k.tp > 0.0 && value >= k.tp;
+            if take || (k.follow && out) {
+                for (id, _) in &mine {
+                    if let Ok(wd) = w.book.withdraw(*id, "me", w.now) {
+                        wq += wd.quote + wd.fee_quote;
+                        wt += wd.token + wd.fee_token;
+                        w.contract_q -= wd.quote + wd.fee_quote;
+                        w.contract_t -= wd.token + wd.fee_token;
+                    }
+                }
+                if take {
+                    if let Some(s) = w.sell(wt, 1.0) { wq += s.out; wt = s.refund; }
+                    done = true;
+                } else if let Ok((_, lt, lq)) = w.book.lp_place("me", wt, wq, k.down, k.up, 20, w.now) {
+                    w.contract_t += wt - lt;
+                    w.contract_q += wq - lq;
+                    (wt, wq) = (lt, lq);
+                }
+            }
+        }
+        let _ = w.book.crank(w.now);
+    }
+    let end = entry + HORIZON;
+    let alive = c.vol[end.saturating_sub(DEAD_AFTER_H)..=end.min(c.vol.len() - 1)].iter().any(|v| *v > 0.0);
+    let mark = if alive { w.price().min(fair_at(end)) } else { 0.0 };
+    let mut v = to_f(wq) + to_f(wt) * mark;
+    for (id, p) in w.book.positions.iter() {
+        if p.owner == "me" {
+            if let Ok((t, q)) = w.book.position_assets(*id) { v += to_f(q) + to_f(t) * mark; }
+        }
+    }
+    v / to_f(deposit)
+}
+
+/// Every (coin, entry) x every setting, spread over all CPU cores. Row = one run.
+fn run_grid(coins: &[&Coin], g: &[LpCfg]) -> Vec<Vec<f64>> {
+    let jobs: Vec<(&Coin, usize)> = coins.iter().flat_map(|c| ENTRIES.iter().map(move |&e| (*c, e))).collect();
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let chunk = jobs.len().div_ceil(threads).max(1);
+    std::thread::scope(|s| {
+        let hs: Vec<_> = jobs.chunks(chunk).map(|part| s.spawn(move || {
+            part.iter().map(|(c, e)| g.iter().map(|k| replay_lp(c, *e, *k, (c.idx * 31 + e) as u64)).collect::<Vec<f64>>()).collect::<Vec<_>>()
+        })).collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    })
+}
+
+fn summary(x: &[f64]) -> String {
+    format!("{:.2} | {:.3} | {:.0}% | {:.2} | {:.2}", quantile(x, 0.5), mean(x), p_loss(x) * 100.0, quantile(x, 0.1), quantile(x, 0.9))
+}
+
+fn tune(coins: &[Coin], split: i64) {
+    let every: usize = std::env::var("SIM_TRAIN_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+    let train: Vec<&Coin> = coins.iter().filter(|c| c.first_ts < split && c.idx % every == 0).collect();
+    let test: Vec<&Coin> = coins.iter().filter(|c| c.first_ts >= split).collect();
+    let g = grid();
+    println!("TUNING: {} settings searched on {} first-half coins ({} runs), CAPPED mode, 7 days, dead coins = 0.", g.len(), train.len(), train.len() * 3);
+    let t0 = std::time::Instant::now();
+    let rows = run_grid(&train, &g);
+    eprintln!("train grid took {:.0}s", t0.elapsed().as_secs_f64());
+    let col = |rows: &Vec<Vec<f64>>, j: usize| -> Vec<f64> { rows.iter().map(|r| r[j]).collect() };
+    let mut order: Vec<usize> = (0..g.len()).collect();
+    order.sort_by(|a, b| mean(&col(&rows, *b)).partial_cmp(&mean(&col(&rows, *a))).unwrap());
+    let beat1 = order.iter().filter(|j| mean(&col(&rows, **j)) > 1.0).count();
+    println!("Settings with a TRAIN mean above 1.0 (profitable on average): {beat1} of {}.\n", g.len());
+    println!("Top 10 on the first half (train):\n");
+    println!("| setting | median | mean | P(loss) | worst 10% | best 10% |");
+    println!("|---|---|---|---|---|---|");
+    for &j in order.iter().take(10) { println!("| {} | {} |", g[j].name(), summary(&col(&rows, j))); }
+    let markets: Vec<usize> = (0..g.len()).filter(|j| g[*j].market).collect();
+    for &j in &markets { println!("| {} | {} |", g[j].name(), summary(&col(&rows, j))); }
+    // TEST: the top 5 + the market buys, run ONCE on second-half coins.
+    let pick: Vec<LpCfg> = order.iter().take(5).map(|j| g[*j]).chain(markets.iter().map(|j| g[*j])).collect();
+    let t1 = std::time::Instant::now();
+    let rows2 = run_grid(&test, &pick);
+    eprintln!("test took {:.0}s", t1.elapsed().as_secs_f64());
+    println!("\nThe same settings, run once on {} second-half coins ({} runs) they were NOT chosen on (test):\n", test.len(), test.len() * 3);
+    println!("| setting | median | mean | P(loss) | worst 10% | best 10% |");
+    println!("|---|---|---|---|---|---|");
+    for (j, k) in pick.iter().enumerate() { println!("| {} | {} |", k.name(), summary(&col(&rows2, j))); }
 }
