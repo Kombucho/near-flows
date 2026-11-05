@@ -512,3 +512,40 @@ async fn gas_vs_positions() -> anyhow::Result<()> {
     println!("stats at end: {}", count(&w).await?);
     assert_solvent(&w).await
 }
+
+/// The market's own nodes inside a flow (nodes/library.json: market_buy,
+/// market_lp_your_bag, market_dip_buy): a vault buys the coin, puts every coin
+/// it receives on a take-profit ladder, and sets dip buys with other wNEAR.
+#[tokio::test]
+async fn market_nodes_run_inside_a_vault_flow() -> anyhow::Result<()> {
+    let w = setup().await?;
+    let vault = w.worker.dev_deploy(&wasm("vault")).await?;
+    vault.call("new").args_json(json!({"owner": w.alice.id(), "keeper": null})).transact().await?.into_result()?;
+    register(&w.owner, &w.coin, vault.id()).await?;
+    register(&w.owner, &w.wnear, vault.id()).await?;
+    w.owner.call(w.market.id(), "storage_deposit").args_json(json!({"account_id": vault.id()})).deposit(NearToken::from_near(1)).transact().await?.into_result()?;
+    transfer(&w.owner, &w.wnear, vault.id(), 50 * ONE).await?;
+    w.alice.call(vault.id(), "trust").args_json(json!({"add": [{"contract": w.market.id()}, {"contract": w.coin.id()}, {"contract": w.wnear.id()}], "remove": []}))
+        .transact().await?.into_result()?;
+    let recipe = |label: &str, msg: &str, out: Option<&AccountId>| json!({"label": label, "out": out, "min_out_per_in": null, "price": null,
+        "calls": [{"call": "ft", "receiver": w.market.id(), "msg": msg, "tgas": 100}]});
+    let f: u32 = w.alice.call(vault.id(), "save_flow").args_json(json!({"name": "memecoin plan", "nodes": [
+        {"input": w.wnear.id(), "action": recipe("Buy", r#"{"action":"buy","min_out":"0"}"#, Some(w.coin.id())), "when": {"when": "now"}, "next": [{"to": 1, "bps": 10000}]},
+        {"input": w.coin.id(), "action": recipe("LP your bag", r#"{"action":"ladder"}"#, None), "when": {"when": "now"}},
+        {"input": w.wnear.id(), "action": recipe("Dip buy", r#"{"action":"wheel"}"#, None), "when": {"when": "now"}},
+    ]})).max_gas().transact().await?.into_result()?.json()?;
+    for (node, amt) in [(0, 10 * ONE), (2, 10 * ONE)] {
+        w.alice.call(vault.id(), "fund").args_json(json!({"flow_id": f, "node": node, "amount": amt.to_string()})).max_gas().transact().await?.into_result()?;
+    }
+    for node in [0u16, 1, 2] {
+        let r = w.alice.call(vault.id(), "step").args_json(json!({"flow_id": f, "node": node})).max_gas().transact().await?;
+        println!("GAS step {node}: {:.1} Tgas {:?}", r.total_gas_burnt.as_gas() as f64 / 1e12, r.logs().iter().filter(|l| l.contains("flows")).collect::<Vec<_>>());
+        assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "node {node}: {:?} {:?}", r.logs(), r.failures());
+    }
+    assert_eq!(balance(&w.coin, vault.id()).await?, 0, "every coin bought went onto the ladder");
+    assert_eq!(balance(&w.wnear, vault.id()).await?, 30 * ONE, "10 bought, 10 waiting as dip buys");
+    let p = positions(&w, vault.id()).await?;
+    println!("vault positions: {}", p.len());
+    assert!(p.len() >= 5, "ladder rungs + dip bids belong to the vault: {}", p.len());
+    assert_solvent(&w).await
+}

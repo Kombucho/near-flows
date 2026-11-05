@@ -8,22 +8,79 @@
       "protocol": "wNEAR",
       "input": "near",
       "output": "wrap.testnet",
-      "trust": [{"contract": "wrap.testnet", "methods": ["near_deposit"]}],
-      "recipe": {"label": "Wrap NEAR", "calls": [{"call": "fn", "contract": "wrap.testnet", "method": "near_deposit", "args": "{}", "deposit": {"kind": "input"}, "tgas": 10}], "out": "wrap.testnet", "min_out_per_in": null, "price": null},
+      "trust": [
+        {
+          "contract": "wrap.testnet",
+          "methods": [
+            "near_deposit"
+          ]
+        }
+      ],
+      "recipe": {
+        "label": "Wrap NEAR",
+        "calls": [
+          {
+            "call": "fn",
+            "contract": "wrap.testnet",
+            "method": "near_deposit",
+            "args": "{}",
+            "deposit": {
+              "kind": "input"
+            },
+            "tgas": 10
+          }
+        ],
+        "out": "wrap.testnet",
+        "min_out_per_in": null,
+        "price": null
+      },
       "tested": "sandbox/tests/protocols.rs near_is_wrapped_then_half_is_swapped_on_rhea (real wNEAR code)"
     },
     {
       "id": "rhea_swap",
       "label": "Swap on Rhea",
       "protocol": "Rhea DEX",
-      "params": {"pool_id": "Rhea v1 pool id", "token_in": "input token", "token_out": "output token", "min_out_per_in": "least output per input, scaled 1e24 (slippage guard)"},
+      "params": {
+        "pool_id": "Rhea v1 pool id",
+        "token_in": "input token",
+        "token_out": "output token",
+        "min_out_per_in": "least output per input, scaled 1e24 (slippage guard)"
+      },
       "input": "${token_in}",
       "output": "${token_out}",
-      "trust": [{"contract": "ref-finance-101.testnet", "methods": ["get_return"]}, {"contract": "${token_in}"}, {"contract": "${token_out}"}],
-      "recipe": {"label": "Swap on Rhea", "calls": [{"call": "ft", "receiver": "ref-finance-101.testnet", "tgas": 120,
-        "msg": "{\"force\":0,\"actions\":[{\"pool_id\":${pool_id},\"token_in\":\"${token_in}\",\"token_out\":\"${token_out}\",\"amount_in\":\"{amount}\",\"min_amount_out\":\"{min_out}\"}],\"skip_unwrap_near\":true}"}],
-        "out": "${token_out}", "min_out_per_in": "${min_out_per_in}",
-        "price": {"contract": "ref-finance-101.testnet", "method": "get_return", "args": "{\"pool_id\":${pool_id},\"token_in\":\"${token_in}\",\"amount_in\":\"1000000000000000000000000\",\"token_out\":\"${token_out}\"}", "per": "1000000000000000000000000"}},
+      "trust": [
+        {
+          "contract": "ref-finance-101.testnet",
+          "methods": [
+            "get_return"
+          ]
+        },
+        {
+          "contract": "${token_in}"
+        },
+        {
+          "contract": "${token_out}"
+        }
+      ],
+      "recipe": {
+        "label": "Swap on Rhea",
+        "calls": [
+          {
+            "call": "ft",
+            "receiver": "ref-finance-101.testnet",
+            "tgas": 120,
+            "msg": "{\"force\":0,\"actions\":[{\"pool_id\":${pool_id},\"token_in\":\"${token_in}\",\"token_out\":\"${token_out}\",\"amount_in\":\"{amount}\",\"min_amount_out\":\"{min_out}\"}],\"skip_unwrap_near\":true}"
+          }
+        ],
+        "out": "${token_out}",
+        "min_out_per_in": "${min_out_per_in}",
+        "price": {
+          "contract": "ref-finance-101.testnet",
+          "method": "get_return",
+          "args": "{\"pool_id\":${pool_id},\"token_in\":\"${token_in}\",\"amount_in\":\"1000000000000000000000000\",\"token_out\":\"${token_out}\"}",
+          "per": "1000000000000000000000000"
+        }
+      },
       "tested": "sandbox/tests/protocols.rs (swap, slippage refusal, price trigger; real Rhea code)."
     },
     {
@@ -32,23 +89,84 @@
       "protocol": "LiNEAR",
       "input": "near",
       "output": "linear-protocol.testnet",
-      "trust": [{"contract": "linear-protocol.testnet", "methods": ["deposit_and_stake"]}],
-      "recipe": {"label": "Stake with LiNEAR", "calls": [{"call": "fn", "contract": "linear-protocol.testnet", "method": "deposit_and_stake", "args": "{}", "deposit": {"kind": "input"}, "tgas": 50}], "out": "linear-protocol.testnet", "min_out_per_in": null, "price": null},
+      "trust": [
+        {
+          "contract": "linear-protocol.testnet",
+          "methods": [
+            "deposit_and_stake"
+          ]
+        }
+      ],
+      "recipe": {
+        "label": "Stake with LiNEAR",
+        "calls": [
+          {
+            "call": "fn",
+            "contract": "linear-protocol.testnet",
+            "method": "deposit_and_stake",
+            "args": "{}",
+            "deposit": {
+              "kind": "input"
+            },
+            "tgas": 50
+          }
+        ],
+        "out": "linear-protocol.testnet",
+        "min_out_per_in": null,
+        "price": null
+      },
       "tested": "sandbox/tests/protocols.rs native_near_is_staked_with_real_linear"
     },
     {
       "id": "rhea_borrow",
       "label": "Supply collateral and borrow on Rhea",
       "protocol": "Rhea lending",
-      "params": {"collateral": "input token", "borrow_token": "token to borrow", "borrow_per_in": "how much to borrow per unit of collateral, scaled 1e24 (sets your loan-to-value)"},
+      "params": {
+        "collateral": "input token",
+        "borrow_token": "token to borrow",
+        "borrow_per_in": "how much to borrow per unit of collateral, scaled 1e24 (sets your loan-to-value)"
+      },
       "input": "${collateral}",
       "output": "${borrow_token}",
-      "trust": [{"contract": "contract.1689937928.burrow.testnet", "methods": ["execute_with_pyth"]}, {"contract": "${collateral}"}, {"contract": "${borrow_token}"}],
-      "recipe": {"label": "Borrow on Rhea", "calls": [
-        {"call": "ft", "receiver": "contract.1689937928.burrow.testnet", "tgas": 60, "msg": "{\"Execute\":{\"actions\":[{\"IncreaseCollateral\":{\"token_id\":\"${collateral}\",\"amount\":null,\"max_amount\":null}}]}}"},
-        {"call": "fn", "contract": "contract.1689937928.burrow.testnet", "method": "execute_with_pyth", "deposit": {"kind": "one_yocto"}, "tgas": 120,
-         "args": "{\"actions\":[{\"Borrow\":{\"token_id\":\"${borrow_token}\",\"amount\":\"{scaled}\",\"max_amount\":null}},{\"Withdraw\":{\"token_id\":\"${borrow_token}\",\"amount\":null,\"max_amount\":\"{scaled}\"}}]}"}],
-        "out": "${borrow_token}", "min_out_per_in": null, "price": null, "scale_per_in": "${borrow_per_in}"},
+      "trust": [
+        {
+          "contract": "contract.1689937928.burrow.testnet",
+          "methods": [
+            "execute_with_pyth"
+          ]
+        },
+        {
+          "contract": "${collateral}"
+        },
+        {
+          "contract": "${borrow_token}"
+        }
+      ],
+      "recipe": {
+        "label": "Borrow on Rhea",
+        "calls": [
+          {
+            "call": "ft",
+            "receiver": "contract.1689937928.burrow.testnet",
+            "tgas": 60,
+            "msg": "{\"Execute\":{\"actions\":[{\"IncreaseCollateral\":{\"token_id\":\"${collateral}\",\"amount\":null,\"max_amount\":null}}]}}"
+          },
+          {
+            "call": "fn",
+            "contract": "contract.1689937928.burrow.testnet",
+            "method": "execute_with_pyth",
+            "deposit": {
+              "kind": "one_yocto"
+            },
+            "tgas": 120,
+            "args": "{\"actions\":[{\"Borrow\":{\"token_id\":\"${borrow_token}\",\"amount\":\"{scaled}\",\"max_amount\":null}},{\"Withdraw\":{\"token_id\":\"${borrow_token}\",\"amount\":null,\"max_amount\":\"{scaled}\"}}]}"
+          }
+        ],
+        "out": "${borrow_token}",
+        "min_out_per_in": null,
+        "price": null,
+        "scale_per_in": "${borrow_per_in}"
+      },
       "warning": "All flows in one vault share one lending position: collateral from one flow backs loans of another. Show the vault's health once, above all flows.",
       "tested": "sandbox/tests/protocols.rs borrow_usdc_against_wnear_on_real_rhea_lending (testnet build v0.11, default prices)"
     },
@@ -56,15 +174,52 @@
       "id": "rhea_repay",
       "label": "Repay on Rhea and take collateral back",
       "protocol": "Rhea lending",
-      "params": {"debt_token": "input token", "collateral": "token to release", "release_per_in": "collateral released per unit repaid, scaled 1e24"},
+      "params": {
+        "debt_token": "input token",
+        "collateral": "token to release",
+        "release_per_in": "collateral released per unit repaid, scaled 1e24"
+      },
       "input": "${debt_token}",
       "output": "${collateral}",
-      "trust": [{"contract": "contract.1689937928.burrow.testnet", "methods": ["execute_with_pyth"]}, {"contract": "${debt_token}"}, {"contract": "${collateral}"}],
-      "recipe": {"label": "Repay on Rhea", "calls": [
-        {"call": "ft", "receiver": "contract.1689937928.burrow.testnet", "tgas": 60, "msg": "{\"Execute\":{\"actions\":[{\"Repay\":{\"token_id\":\"${debt_token}\",\"amount\":null,\"max_amount\":null}}]}}"},
-        {"call": "fn", "contract": "contract.1689937928.burrow.testnet", "method": "execute_with_pyth", "deposit": {"kind": "one_yocto"}, "tgas": 120,
-         "args": "{\"actions\":[{\"DecreaseCollateral\":{\"token_id\":\"${collateral}\",\"amount\":\"{scaled}\",\"max_amount\":null}},{\"Withdraw\":{\"token_id\":\"${collateral}\",\"amount\":null,\"max_amount\":\"{scaled}\"}}]}"}],
-        "out": "${collateral}", "min_out_per_in": null, "price": null, "scale_per_in": "${release_per_in}"},
+      "trust": [
+        {
+          "contract": "contract.1689937928.burrow.testnet",
+          "methods": [
+            "execute_with_pyth"
+          ]
+        },
+        {
+          "contract": "${debt_token}"
+        },
+        {
+          "contract": "${collateral}"
+        }
+      ],
+      "recipe": {
+        "label": "Repay on Rhea",
+        "calls": [
+          {
+            "call": "ft",
+            "receiver": "contract.1689937928.burrow.testnet",
+            "tgas": 60,
+            "msg": "{\"Execute\":{\"actions\":[{\"Repay\":{\"token_id\":\"${debt_token}\",\"amount\":null,\"max_amount\":null}}]}}"
+          },
+          {
+            "call": "fn",
+            "contract": "contract.1689937928.burrow.testnet",
+            "method": "execute_with_pyth",
+            "deposit": {
+              "kind": "one_yocto"
+            },
+            "tgas": 120,
+            "args": "{\"actions\":[{\"DecreaseCollateral\":{\"token_id\":\"${collateral}\",\"amount\":\"{scaled}\",\"max_amount\":null}},{\"Withdraw\":{\"token_id\":\"${collateral}\",\"amount\":null,\"max_amount\":\"{scaled}\"}}]}"
+          }
+        ],
+        "out": "${collateral}",
+        "min_out_per_in": null,
+        "price": null,
+        "scale_per_in": "${release_per_in}"
+      },
       "note": "The testnet build has no \"OnlyRepay\" message (mainnet does). Version-specific.",
       "tested": "sandbox/tests/protocols.rs borrow_usdc_against_wnear_on_real_rhea_lending (repay + release, and a refused repay that must not release)"
     },
@@ -72,11 +227,39 @@
       "id": "bazaar_back_idea",
       "label": "Back an idea (pre-IPO)",
       "protocol": "Bazaar",
-      "params": {"bazaar": "Bazaar contract", "lot": "the idea's lot id", "pay_token": "the token the idea is priced in"},
+      "params": {
+        "bazaar": "Bazaar contract",
+        "lot": "the idea's lot id",
+        "pay_token": "the token the idea is priced in"
+      },
       "input": "${pay_token}",
       "output": null,
-      "trust": [{"contract": "${bazaar}", "methods": ["claim", "reject"]}, {"contract": "${pay_token}"}],
-      "recipe": {"label": "Back an idea", "calls": [{"call": "ft", "receiver": "${bazaar}", "msg": "{\"action\":\"buy\",\"lot\":${lot}}", "tgas": 80}], "out": null, "min_out_per_in": null, "price": null},
+      "trust": [
+        {
+          "contract": "${bazaar}",
+          "methods": [
+            "claim",
+            "reject"
+          ]
+        },
+        {
+          "contract": "${pay_token}"
+        }
+      ],
+      "recipe": {
+        "label": "Back an idea",
+        "calls": [
+          {
+            "call": "ft",
+            "receiver": "${bazaar}",
+            "msg": "{\"action\":\"buy\",\"lot\":${lot}}",
+            "tgas": 80
+          }
+        ],
+        "out": null,
+        "min_out_per_in": null,
+        "price": null
+      },
       "tested": "sandbox/tests/nodes.rs a_flow_backs_an_idea_claims_the_coin_and_sells_half"
     },
     {
@@ -84,11 +267,43 @@
       "label": "Claim an idea's coin (or the refund)",
       "protocol": "Bazaar",
       "kind": "collector: input \"none\", runs on a schedule (when: every) or by hand",
-      "params": {"bazaar": "Bazaar contract", "lot": "the idea's lot id", "coin": "the pledged coin"},
+      "params": {
+        "bazaar": "Bazaar contract",
+        "lot": "the idea's lot id",
+        "coin": "the pledged coin"
+      },
       "input": "none",
       "output": "${coin}",
-      "trust": [{"contract": "${bazaar}", "methods": ["claim", "reject"]}, {"contract": "${coin}"}],
-      "recipe": {"label": "Claim the coin", "calls": [{"call": "fn", "contract": "${bazaar}", "method": "claim", "args": "{\"lot_id\":${lot},\"account\":\"{vault}\"}", "deposit": {"kind": "none"}, "tgas": 60}], "out": "${coin}", "min_out_per_in": null, "price": null},
+      "trust": [
+        {
+          "contract": "${bazaar}",
+          "methods": [
+            "claim",
+            "reject"
+          ]
+        },
+        {
+          "contract": "${coin}"
+        }
+      ],
+      "recipe": {
+        "label": "Claim the coin",
+        "calls": [
+          {
+            "call": "fn",
+            "contract": "${bazaar}",
+            "method": "claim",
+            "args": "{\"lot_id\":${lot},\"account\":\"{vault}\"}",
+            "deposit": {
+              "kind": "none"
+            },
+            "tgas": 60
+          }
+        ],
+        "out": "${coin}",
+        "min_out_per_in": null,
+        "price": null
+      },
       "note": "A refund (rejected or undelivered idea) arrives in the pay token and becomes free balance, not flow output.",
       "tested": "sandbox/tests/nodes.rs (both tests)"
     },
@@ -96,35 +311,109 @@
       "id": "market_buy",
       "label": "Buy a memecoin",
       "protocol": "Market (ours)",
-      "params": {"market": "market contract", "quote": "wNEAR (the market's quote token)", "coin": "the coin", "min_out_per_in": "slippage guard, scaled 1e24"},
+      "params": {
+        "market": "market contract",
+        "quote": "wNEAR (the market's quote token)",
+        "coin": "the coin",
+        "min_out_per_in": "slippage guard, scaled 1e24"
+      },
       "input": "${quote}",
       "output": "${coin}",
-      "trust": [{"contract": "${market}"}, {"contract": "${quote}"}, {"contract": "${coin}"}],
-      "recipe": {"label": "Buy", "calls": [{"call": "ft", "receiver": "${market}", "msg": "{\"action\":\"buy\",\"min_out\":\"{min_out}\"}", "tgas": 100}], "out": "${coin}", "min_out_per_in": "${min_out_per_in}", "price": null},
-      "tested": "not in a flow yet (the market's buy itself: sandbox/tests/sandbox.rs)"
+      "trust": [
+        {
+          "contract": "${market}"
+        },
+        {
+          "contract": "${quote}"
+        },
+        {
+          "contract": "${coin}"
+        }
+      ],
+      "recipe": {
+        "label": "Buy",
+        "calls": [
+          {
+            "call": "ft",
+            "receiver": "${market}",
+            "msg": "{\"action\":\"buy\",\"min_out\":\"{min_out}\"}",
+            "tgas": 100
+          }
+        ],
+        "out": "${coin}",
+        "min_out_per_in": "${min_out_per_in}",
+        "price": null
+      },
+      "tested": "sandbox/tests/sandbox.rs market_nodes_run_inside_a_vault_flow"
     },
     {
       "id": "market_lp_your_bag",
       "label": "LP your bag (take-profit ladder)",
       "protocol": "Market (ours)",
-      "params": {"market": "market contract", "coin": "the coin"},
+      "params": {
+        "market": "market contract",
+        "coin": "the coin"
+      },
       "input": "${coin}",
       "output": null,
-      "trust": [{"contract": "${market}"}, {"contract": "${coin}"}],
-      "recipe": {"label": "LP your bag", "calls": [{"call": "ft", "receiver": "${market}", "msg": "{\"action\":\"ladder\"}", "tgas": 100}], "out": null, "min_out_per_in": null, "price": null},
+      "trust": [
+        {
+          "contract": "${market}"
+        },
+        {
+          "contract": "${coin}"
+        }
+      ],
+      "recipe": {
+        "label": "LP your bag",
+        "calls": [
+          {
+            "call": "ft",
+            "receiver": "${market}",
+            "msg": "{\"action\":\"ladder\"}",
+            "tgas": 100
+          }
+        ],
+        "out": null,
+        "min_out_per_in": null,
+        "price": null
+      },
       "note": "Proceeds are paid to the vault by settle (anyone may call it; the keeper does) and become free balance.",
-      "tested": "not in a flow yet (the ladder itself: sandbox/tests/sandbox.rs)"
+      "tested": "sandbox/tests/sandbox.rs market_nodes_run_inside_a_vault_flow"
     },
     {
       "id": "market_dip_buy",
       "label": "Dip buy (wheel)",
       "protocol": "Market (ours)",
-      "params": {"market": "market contract", "quote": "wNEAR"},
+      "params": {
+        "market": "market contract",
+        "quote": "wNEAR"
+      },
       "input": "${quote}",
       "output": null,
-      "trust": [{"contract": "${market}"}, {"contract": "${quote}"}],
-      "recipe": {"label": "Dip buy", "calls": [{"call": "ft", "receiver": "${market}", "msg": "{\"action\":\"wheel\"}", "tgas": 100}], "out": null, "min_out_per_in": null, "price": null},
-      "tested": "not in a flow yet (the wheel itself: sandbox/tests/sandbox.rs)"
+      "trust": [
+        {
+          "contract": "${market}"
+        },
+        {
+          "contract": "${quote}"
+        }
+      ],
+      "recipe": {
+        "label": "Dip buy",
+        "calls": [
+          {
+            "call": "ft",
+            "receiver": "${market}",
+            "msg": "{\"action\":\"wheel\"}",
+            "tgas": 100
+          }
+        ],
+        "out": null,
+        "min_out_per_in": null,
+        "price": null
+      },
+      "tested": "sandbox/tests/sandbox.rs market_nodes_run_inside_a_vault_flow"
     }
   ]
 }
