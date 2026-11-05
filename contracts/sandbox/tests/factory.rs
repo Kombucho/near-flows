@@ -57,6 +57,8 @@ async fn one_click_one_keyless_vault_per_user() -> anyhow::Result<()> {
     alice.call(&vault_id, "save_flow").args_json(json!({"name": "first", "nodes": nodes})).max_gas().transact().await?.into_result()?;
     assert!(bob.call(&vault_id, "save_flow").args_json(json!({"name": "x", "nodes": nodes})).max_gas().transact().await?.is_failure());
 
+    let listed: Vec<String> = factory.view("get_vaults").args_json(json!({"from_index": 0, "limit": 10})).await?.json()?;
+    assert_eq!(listed, vec![vault.clone()], "keepers can find it");
     // One vault per person; a taken name refunds; tiny deposits and bad names are refused.
     assert!(alice.call(factory.id(), "create_vault").args_json(json!({"name": "alice2", "keeper": null}))
         .deposit(NearToken::from_near(1)).max_gas().transact().await?.is_failure());
@@ -70,6 +72,8 @@ async fn one_click_one_keyless_vault_per_user() -> anyhow::Result<()> {
     assert!(factory.view("get_vault").args_json(json!({"owner": bob.id()})).await?.json::<Option<String>>()?.is_none(), "and may try again");
     assert!(bob.call(factory.id(), "create_vault").args_json(json!({"name": "bob", "keeper": null}))
         .deposit(NearToken::from_millinear(100)).max_gas().transact().await?.is_failure(), "too little NEAR");
+    let count: u32 = factory.view("get_vault_count").await?.json()?;
+    assert_eq!(count, 1, "the refused attempts aren't listed");
     assert!(bob.call(factory.id(), "create_vault").args_json(json!({"name": "Bob.evil", "keeper": null}))
         .deposit(NearToken::from_near(1)).max_gas().transact().await?.is_failure(), "bad name");
     Ok(())

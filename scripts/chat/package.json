@@ -1,7 +1,7 @@
 {
   "name": "bazaar-chat",
   "version": "0.1.0",
-  "description": "Chat for the bazaar: a public room, a room per lot, and a private room per lot for its seller, bidders and buyers. Wallet sign-in (NEP-413).",
+  "description": "Chat for the bazaar: a public room, a room per lot, and a private room per lot for its seller and buyers. Wallet sign-in (NEP-413).",
   "private": true,
   "type": "module",
   "scripts": {

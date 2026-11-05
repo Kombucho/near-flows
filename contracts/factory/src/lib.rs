@@ -9,7 +9,7 @@
 //! us: its code is fixed to the hash it was born with. Publishing a new
 //! version only changes what NEW vaults use.
 
-use near_sdk::store::LookupMap;
+use near_sdk::store::{LookupMap, Vector};
 use near_sdk::{env, near, require, AccountId, CryptoHash, Gas, NearToken, PanicOnDefault, Promise, PromiseError};
 
 /// What a new vault must be funded with: its state, its 0.2 NEAR reserve, headroom.
@@ -25,13 +25,15 @@ pub struct Factory {
     pub code_hash: Option<CryptoHash>,
     /// owner -> their vault
     pub vaults: LookupMap<AccountId, AccountId>,
+    /// Every vault ever created, in order (so keepers and the app can find them).
+    pub list: Vector<AccountId>,
 }
 
 #[near]
 impl Factory {
     #[init]
     pub fn new(owner: AccountId) -> Self {
-        Self { owner, code_hash: None, vaults: LookupMap::new(b"v") }
+        Self { owner, code_hash: None, vaults: LookupMap::new(b"v"), list: Vector::new(b"l") }
     }
 
     /// Publish vault code (the raw wasm is the call's input, not JSON).
@@ -76,6 +78,7 @@ impl Factory {
     #[private]
     pub fn on_created(&mut self, owner: AccountId, vault: AccountId, deposit: NearToken, #[callback_result] r: Result<(), PromiseError>) -> bool {
         if r.is_ok() {
+            self.list.push(vault.clone());
             env::log_str(&format!(r#"EVENT_JSON:{{"standard":"flows","version":"1.0.0","event":"vault_created","data":[{{"owner":"{owner}","vault":"{vault}"}}]}}"#));
             return true;
         }
@@ -86,6 +89,15 @@ impl Factory {
 
     pub fn get_vault(&self, owner: AccountId) -> Option<AccountId> {
         self.vaults.get(&owner).cloned()
+    }
+
+    /// Vaults `from_index`.. (at most 100 per page), oldest first.
+    pub fn get_vaults(&self, from_index: u32, limit: u32) -> Vec<AccountId> {
+        (from_index..from_index.saturating_add(limit.min(100)).min(self.list.len())).filter_map(|i| self.list.get(i).cloned()).collect()
+    }
+
+    pub fn get_vault_count(&self) -> u32 {
+        self.list.len()
     }
 
     pub fn get_code_hash(&self) -> Option<String> {

@@ -81,6 +81,11 @@ export class Chain {
     return this.signer().callFunction({ contractId: this.market, methodName: "settle", args: { position_id: positionId }, gas: 100n * TGAS });
   }
 
+  /** Any call, as the keeper (flow keeper: the vault's `step`). */
+  call(contractId: string, methodName: string, args: Record<string, unknown>, gas: bigint) {
+    return this.signer().callFunction({ contractId, methodName, args, gas });
+  }
+
   crank() {
     return this.signer().callFunction({ contractId: this.market, methodName: "crank", args: {}, gas: 100n * TGAS });
   }
