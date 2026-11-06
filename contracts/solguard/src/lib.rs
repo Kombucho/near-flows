@@ -122,16 +122,12 @@ pub fn check_swap(message_bytes: &[u8], p: &SwapPolicy) -> Result<Verdict, Refus
         return Err(Refusal::FeePayer);
     }
     let (jup, cb, ata_prog) = (pubkey(JUPITER_V6), pubkey(COMPUTE_BUDGET), pubkey(ATA_PROGRAM));
-    let (mut cu_price, mut cu_limit) = (0u64, 200_000u32);
+    let (cu_price, cu_limit) = compute_budget(&m)?;
     let mut verdict = None;
     for ix in &m.instructions {
         let prog = *m.key(ix.program_index).ok_or(Refusal::Program("bad index".into()))?;
         if prog == cb {
-            match ix.data.first() {
-                Some(2) if ix.data.len() == 5 => cu_limit = u32::from_le_bytes(ix.data[1..5].try_into().unwrap()),
-                Some(3) if ix.data.len() == 9 => cu_price = u64::from_le_bytes(ix.data[1..9].try_into().unwrap()),
-                _ => return Err(Refusal::ComputeBudget("only unit limit and unit price".into())),
-            }
+            continue;
         } else if prog == ata_prog {
             check_ata_create(&m, ix, p)?;
         } else if prog == jup {
@@ -149,6 +145,29 @@ pub fn check_swap(message_bytes: &[u8], p: &SwapPolicy) -> Result<Verdict, Refus
     let mut v = verdict.ok_or(Refusal::NoSwap)?;
     v.max_priority_fee_lamports = ((cu_price as u128 * cu_limit as u128).div_ceil(1_000_000)) as u64;
     Ok(v)
+}
+
+/// The priority price and the most compute units the transaction can use. Only SetComputeUnitLimit
+/// and SetComputeUnitPrice are allowed. Without a limit the runtime gives 200k units to each other
+/// instruction (and 3k to each builtin one, compute budget included), up to 1.4M: that's the limit
+/// then, so a missing limit can't slip a 1.4M-unit fee past `max_cu_limit`.
+pub(crate) fn compute_budget(m: &Message) -> Result<(u64, u32), Refusal> {
+    let cb = pubkey(COMPUTE_BUDGET);
+    let (mut cu_price, mut cu_limit, mut n_cb) = (0u64, None, 0u32);
+    for ix in &m.instructions {
+        if m.key(ix.program_index) != Some(&cb) {
+            continue;
+        }
+        n_cb += 1;
+        match ix.data.first() {
+            Some(2) if ix.data.len() == 5 => cu_limit = Some(u32::from_le_bytes(ix.data[1..5].try_into().unwrap())),
+            Some(3) if ix.data.len() == 9 => cu_price = u64::from_le_bytes(ix.data[1..9].try_into().unwrap()),
+            _ => return Err(Refusal::ComputeBudget("only unit limit and unit price".into())),
+        }
+    }
+    let others = m.instructions.len() as u32 - n_cb;
+    let default = (others.saturating_mul(200_000)).saturating_add(n_cb * 3_000).min(1_400_000);
+    Ok((cu_price, cu_limit.unwrap_or(default)))
 }
 
 /// Creating a token account is allowed only for the vault itself, paid by the vault.

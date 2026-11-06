@@ -172,6 +172,32 @@ fn route_plans_are_decoded_step_by_step() {
     }
 }
 
+#[test]
+fn without_a_unit_limit_the_runtime_default_counts() {
+    // No SetComputeUnitLimit: the runtime gives 200k units PER instruction (up to 1.4M), so the
+    // priority fee is price x that, not x 200k.
+    let (v, usdc, sol) = (key(VAULT), key(USDC), key(SOL));
+    let create = || (pubkey(ATA_PROGRAM), vec![v, ata_of(&v, &sol), v, sol, pubkey(SYSTEM_PROGRAM), pubkey(TOKEN_PROGRAM)], vec![1u8]);
+    let mut tx = Tx::new(v).ix(pubkey(COMPUTE_BUDGET), vec![], [vec![3], 100_000u64.to_le_bytes().to_vec()].concat());
+    for _ in 0..6 {
+        let (p, a, d) = create();
+        tx = tx.ix(p, a, d);
+    }
+    let tx = tx.ix(pubkey(JUPITER_V6), shared_accounts(v, ata_of(&v, &usdc), ata_of(&v, &sol), usdc, sol, pubkey(JUPITER_V6)),
+        jup_data("shared_accounts_route", 1_000_000, 5_000_000, 50, 0)).bytes();
+    let mut p = policy();
+    p.max_cu_limit = 600_000;
+    let r = check_swap(&tx, &p);
+    assert!(matches!(r, Err(Refusal::ComputeBudget(_))), "7 instructions x 200k = 1.4M units, over 600k: {r:?}");
+    // Under the cap, the fee bound uses the default: 2 instructions (+3k for the price one).
+    let honest = Tx::new(v)
+        .ix(pubkey(COMPUTE_BUDGET), vec![], [vec![3], 50_000u64.to_le_bytes().to_vec()].concat())
+        .ix(pubkey(ATA_PROGRAM), vec![v, ata_of(&v, &sol), v, sol, pubkey(SYSTEM_PROGRAM), pubkey(TOKEN_PROGRAM)], vec![1])
+        .ix(pubkey(JUPITER_V6), shared_accounts(v, ata_of(&v, &usdc), ata_of(&v, &sol), usdc, sol, pubkey(JUPITER_V6)),
+            jup_data("shared_accounts_route", 10_000_000, 50_000_000, 50, 0)).bytes();
+    assert_eq!(check_swap(&honest, &p).unwrap().max_priority_fee_lamports, 50_000 * 403_000 / 1_000_000);
+}
+
 fn hex_of(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }

@@ -246,17 +246,12 @@ pub fn check_tx(message_bytes: &[u8], templates: &[Template], p: &TxPolicy) -> R
     }
     let signers: Vec<Pubkey> = m.account_keys.iter().take(nsig).copied().collect();
     let (cb, ata_prog) = (pubkey(COMPUTE_BUDGET), pubkey(ATA_PROGRAM));
-    let (mut cu_price, mut cu_limit) = (0u64, 200_000u32);
+    let (cu_price, cu_limit) = crate::compute_budget(&m)?;
     let mut matched = Vec::new();
     let mut wanted: Vec<Pubkey> = vec![p.authority];
     for ix in &m.instructions {
         let prog = *m.key(ix.program_index).ok_or(Refusal::Program("bad index".into()))?;
         if prog == cb {
-            match ix.data.first() {
-                Some(2) if ix.data.len() == 5 => cu_limit = u32::from_le_bytes(ix.data[1..5].try_into().unwrap()),
-                Some(3) if ix.data.len() == 9 => cu_price = u64::from_le_bytes(ix.data[1..9].try_into().unwrap()),
-                _ => return Err(Refusal::ComputeBudget("only unit limit and unit price".into())),
-            }
             continue;
         }
         if prog == ata_prog {

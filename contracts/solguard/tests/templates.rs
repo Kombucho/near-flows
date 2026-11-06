@@ -170,7 +170,9 @@ fn sol_is_wrapped_only_into_the_vaults_own_wsol_account() {
     let transfer = |to: [u8; 32], lamports: u64| (vec![v, to], { let mut d = vec![2, 0, 0, 0]; d.extend(lamports.to_le_bytes()); d });
     let ts = wsol_templates();
     let (accs, data) = transfer(mine, 500_000_000);
-    let ok = Tx::new(v).ix(pubkey(SYSTEM), accs, data).ix(pubkey(TOKEN_PROGRAM), vec![mine], vec![17]).ix(pubkey(TOKEN_PROGRAM), vec![mine, v, v], vec![9]).bytes();
+    // (3 instructions: without a unit limit the runtime's 600k default is over the policy's 400k.)
+    let limit = [vec![2], 300_000u32.to_le_bytes().to_vec()].concat();
+    let ok = Tx::new(v).ix(pubkey(solguard::COMPUTE_BUDGET), vec![], limit).ix(pubkey(SYSTEM), accs, data).ix(pubkey(TOKEN_PROGRAM), vec![mine], vec![17]).ix(pubkey(TOKEN_PROGRAM), vec![mine, v, v], vec![9]).bytes();
     let m = check_tx(&ok, &ts, &policy()).expect("wrap, sync, unwrap the vault's own wSOL");
     assert_eq!(m.iter().map(|m| m.template.as_str()).collect::<Vec<_>>(), ["wsol_wrap", "wsol_sync", "wsol_unwrap"]);
 
@@ -185,6 +187,26 @@ fn sol_is_wrapped_only_into_the_vaults_own_wsol_account() {
     for (name, msg) in cases {
         assert!(check_tx(&msg, &ts, &policy()).is_err(), "{name} passed");
     }
+}
+
+#[test]
+fn without_a_unit_limit_each_instruction_counts_200k_units() {
+    // Wrap, sync, unwrap with no SetComputeUnitLimit: the runtime allows 3 x 200k = 600k units,
+    // over the policy's 400k (the priority fee would be price x 600k).
+    let v = vault();
+    let mine = ata_of(&v, &pubkey(WSOL));
+    let wrap = { let mut d = vec![2, 0, 0, 0]; d.extend(1_000u64.to_le_bytes()); d };
+    let price = [vec![3], 1_000_000u64.to_le_bytes().to_vec()].concat();
+    let txs = |limit: Option<u32>| {
+        let mut t = Tx::new(v).ix(pubkey(solguard::COMPUTE_BUDGET), vec![], price.clone());
+        if let Some(l) = limit {
+            t = t.ix(pubkey(solguard::COMPUTE_BUDGET), vec![], [vec![2], l.to_le_bytes().to_vec()].concat());
+        }
+        t.ix(pubkey(SYSTEM), vec![v, mine], wrap.clone()).ix(pubkey(TOKEN_PROGRAM), vec![mine], vec![17]).ix(pubkey(TOKEN_PROGRAM), vec![mine, v, v], vec![9]).bytes()
+    };
+    let r = check_tx(&txs(None), &wsol_templates(), &policy());
+    assert!(matches!(r, Err(Refusal::ComputeBudget(_))), "{r:?}");
+    check_tx(&txs(Some(300_000)), &wsol_templates(), &policy()).expect("an explicit limit under the cap");
 }
 
 #[test]
