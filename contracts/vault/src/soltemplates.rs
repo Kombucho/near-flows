@@ -34,6 +34,8 @@ pub enum AccJ {
     Fixed { key: String },
     Vault,
     VaultAta { mint_at: u8, program_at: u8 },
+    /// The vault's token account for a mint the instruction doesn't name (base58 mint and token program).
+    VaultAtaOf { mint: String, program: String },
     Owner,
     NewSigner,
 }
@@ -118,6 +120,7 @@ impl SolTemplate {
                     AccJ::Fixed { key: k } => Acc::Fixed(key(k)),
                     AccJ::Vault => Acc::Vault,
                     AccJ::VaultAta { mint_at, program_at } => Acc::VaultAta { mint_at: *mint_at, program_at: *program_at },
+                    AccJ::VaultAtaOf { mint, program } => Acc::VaultAtaOf { mint: key(mint), program: key(program) },
                     AccJ::Owner => Acc::Owner,
                     AccJ::NewSigner => Acc::NewSigner,
                 })

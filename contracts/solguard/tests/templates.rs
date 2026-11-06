@@ -144,6 +144,49 @@ fn a_refusal_names_the_template_the_instruction_was_meant_for() {
     }
 }
 
+const WSOL: &str = "So11111111111111111111111111111111111111112";
+const SYSTEM: &str = "11111111111111111111111111111111";
+
+/// Wrapping SOL: a System transfer of at most 1 SOL from the vault into the vault's OWN wSOL
+/// account (a mint the instruction doesn't name), then sync_native and close_account on it.
+fn wsol_templates() -> Vec<Template> {
+    let mine = Acc::VaultAtaOf { mint: pubkey(WSOL), program: pubkey(TOKEN_PROGRAM) };
+    vec![
+        Template { name: "wsol_wrap".into(), program: pubkey(SYSTEM), prefix: vec![2, 0, 0, 0],
+            fields: vec![Field { ty: Ty::U64, rule: FieldRule::AtMost(1_000_000_000) }],
+            accounts: vec![Acc::Vault, mine.clone()], extra_accounts: 0, needs_owner: false },
+        Template { name: "wsol_sync".into(), program: pubkey(TOKEN_PROGRAM), prefix: vec![17], fields: vec![],
+            accounts: vec![mine.clone()], extra_accounts: 0, needs_owner: false },
+        Template { name: "wsol_unwrap".into(), program: pubkey(TOKEN_PROGRAM), prefix: vec![9], fields: vec![],
+            accounts: vec![mine, Acc::Vault, Acc::Vault], extra_accounts: 0, needs_owner: false },
+    ]
+}
+
+#[test]
+fn sol_is_wrapped_only_into_the_vaults_own_wsol_account() {
+    let (v, thief) = (vault(), key(66));
+    let (wsol, usdc) = (pubkey(WSOL), key(USDC));
+    let mine = ata_of(&v, &wsol);
+    let transfer = |to: [u8; 32], lamports: u64| (vec![v, to], { let mut d = vec![2, 0, 0, 0]; d.extend(lamports.to_le_bytes()); d });
+    let ts = wsol_templates();
+    let (accs, data) = transfer(mine, 500_000_000);
+    let ok = Tx::new(v).ix(pubkey(SYSTEM), accs, data).ix(pubkey(TOKEN_PROGRAM), vec![mine], vec![17]).ix(pubkey(TOKEN_PROGRAM), vec![mine, v, v], vec![9]).bytes();
+    let m = check_tx(&ok, &ts, &policy()).expect("wrap, sync, unwrap the vault's own wSOL");
+    assert_eq!(m.iter().map(|m| m.template.as_str()).collect::<Vec<_>>(), ["wsol_wrap", "wsol_sync", "wsol_unwrap"]);
+
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("SOL into the thief's wSOL account", { let (a, d) = transfer(ata_of(&thief, &wsol), 1); Tx::new(v).ix(pubkey(SYSTEM), a, d).bytes() }),
+        ("SOL into the vault's account for another mint", { let (a, d) = transfer(ata_of(&v, &usdc), 1); Tx::new(v).ix(pubkey(SYSTEM), a, d).bytes() }),
+        ("SOL straight to the thief", { let (a, d) = transfer(thief, 1); Tx::new(v).ix(pubkey(SYSTEM), a, d).bytes() }),
+        ("over 1 SOL", { let (a, d) = transfer(mine, 1_000_000_001); Tx::new(v).ix(pubkey(SYSTEM), a, d).bytes() }),
+        ("unwrapped to the thief", Tx::new(v).ix(pubkey(TOKEN_PROGRAM), vec![mine, thief, v], vec![9]).bytes()),
+        ("closing the vault's USDC account", Tx::new(v).ix(pubkey(TOKEN_PROGRAM), vec![ata_of(&v, &usdc), v, v], vec![9]).bytes()),
+    ];
+    for (name, msg) in cases {
+        assert!(check_tx(&msg, &ts, &policy()).is_err(), "{name} passed");
+    }
+}
+
 #[test]
 fn templates_are_checked_when_saved() {
     let mut t = pump_buy();

@@ -10,7 +10,7 @@
 //!   (an amount), or at least `field[of] * num / den` (a minimum out),
 //! - its accounts, one rule each: the vault itself, the vault's token
 //!   account for the mint at position N (re-derived here, so it can't be
-//!   someone else's), a fixed address, the owner's wallet (who must also
+//!   someone else's) or for a fixed mint (wSOL when wrapping), a fixed address, the owner's wallet (who must also
 //!   sign), a fresh key that signs (a new position), or any (pool and
 //!   program accounts the protocol itself checks against each other),
 //! - how many extra trailing accounts it may carry (protocol upgrades
@@ -84,6 +84,9 @@ pub enum Acc {
     /// The vault's associated token account for the mint at account position
     /// `mint_at`, under the token program at position `program_at`.
     VaultAta { mint_at: u8, program_at: u8 },
+    /// The vault's associated token account for a mint the instruction doesn't name (e.g. wrapping
+    /// SOL: a System transfer into the vault's wSOL account, then sync_native and close on it).
+    VaultAtaOf { mint: Pubkey, program: Pubkey },
     /// The owner's wallet: must sign this transaction too.
     Owner,
     /// A fresh key that signs (e.g. a new Meteora position). Never the vault, never reused as a token account.
@@ -203,6 +206,7 @@ impl Template {
                     let (mint, prog) = (key(*mint_at as usize)?, key(*program_at as usize)?);
                     pda::owns_ata(&p.authority, &prog, &mint, &k)
                 }
+                Acc::VaultAtaOf { mint, program } => pda::owns_ata(&p.authority, program, mint, &k),
                 Acc::Owner => Some(k) == p.owner && signers.contains(&k),
                 Acc::NewSigner => k != p.authority && Some(k) != p.owner && signers.contains(&k),
             };
