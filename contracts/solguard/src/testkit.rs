@@ -63,6 +63,12 @@ impl Tx {
     pub fn new(fee_payer: Pubkey) -> Tx {
         Tx { keys: vec![fee_payer], ixs: vec![], signers: 1, v0_lookups: 0 }
     }
+    /// Another signer (call before adding instructions: signers come first).
+    pub fn signer(mut self, k: Pubkey) -> Tx {
+        self.keys.push(k);
+        self.signers += 1;
+        self
+    }
     pub fn ix(mut self, program: Pubkey, accounts: Vec<Pubkey>, data: Vec<u8>) -> Tx {
         self.ixs.push((program, accounts, data));
         self

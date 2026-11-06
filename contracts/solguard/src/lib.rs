@@ -22,6 +22,7 @@
 
 mod message;
 mod pda;
+pub mod template;
 
 pub use message::{Instruction, Message, ParseError};
 pub use message::message_of_transaction;
@@ -165,6 +166,20 @@ fn check_ata_create(m: &Message, ix: &Instruction, p: &SwapPolicy) -> Result<(),
     }
     if !owns_ata(&p.authority, &token_prog, &mint, &account) {
         return Err(Refusal::AtaCreate("not the vault's own token account".into()));
+    }
+    Ok(())
+}
+
+/// Creating one of the vault's own token accounts (any mint), paid by the vault:
+/// templates may need one for a coin the vault never held (e.g. a fresh memecoin).
+pub(crate) fn check_ata_create_for(m: &Message, ix: &Instruction, authority: &Pubkey) -> Result<(), Refusal> {
+    if !(ix.data.is_empty() || ix.data == [0] || ix.data == [1]) {
+        return Err(Refusal::AtaCreate("only create".into()));
+    }
+    let acc = |i: usize| ix.accounts.get(i).and_then(|&k| m.key(k)).copied().ok_or(Refusal::AtaCreate("missing account".into()));
+    let (payer, account, owner, mint, token_prog) = (acc(0)?, acc(1)?, acc(2)?, acc(3)?, acc(5)?);
+    if payer != *authority || owner != *authority || !owns_ata(authority, &token_prog, &mint, &account) {
+        return Err(Refusal::AtaCreate("only the vault's own token account, paid by the vault".into()));
     }
     Ok(())
 }
