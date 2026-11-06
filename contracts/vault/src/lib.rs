@@ -29,6 +29,8 @@ mod limits;
 pub mod oracle;
 #[cfg(feature = "sol")]
 pub mod sol;
+#[cfg(feature = "sol")]
+pub mod soltemplates;
 mod step;
 #[cfg(test)]
 mod tests;

@@ -14,10 +14,10 @@ use near_sdk::{env, near, require, AccountId, Gas, NearToken, Promise};
 use crate::{Vault, VaultExt};
 
 pub const SOL_PATH: &str = "solana-1";
-const EDDSA_DOMAIN: u32 = 1;
-const GAS_SIGN: Gas = Gas::from_tgas(50);
+pub(crate) const EDDSA_DOMAIN: u32 = 1;
+pub(crate) const GAS_SIGN: Gas = Gas::from_tgas(50);
 const GAS_VIEW: Gas = Gas::from_tgas(10);
-const GAS_CB: Gas = Gas::from_tgas(10);
+pub(crate) const GAS_CB: Gas = Gas::from_tgas(10);
 
 /// One swap pair the owner allows on Solana.
 #[near(serializers = [borsh, json])]
@@ -45,6 +45,12 @@ pub struct SolConfig {
     pub pairs: Vec<SolPair>,
     pub max_cu_price: u64,
     pub max_cu_limit: u32,
+    /// Instruction templates (soltemplates.rs).
+    #[serde(default)]
+    pub templates: Vec<crate::soltemplates::SolTemplate>,
+    /// The owner's own Solana wallet, co-signer of `needs_owner` templates.
+    #[serde(default)]
+    pub owner_wallet: Option<String>,
 }
 
 #[near]
@@ -53,7 +59,7 @@ impl Vault {
     pub fn sol_setup(&mut self, signer: AccountId, max_cu_price: u64, max_cu_limit: u32) -> Promise {
         self.assert_owner();
         require!(max_cu_limit <= 1_400_000, "compute limit: at most 1.4M");
-        self.sol = Some(SolConfig { signer: signer.clone(), address: None, pairs: vec![], max_cu_price, max_cu_limit });
+        self.sol = Some(SolConfig { signer: signer.clone(), address: None, pairs: vec![], max_cu_price, max_cu_limit, templates: vec![], owner_wallet: None });
         let args = near_sdk::serde_json::json!({"path": SOL_PATH, "predecessor": env::current_account_id(), "domain_id": EDDSA_DOMAIN});
         Promise::new(signer)
             .function_call("derived_public_key".to_string(), args.to_string().into_bytes(), NearToken::from_yoctonear(0), GAS_VIEW)

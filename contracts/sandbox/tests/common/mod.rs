@@ -92,3 +92,52 @@ pub fn signed(r: &near_workspaces::result::ExecutionFinalResult) -> String {
     let v: Value = serde_json::from_str(log.trim_start_matches("EVENT_JSON:")).unwrap();
     v["data"][0]["raw"].as_str().unwrap().to_string()
 }
+
+/// A Solana mainnet fork (surfpool); killed when dropped.
+pub struct SolFork {
+    child: Child,
+    pub rpc: String,
+}
+
+impl Drop for SolFork {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
+
+impl SolFork {
+    /// None (test skipped) when surfpool isn't installed.
+    pub async fn start(port: u16) -> Option<SolFork> {
+        let bin = format!("{}/.local/bin/surfpool", std::env::var("HOME").unwrap_or_default());
+        let bin = if std::path::Path::new(&bin).exists() { bin } else { "surfpool".to_string() };
+        if Command::new(&bin).arg("--version").output().is_err() {
+            println!("SKIPPED: install surfpool to run Solana fork tests");
+            return None;
+        }
+        let child = Command::new(&bin)
+            .args(["start", "--network", "mainnet", "--port", &port.to_string(), "--ws-port", &(port + 1).to_string(), "--no-tui", "--no-studio", "--no-deploy", "--skip-blockhash-check", "-y"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()?;
+        let f = SolFork { child, rpc: format!("http://127.0.0.1:{port}") };
+        for _ in 0..120 {
+            if f.rpc_call("getSlot", serde_json::json!([])).get("result").is_some() {
+                return Some(f);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        panic!("surfpool didn't start");
+    }
+
+    pub fn rpc_call(&self, method: &str, params: Value) -> Value {
+        let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string();
+        let out = Command::new("curl").args(["-s", "-X", "POST", &self.rpc, "-H", "content-type: application/json", "-d", &body]).output().expect("curl");
+        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
+    }
+
+    /// The keeper's Solana helper (scripts/keeper/src/fork-sol.ts) against this fork; its last line, as JSON.
+    pub fn helper(&self, args: &[&str]) -> Value {
+        let dir = format!("{}/../../scripts/keeper", env!("CARGO_MANIFEST_DIR"));
+        let out = Command::new("npx").args(["tsx", "src/fork-sol.ts"]).args(args).current_dir(dir).env("SOLANA_RPC", &self.rpc).output().expect("npx");
+        let text = String::from_utf8_lossy(&out.stdout);
+        serde_json::from_str(text.trim().lines().last().unwrap_or("null")).unwrap_or_else(|_| panic!("helper {args:?}: {text} {}", String::from_utf8_lossy(&out.stderr)))
+    }
+}
