@@ -151,7 +151,7 @@ impl Vault {
     #[private]
     pub fn on_intents_signed(&mut self, message: String, nonce: String) {
         let cfg = self.intents.clone().unwrap();
-        let sig = env::promise_result_checked(0, 4096).ok().and_then(|raw| crate::sol::signature_from(&raw));
+        let sig = env::promise_result_checked(0, 4096).ok().and_then(|raw| crate::signature_from(&raw));
         let Some(sig) = sig else {
             self.emit("intents_sign_failed", "{}");
             return;

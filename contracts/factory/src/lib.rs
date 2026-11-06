@@ -12,8 +12,8 @@
 use near_sdk::store::{LookupMap, Vector};
 use near_sdk::{env, near, require, AccountId, CryptoHash, Gas, NearToken, PanicOnDefault, Promise, PromiseError};
 
-/// What a new vault must be funded with: its state, its 0.2 NEAR reserve, headroom.
-pub const MIN_VAULT_DEPOSIT: NearToken = NearToken::from_millinear(500);
+/// What a new vault must be funded with: its state (~0.003 NEAR), its 0.05 NEAR reserve, headroom.
+pub const MIN_VAULT_DEPOSIT: NearToken = NearToken::from_millinear(100);
 const GAS_INIT: Gas = Gas::from_tgas(20);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
 
@@ -55,7 +55,7 @@ impl Factory {
     pub fn create_vault(&mut self, name: String, keeper: Option<AccountId>) -> Promise {
         let owner = env::predecessor_account_id();
         let deposit = env::attached_deposit();
-        require!(deposit >= MIN_VAULT_DEPOSIT, "attach at least 0.5 NEAR");
+        require!(deposit >= MIN_VAULT_DEPOSIT, "attach at least 0.1 NEAR");
         require!(!self.vaults.contains_key(&owner), "you already have a vault");
         require!(
             (2..=32).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'),

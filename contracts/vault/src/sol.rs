@@ -167,7 +167,7 @@ impl Vault {
     #[private]
     pub fn on_sol_signed(&mut self, hash: String) {
         let raw = env::promise_result_checked(0, 4096).ok();
-        let sig = raw.as_deref().and_then(signature_from).map(hex::encode);
+        let sig = raw.as_deref().and_then(crate::signature_from).map(hex::encode);
         match sig {
             Some(s) => self.emit("sol_signed", &format!(r#"{{"hash":"{hash}","signature":"{s}"}}"#)),
             None => self.emit("sol_sign_failed", &format!(r#"{{"hash":"{hash}"}}"#)),
@@ -179,18 +179,3 @@ impl Vault {
     }
 }
 
-/// The 64-byte Ed25519 signature inside the signer's answer, whichever JSON
-/// shape it uses: {"scheme":"Ed25519","signature":[..64]} or {"signature":{"bytes":[..]}}
-/// or a hex string.
-pub(crate) fn signature_from(raw: &[u8]) -> Option<Vec<u8>> {
-    use near_sdk::serde_json::Value;
-    fn find(v: &Value) -> Option<Vec<u8>> {
-        match v {
-            Value::Array(a) if a.len() == 64 => a.iter().map(|x| x.as_u64().map(|n| n as u8)).collect(),
-            Value::String(s) if s.len() == 128 => hex::decode(s).ok(),
-            Value::Object(o) => o.get("signature").and_then(find).or_else(|| o.get("bytes").and_then(find)).or_else(|| o.values().find_map(find)),
-            _ => None,
-        }
-    }
-    find(&near_sdk::serde_json::from_slice(raw).ok()?)
-}

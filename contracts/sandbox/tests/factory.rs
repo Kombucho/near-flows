@@ -71,10 +71,40 @@ async fn one_click_one_keyless_vault_per_user() -> anyhow::Result<()> {
     assert!(spent < NearToken::from_millinear(10).as_yoctonear(), "Bob got his 1 NEAR back (spent only gas: {spent})");
     assert!(factory.view("get_vault").args_json(json!({"owner": bob.id()})).await?.json::<Option<String>>()?.is_none(), "and may try again");
     assert!(bob.call(factory.id(), "create_vault").args_json(json!({"name": "bob", "keeper": null}))
-        .deposit(NearToken::from_millinear(100)).max_gas().transact().await?.is_failure(), "too little NEAR");
+        .deposit(NearToken::from_millinear(99)).max_gas().transact().await?.is_failure(), "too little NEAR");
     let count: u32 = factory.view("get_vault_count").await?.json()?;
     assert_eq!(count, 1, "the refused attempts aren't listed");
     assert!(bob.call(factory.id(), "create_vault").args_json(json!({"name": "Bob.evil", "keeper": null}))
         .deposit(NearToken::from_near(1)).max_gas().transact().await?.is_failure(), "bad name");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_vault_costs_its_user_a_tenth_of_a_near() -> anyhow::Result<()> {
+    let worker = near_workspaces::sandbox().await?;
+    let root = worker.root_account()?;
+    let us = root.create_subaccount("flows").initial_balance(NearToken::from_near(100)).transact().await?.into_result()?;
+    let factory = us.deploy(&wasm("factory")).await?.into_result()?;
+    factory.call("new").args_json(json!({"owner": us.id()})).transact().await?.into_result()?;
+    us.call(factory.id(), "publish").args(wasm("vault")).deposit(NearToken::from_near(1)).max_gas().transact().await?.into_result()?;
+    let carol = worker.dev_create_account().await?;
+    assert!(carol.call(factory.id(), "create_vault").args_json(json!({"name": "carol", "keeper": null}))
+        .deposit(NearToken::from_millinear(99)).max_gas().transact().await?.is_failure(), "under 0.1 NEAR");
+    let before = carol.view_account().await?.balance;
+    let r = carol.call(factory.id(), "create_vault").args_json(json!({"name": "carol", "keeper": null}))
+        .deposit(NearToken::from_millinear(100)).max_gas().transact().await?;
+    assert!(r.is_success(), "{:?}", r.failures());
+    let vault: near_workspaces::AccountId = format!("carol.{}", factory.id()).parse()?;
+    // Unused prepaid gas comes back a few blocks later: count after the refunds.
+    worker.fast_forward(5).await?;
+    let spent = (before.as_yoctonear() - carol.view_account().await?.balance.as_yoctonear()) as f64 / 1e24;
+    let v = worker.view_account(&vault).await?;
+    println!("a vault for 0.1 NEAR (carol spent {spent:.4} incl. gas): it holds {:.4} NEAR, uses {} bytes", v.balance.as_yoctonear() as f64 / 1e24, v.storage_usage);
+    // It works and its state can grow: trust 30 contracts, ~2 KB more state.
+    let add: Vec<serde_json::Value> = (0..30).map(|i| json!({"contract": format!("token-number-{i:02}.testnet"), "methods": ["ft_transfer_call_no", "deposit"]})).collect();
+    carol.call(&vault, "trust").args_json(json!({"add": add, "remove": []})).max_gas().transact().await?.into_result()?;
+    let v = worker.view_account(&vault).await?;
+    println!("after trusting 30 contracts: {} bytes, {:.4} NEAR", v.storage_usage, v.balance.as_yoctonear() as f64 / 1e24);
+    assert!(spent < 0.11, "about a tenth of a NEAR");
     Ok(())
 }

@@ -20,11 +20,14 @@
 //! A step's output is measured as the vault's balance after minus before
 //! (one step at a time per vault, so the difference is that step's).
 
+#[cfg(feature = "evm")]
 pub mod evm;
 pub mod hidden;
+#[cfg(feature = "intents")]
 pub mod intents;
 mod limits;
 pub mod oracle;
+#[cfg(feature = "sol")]
 pub mod sol;
 mod step;
 #[cfg(test)]
@@ -44,7 +47,7 @@ pub const MAX_CALLS: usize = 4;
 /// Most gas a recipe's calls may ask for in total (the rest pays for our callbacks).
 pub const MAX_RECIPE_TGAS: u64 = 200;
 /// NEAR the vault always keeps for its own storage and fees.
-pub const RESERVE: NearToken = NearToken::from_millinear(200);
+pub const RESERVE: NearToken = NearToken::from_millinear(50);
 /// A step stuck this long (e.g. a callback ran out of gas) can be cleared by the owner.
 pub const STUCK_NS: u64 = 10 * 60 * 1_000_000_000;
 pub const PRICE_SCALE: u128 = 1_000_000_000_000_000_000_000_000;
@@ -210,10 +213,13 @@ pub struct Vault {
     pub limits: Vec<Limit>,
     pub pending: Vec<PendingLimit>,
     /// Solana via Chain Signatures (sol.rs).
+    #[cfg(feature = "sol")]
     pub sol: Option<sol::SolConfig>,
     /// One EVM chain via Chain Signatures (evm.rs).
+    #[cfg(feature = "evm")]
     pub evm: Option<evm::EvmConfig>,
     /// NEAR Intents, signed via Chain Signatures (intents.rs).
+    #[cfg(feature = "intents")]
     pub intents: Option<intents::IntentsConfig>,
     /// Price feeds for market floors (oracle.rs).
     pub oracle: Option<oracle::OracleConfig>,
@@ -223,7 +229,22 @@ pub struct Vault {
 impl Vault {
     #[init]
     pub fn new(owner: AccountId, keeper: Option<AccountId>) -> Self {
-        Self { owner, keeper, flows: Vec::new(), busy: None, trusted: Vec::new(), limits: Vec::new(), pending: Vec::new(), sol: None, evm: None, intents: None, oracle: None }
+        Self {
+            owner,
+            keeper,
+            flows: Vec::new(),
+            busy: None,
+            trusted: Vec::new(),
+            limits: Vec::new(),
+            pending: Vec::new(),
+            #[cfg(feature = "sol")]
+            sol: None,
+            #[cfg(feature = "evm")]
+            evm: None,
+            #[cfg(feature = "intents")]
+            intents: None,
+            oracle: None,
+        }
     }
 
     // ---------- owner ----------
@@ -523,4 +544,20 @@ impl Vault {
     pub(crate) fn emit(&self, event: &str, data: &str) {
         env::log_str(&format!(r#"EVENT_JSON:{{"standard":"flows","version":"1.0.0","event":"{event}","data":[{data}]}}"#));
     }
+}
+
+/// The 64-byte Ed25519 signature inside the signer's answer, whichever JSON
+/// shape it uses: {"scheme":"Ed25519","signature":[..64]} or {"signature":{"bytes":[..]}}
+/// or a hex string.
+pub(crate) fn signature_from(raw: &[u8]) -> Option<Vec<u8>> {
+    use near_sdk::serde_json::Value;
+    fn find(v: &Value) -> Option<Vec<u8>> {
+        match v {
+            Value::Array(a) if a.len() == 64 => a.iter().map(|x| x.as_u64().map(|n| n as u8)).collect(),
+            Value::String(s) if s.len() == 128 => hex::decode(s).ok(),
+            Value::Object(o) => o.get("signature").and_then(find).or_else(|| o.get("bytes").and_then(find)).or_else(|| o.values().find_map(find)),
+            _ => None,
+        }
+    }
+    find(&near_sdk::serde_json::from_slice(raw).ok()?)
 }
