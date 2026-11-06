@@ -1,7 +1,7 @@
 //! The last vault modules, through relay vaults: remote flow nodes (the NVDA
 //! take-profit ladder of remote.rs, same flow, same bounds), oracle market
-//! floors on a NEAR recipe, and EVM template calls; each against the full vault
-//! for gas. Build the wasm first: make build
+//! floors on a NEAR recipe, and EVM template calls, with their gas. Build the
+//! wasm first: make build
 
 mod common;
 mod ladder;
@@ -98,18 +98,9 @@ async fn the_nvda_ladder_runs_on_a_relay_vault_with_the_same_bounds() -> anyhow:
     price(&w, &pyth, 400, 120).await?;
     assert!(fails_with(&step(2, evm_args(v4_values(1, false), 2)).await?, "no price fresher"));
     assert_eq!(inbox(&ledger_of(&w, f).await?, 2), third, "nothing taken");
-
-    // Gas against the full vault, same flow, same calls.
-    let full = ladder::world().await?;
-    let fv = full.vault.id();
-    let ff: u32 = full.alice.call(fv, "save_flow").args_json(json!({"name": "NVDA ladder", "nodes": ladder()})).max_gas().transact().await?.into_result()?.json()?;
-    full.alice.call(fv, "fund").args_json(json!({"flow_id": ff, "node": 0, "amount": eth_in.to_string()})).max_gas().transact().await?.into_result()?;
-    let r = ladder::step(&full, &full.keeper, ff, 0, evm_args(v4_values(1, true), 0)).await?;
-    println!("GAS full vault step_remote (buy): {:.1} Tgas", tgas(&r));
-    ladder::report(&full, &full.keeper, ff, 0, Some(got)).await?.into_result()?;
-    nvda_price(&full, 275, 0).await?;
-    let r = ladder::step(&full, &full.keeper, ff, 1, evm_args(v4_values(1, false), 1)).await?;
-    println!("GAS full vault step_remote (rung, oracle read): {:.1} Tgas", tgas(&r));
+    // WHY no full-vault comparison any more: contracts/vault is gone. Its last
+    // figures (2026-11-06, same flow, same calls), for the record: step_remote
+    // buy 22.9 Tgas (relay 28.6), rung with an oracle read 30.1 (relay 36.0).
     Ok(())
 }
 
