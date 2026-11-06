@@ -79,7 +79,9 @@ async function round() {
         const raw = await chain.view<string>(s.contract, s.method, JSON.parse(s.args)).catch(() => null);
         if (raw === null || !fired(d, priceOf(raw, s.per))) continue;
       }
-      log(`${vault} flow ${d.flow} node ${d.node} "${d.label}" is due`);
+      // The owner's price for this keeper's run (paid by the vault if the step works).
+      const fee = BigInt(state?.keeper_fee ?? "0");
+      log(`${vault} flow ${d.flow} node ${d.node} "${d.label}" is due${fee > 0n ? ` (pays ${Number(fee) / 1e24} NEAR)` : ""}`);
       if (!opt.send) continue;
       try {
         const h = hidden.get(d.flow);

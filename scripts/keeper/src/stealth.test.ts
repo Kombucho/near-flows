@@ -51,9 +51,9 @@ test("a keypair file round-trips in near-cli's format", () => {
   assert.deepEqual(Buffer.from(back.seed), Buffer.from(k.seed));
 });
 
-test("exec needs the signed gas, the brain's 10 and the relay's 100 first round, never over 300", () => {
-  assert.equal(execTgas(50), 165);
-  assert.equal(execTgas(STEP_TGAS), 195);
-  assert.equal(execTgas(185), 300);
-  assert.throws(() => execTgas(200), /mainnet allows 300/, "a step signed for 200 can never run on mainnet");
+test("exec needs the signed gas, a relay round, the relay v2 first round of 40 and x, never over 300", () => {
+  assert.equal(execTgas(50), 100);
+  assert.equal(execTgas(STEP_TGAS), 130);
+  assert.equal(execTgas(250), 300);
+  assert.throws(() => execTgas(251), /sign for at most 250/, "over mainnet's cap");
 });

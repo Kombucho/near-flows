@@ -24,6 +24,10 @@ FACTORY="nf-relay-$SUFFIX.testnet"
 BOARD="nf-board-$SUFFIX.testnet"
 OWNER="${OWNER_ID:-nf-owner-$SUFFIX.testnet}"
 KEEPER="${KEEPER_ID:-nf-keeper-$SUFFIX.testnet}"
+# Fees (brain-enforced, caps fixed at deploy): protocol 0.1% of what a step uses (cap 0.3%),
+# 0.01 NEAR per cross-chain signature (cap 0.05). The owner is treasury and fee admin on testnet.
+TREASURY="${TREASURY_ID:-$OWNER}"
+FEES="{\"treasury\":\"$TREASURY\",\"admin\":\"$OWNER\",\"cap_bps\":30,\"bps\":10,\"per_signature\":\"10000000000000000000000\",\"per_signature_cap\":\"50000000000000000000000\"}"
 VAULT_NAME="${VAULT_NAME:-demo}"
 VAULT="$VAULT_NAME.$FACTORY"
 # Real testnet contracts (same as deploy-flows-testnet.sh).
@@ -44,7 +48,7 @@ VAULT_DEPOSIT="${VAULT_DEPOSIT:-1}" # NEAR attached to create_vault (min 0.1): t
 VAULT_FUND="${VAULT_FUND:-5}"       # NEAR the owner sends the vault for the flow
 TOKEN_STORAGE="0.0125"              # per token; registration_only refunds the excess (min is 0.00125)
 RHEA_STORAGE="0.1"                  # Rhea's min is 0.00102, but each registered token takes more
-GAS_X="300.0 Tgas"                  # a relay request: brain.handle gets 100, the vault's cb the rest
+GAS_X="300.0 Tgas"                  # a relay request (mainnet cap): brain.handle gets 40 (relay v2), the vault's cb the rest
 E24="000000000000000000000000"
 
 # Pyth feed ids (stable channel). pyth-oracle.testnet takes stable updates (its data source is
@@ -185,7 +189,7 @@ fi
 if want brain; then
   echo "== brain: rules + state of every relay vault; only vaults the factory makes"
   need "$BRAIN" "$(python3 -c "print(round($(size brain)/1e5 + 0.06, 2))")"
-  deploy "$BRAIN" brain "{\"factory\":\"$FACTORY\"}"
+  deploy "$BRAIN" brain "{\"factory\":\"$FACTORY\",\"fees\":$FEES}"
 fi
 
 if want factory; then
