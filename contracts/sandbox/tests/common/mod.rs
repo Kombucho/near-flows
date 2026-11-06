@@ -19,6 +19,20 @@ pub fn templates(chain: &str) -> Vec<Value> {
     lib["chains"][chain]["templates"].as_array().unwrap().clone()
 }
 
+/// A Solana template from the node library (nodes/sol-templates.json), exactly as published,
+/// with the owner's per-coin values filled into its {placeholders}.
+pub fn sol_template(name: &str, fill: &[(&str, &str)]) -> Value {
+    let lib: Value = serde_json::from_str(&std::fs::read_to_string(format!("{}/../../nodes/sol-templates.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap();
+    let t = lib["templates"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap_or_else(|| panic!("no Solana template {name}"));
+    let mut text = t.to_string();
+    for (k, v) in fill {
+        text = text.replace(&format!("{{{k}}}"), v);
+    }
+    let left = text.split('{').skip(1).find(|s| s.split_once('}').is_some_and(|(w, _)| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase() || c == '_')));
+    assert!(left.is_none(), "{name}: placeholder {{{}}} left unfilled", left.unwrap_or_default());
+    serde_json::from_str(&text).unwrap()
+}
+
 fn foundry(bin: &str) -> String {
     let p = format!("{}/.foundry/bin/{bin}", std::env::var("HOME").unwrap_or_default());
     if std::path::Path::new(&p).exists() { p } else { bin.to_string() }

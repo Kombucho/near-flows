@@ -1,0 +1,221 @@
+{
+  "about": "Solana nodes as templates the vault enforces (solguard::template, contracts/vault/src/soltemplates.rs): every instruction is checked byte by byte before the vault signs. Accounts: 'vault' is the vault itself, 'vault_ata' its own token account for the mint at position mint_at (re-derived, so proceeds can't go anywhere else), 'new_signer' a fresh key (a new LP position), 'fixed' a pinned address, 'any' an account the program itself checks against the others (pool PDAs, bin arrays). Trailing extra accounts are never signers. needs_owner: the owner's own Solana wallet must co-sign (set with sol_owner_wallet). Values in {braces} are set per coin by the owner and filled in when the template is saved. Tested on a Solana mainnet fork (surfpool): contracts/sandbox/tests/sol_fork.rs, sol_fork_meteora.rs.",
+  "programs": {
+    "meteora_dlmm": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+    "meteora_dlmm_event_authority": "D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6",
+    "pump": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+    "token": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "token_2022": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+    "memo": "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+    "system": "11111111111111111111111111111111"
+  },
+  "tokens": {
+    "SOL": "So11111111111111111111111111111111111111112",
+    "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+  },
+  "pools": {
+    "dlmm_sol_usdc": {
+      "pool": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
+      "bin_step": 4,
+      "reserve_x": "EYj9xKw6ZszwpyNibHY7JD5o3QgTVrSdcBp1fMJhrR9o",
+      "reserve_y": "CoaxzEh8p5YyGLcj36Eo3cUThVJxeKCs7qvLAGDYwBcz",
+      "verified": "read from a Solana mainnet fork on 2026-11-06: SOL ~ 90 USDC, ~32,400 SOL and ~1.14M USDC in the pool"
+    }
+  },
+  "templates": [
+    {
+      "name": "dlmm_open",
+      "about": "Meteora DLMM initialize_position(lower_bin_id, width) in the SOL/USDC pool: the vault pays and owns the position, a fresh key is its address, the owner co-signs (approves the range).",
+      "program": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "prefix": "dbc0ea47bebf6650",
+      "fields": [
+        {"ty": "i32", "rule": "any"},
+        {"ty": "i32", "rule": "any"}
+      ],
+      "accounts": [
+        {"acc": "vault"},
+        {"acc": "new_signer"},
+        {"acc": "fixed", "key": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6"},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "11111111111111111111111111111111"},
+        {"acc": "fixed", "key": "SysvarRent111111111111111111111111111111111"},
+        {"acc": "fixed", "key": "D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6"},
+        {"acc": "fixed", "key": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"}
+      ],
+      "extra_accounts": 0,
+      "needs_owner": true
+    },
+    {
+      "name": "dlmm_add_usdc",
+      "about": "Meteora DLMM add_liquidity_by_strategy2, one-sided in USDC (amount_x must be 0): at most 200 USDC, from the vault's own token accounts, active bin may move at most 25 bins (1%) before it lands. Owner co-signs. Trailing: the position's bin arrays.",
+      "program": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "prefix": "03dd95da6f8d76d5",
+      "fields": [
+        {"ty": "u64", "rule": "fixed", "hex": "0000000000000000"},
+        {"ty": "u64", "rule": "at_most", "max": "200000000"},
+        {"ty": "i32", "rule": "any"},
+        {"ty": "u32", "rule": "at_most", "max": "25"},
+        {"ty": "i32", "rule": "any"},
+        {"ty": "i32", "rule": "any"},
+        {"ty": "u8", "rule": "any"},
+        {"ty": "bytes64", "rule": "any"},
+        {"ty": "bytes8", "rule": "fixed", "hex": "0200000000000100"}
+      ],
+      "accounts": [
+        {"acc": "any"},
+        {"acc": "fixed", "key": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6"},
+        {"acc": "any"},
+        {"acc": "vault_ata", "mint_at": 7, "program_at": 10},
+        {"acc": "vault_ata", "mint_at": 8, "program_at": 11},
+        {"acc": "fixed", "key": "EYj9xKw6ZszwpyNibHY7JD5o3QgTVrSdcBp1fMJhrR9o"},
+        {"acc": "fixed", "key": "CoaxzEh8p5YyGLcj36Eo3cUThVJxeKCs7qvLAGDYwBcz"},
+        {"acc": "fixed", "key": "So11111111111111111111111111111111111111112"},
+        {"acc": "fixed", "key": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6"},
+        {"acc": "fixed", "key": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"}
+      ],
+      "extra_accounts": 3,
+      "needs_owner": true,
+      "spends": [{"field": 1, "key": "sol:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"}]
+    },
+    {
+      "name": "dlmm_claim",
+      "about": "Meteora DLMM claim_fee2: the vault (the position's owner) sweeps its fees into its own SOL and USDC token accounts. No owner signature needed.",
+      "program": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "prefix": "70bf65ab1c907fbb",
+      "fields": [
+        {"ty": "i32", "rule": "any"},
+        {"ty": "i32", "rule": "any"},
+        {"ty": "bytes8", "rule": "fixed", "hex": "0200000000000100"}
+      ],
+      "accounts": [
+        {"acc": "fixed", "key": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6"},
+        {"acc": "any"},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "EYj9xKw6ZszwpyNibHY7JD5o3QgTVrSdcBp1fMJhrR9o"},
+        {"acc": "fixed", "key": "CoaxzEh8p5YyGLcj36Eo3cUThVJxeKCs7qvLAGDYwBcz"},
+        {"acc": "vault_ata", "mint_at": 7, "program_at": 9},
+        {"acc": "vault_ata", "mint_at": 8, "program_at": 10},
+        {"acc": "fixed", "key": "So11111111111111111111111111111111111111112"},
+        {"acc": "fixed", "key": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"},
+        {"acc": "fixed", "key": "D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6"},
+        {"acc": "fixed", "key": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"}
+      ],
+      "extra_accounts": 3
+    },
+    {
+      "name": "dlmm_remove",
+      "about": "Meteora DLMM remove_liquidity_by_range2: the vault withdraws from its own position into its own token accounts.",
+      "program": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "prefix": "cc02c391359191cd",
+      "fields": [
+        {"ty": "i32", "rule": "any"},
+        {"ty": "i32", "rule": "any"},
+        {"ty": "u16", "rule": "any"},
+        {"ty": "bytes8", "rule": "fixed", "hex": "0200000000000100"}
+      ],
+      "accounts": [
+        {"acc": "any"},
+        {"acc": "fixed", "key": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6"},
+        {"acc": "any"},
+        {"acc": "vault_ata", "mint_at": 7, "program_at": 10},
+        {"acc": "vault_ata", "mint_at": 8, "program_at": 11},
+        {"acc": "fixed", "key": "EYj9xKw6ZszwpyNibHY7JD5o3QgTVrSdcBp1fMJhrR9o"},
+        {"acc": "fixed", "key": "CoaxzEh8p5YyGLcj36Eo3cUThVJxeKCs7qvLAGDYwBcz"},
+        {"acc": "fixed", "key": "So11111111111111111111111111111111111111112"},
+        {"acc": "fixed", "key": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"},
+        {"acc": "fixed", "key": "D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6"},
+        {"acc": "fixed", "key": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"}
+      ],
+      "extra_accounts": 3
+    },
+    {
+      "name": "dlmm_close",
+      "about": "Meteora DLMM close_position_if_empty: the vault closes its own empty position; the rent comes back to the vault.",
+      "program": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "prefix": "3b7cd4765b986e9d",
+      "fields": [],
+      "accounts": [
+        {"acc": "any"},
+        {"acc": "vault"},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6"},
+        {"acc": "fixed", "key": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"}
+      ],
+      "extra_accounts": 0
+    },
+    {
+      "name": "dlmm_close2",
+      "about": "Meteora DLMM close_position2: same as dlmm_close, for keepers that call it directly.",
+      "program": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "prefix": "ae5a2373ba2893e2",
+      "fields": [],
+      "accounts": [
+        {"acc": "any"},
+        {"acc": "vault"},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6"},
+        {"acc": "fixed", "key": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"}
+      ],
+      "extra_accounts": 0
+    },
+    {
+      "name": "pump_buy",
+      "about": "pump.fun buy (classic, SOL-priced coins on their curve): coin units out >= max_sol_cost x {floor_per_lamport}, max_sol_cost <= {max_lamports}; the coin lands in the vault's own token account. Trailing: 2 accounts from the 2026-09 upgrade.",
+      "program": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+      "prefix": "66063d1201daebea",
+      "fields": [
+        {"ty": "u64", "rule": "at_least", "of": 1, "num": "{floor_per_lamport}", "den": "1"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_lamports}"},
+        {"ty": "bool", "rule": "any"},
+        {"ty": "bool", "rule": "fixed", "hex": "00"}
+      ],
+      "accounts": [
+        {"acc": "any"}, {"acc": "any"},
+        {"acc": "fixed", "key": "{mint}"},
+        {"acc": "any"}, {"acc": "any"},
+        {"acc": "vault_ata", "mint_at": 2, "program_at": 8},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "11111111111111111111111111111111"},
+        {"acc": "any"}, {"acc": "any"}, {"acc": "any"},
+        {"acc": "fixed", "key": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"},
+        {"acc": "any"}, {"acc": "any"}, {"acc": "any"}, {"acc": "any"}
+      ],
+      "extra_accounts": 2,
+      "spends": [{"field": 1, "key": "sol:SOL"}]
+    },
+    {
+      "name": "pump_sell",
+      "about": "pump.fun sell (classic): at most {max_units} coin units from the vault's own token account, SOL out >= amount x {floor_num} / {floor_den} lamports, paid to the vault itself. Trailing: 2 accounts from the 2026-09 upgrade.",
+      "program": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+      "prefix": "33e685a4017f83ad",
+      "fields": [
+        {"ty": "u64", "rule": "at_most", "max": "{max_units}"},
+        {"ty": "u64", "rule": "at_least", "of": 0, "num": "{floor_num}", "den": "{floor_den}"}
+      ],
+      "accounts": [
+        {"acc": "any"}, {"acc": "any"},
+        {"acc": "fixed", "key": "{mint}"},
+        {"acc": "any"}, {"acc": "any"},
+        {"acc": "vault_ata", "mint_at": 2, "program_at": 9},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "11111111111111111111111111111111"},
+        {"acc": "any"}, {"acc": "any"}, {"acc": "any"},
+        {"acc": "fixed", "key": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"},
+        {"acc": "any"}, {"acc": "any"}
+      ],
+      "extra_accounts": 2,
+      "spends": [{"field": 0, "key": "sol:{mint}"}]
+    }
+  ]
+}
