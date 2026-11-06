@@ -563,6 +563,85 @@
         "quoter": "0x8dc178efb8111bb0973dd9d722ebeff267c98f94",
         "how": "Universal Router execute(commands, inputs, deadline): command 0x10 = V4_SWAP; its input = abi.encode(actions, params) with actions 0x06 SWAP_EXACT_IN_SINGLE, 0x0c SETTLE_ALL, 0x0f TAKE_ALL (TAKE_ALL pays the caller: the vault). Leaves, depth first: 0 command, 1 actions, 2-6 pool key, 7 zeroForOne, 8 amountIn, 9 minimum out, 10 hookData, 11/12 settle currency/max (= 8), 13/14 take currency/min (= 9), 15 deadline, 16 ETH value (= 8, ETH-in swaps only).",
         "pool": "ETHNVDA's own pool: ETH/NVDA, fee 1%, tick spacing 200, no hook (read from the pair token's poolKey() on a fork, 2026-11-06)"
+      },
+      "basket": "StonkBrokers has no basket or fund contract to deposit into: its 'Investment accounts' (stonkbrokers.io/integration/invest: StonkBroker Accounts NFT 0x0ef148BC47B18E5C93314Da76931860175d4bC2E, open() / openFor(to)) are per-user ERC-6551 wallets, whose trades go through executeCall(to, value, data) with arbitrary calldata (not templatable without letting a caller pick the call). The flows' basket is therefore the ETHNVDA pair token (pairtoken_ethnvda_zap_eth: ETH + NVDA in one Uniswap v4 position) or Smart LP (sdAMZN-FR, USDG in). Checked 2026-11-06.",
+      "ladder_flow": {
+        "about": "The take-profit ladder as remote flow nodes (contracts/vault/src/remote.rs), as run in contracts/sandbox/tests/ladder_fork_robinhood.rs: node 0 buys NVDA with ETH and splits it 3,333 bps to each rung; rungs 1-3 sell at NVDA >= $270 / $360 / $540 (1.5x / 2x / 3x of $180, Pyth feed a470c4ac46f44b547b2cba52338f311fb642b79375ce5f0cfd5cb5b99227b852 via oracle_setup name 'nvda'); each sale's ETH goes to node 4, which zaps it into ETHNVDA. Needs approve_nvda_permit2 and permit2_nvda_universal_router once.",
+        "nodes": [
+          {
+            "input": "evm:4663:eth",
+            "template": "v4_swap_eth_nvda",
+            "amount_leaf": 8,
+            "min_leaf": 9,
+            "deadline_leaf": 15,
+            "out": "evm:4663:0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec",
+            "max_out_per_in": "20000000000000000000000000",
+            "when": "now",
+            "next": [
+              [
+                1,
+                3333
+              ],
+              [
+                2,
+                3333
+              ],
+              [
+                3,
+                3333
+              ]
+            ]
+          },
+          {
+            "input": "evm:4663:0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec",
+            "template": "v4_swap_nvda_eth",
+            "amount_leaf": 8,
+            "min_leaf": 9,
+            "deadline_leaf": 15,
+            "out": "evm:4663:eth",
+            "max_out_per_in": "200000000000000000000000",
+            "when": "price_above 270e24 (feed nvda)",
+            "next": [
+              [
+                4,
+                10000
+              ]
+            ]
+          },
+          {
+            "input": "evm:4663:0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec",
+            "template": "v4_swap_nvda_eth",
+            "same_as": 1,
+            "when": "price_above 360e24",
+            "next": [
+              [
+                4,
+                10000
+              ]
+            ]
+          },
+          {
+            "input": "evm:4663:0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec",
+            "template": "v4_swap_nvda_eth",
+            "same_as": 1,
+            "when": "price_above 540e24",
+            "next": [
+              [
+                4,
+                10000
+              ]
+            ]
+          },
+          {
+            "input": "evm:4663:eth",
+            "template": "pairtoken_ethnvda_zap_eth",
+            "amount_leaf": 1,
+            "min_leaf": 2,
+            "out": "evm:4663:0x0d142f0a847838f933114869f6f63bd618bedca8",
+            "max_out_per_in": "3000000000000000000000000",
+            "when": "now"
+          }
+        ]
       }
     }
   }
