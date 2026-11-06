@@ -393,6 +393,8 @@ pub(crate) enum Read {
     Close { to: AccountId, tokens: Vec<AccountId>, intents: Vec<String> },
     /// Settling fees: the vault's balance of the token.
     Settle { token: AccountId },
+    /// A Solana template transaction with a market field: the oracle answered.
+    SolTxPrices(String),
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
@@ -550,6 +552,7 @@ impl Brain {
             Read::RemotePrices(b) => t.on_remote_prices(b),
             Read::Close { to, tokens, intents } => t.on_close(to, tokens, intents, &self.factory),
             Read::Settle { token } => t.on_settle(token),
+            Read::SolTxPrices(m) => t.on_sol_tx_prices(m),
         };
         t.finish(r);
     }
