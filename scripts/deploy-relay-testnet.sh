@@ -284,7 +284,8 @@ if want check; then
   echo "  factory.get_vault(owner): $(rpc view "$FACTORY" get_vault "{\"owner\":\"$OWNER\"}")"
   echo "  vault.brain_id:           $(rpc view "$VAULT" brain_id)"
   echo "  brain record (cost, paid): $(rpc view "$BRAIN" get_storage "{\"vault\":\"$VAULT\"}")"
-  echo "  brain allocated NEAR:     $(rpc view "$BRAIN" get_allocated "{\"vault\":\"$VAULT\",\"token\":\"near\"}")"
+  alloc_args='{"vault":"'"$VAULT"'","token":"near"}'
+  echo "  brain allocated NEAR:     $(rpc view "$BRAIN" get_allocated "$alloc_args")"
   echo "  board.get_source:         $(rpc view "$BOARD" get_source)"
   for f in "near $NEAR_ID" "usdc $USDC_ID" "eth $ETH_ID" "sol $SOL_ID" "nvda $NVDA_ID"; do
     set -- $f
