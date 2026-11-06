@@ -118,6 +118,7 @@ set -a; . ./.env; set +a
 npm run flows -- --once            # dry run: prints what is due, sends nothing
 npm run flows -- --send --once     # one real round
 npm run flows -- --send            # keep running (every 30 s; --tick <s> to change)
+npm run flows -- --send --board <board>   # also post the board prices a vault reads, just before its step
 ```
 
 Check: the dry run's last line reads `1 of N vault(s) name this keeper, 0 step(s) sent (dry run)` and lists your due steps. After `--send`, the steps show up on https://testnet.nearblocks.io/address/<vault>, and the brain's `get_vault` shows the nodes' `runs` going up and `inbox` going down. The key comes from `KEEPER_PRIVATE_KEY` or `~/.near-credentials/testnet/$KEEPER_ACCOUNT_ID.json`.

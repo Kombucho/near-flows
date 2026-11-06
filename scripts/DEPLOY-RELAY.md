@@ -48,7 +48,7 @@ The vault reads every feed (`near usdc eth sol nvda`) from `nf-board-$SUFFIX`, e
 
 A Chainlink price id is the Wormhole chain id (2 bytes), 10 zero bytes, then the feed's proxy address. Anyone can read off the id where a price comes from, and the same id works on an attested board and an Evm board.
 
-Run both from `scripts/keeper` with `KEEPER_ACCOUNT_ID=nf-keeper-$SUFFIX.testnet`. The vault wants prices under 60 s old, so repeat them about every 30 s, e.g. `while true; npm run pyth -- --board ...; npm run chainlink-price -- --board ...; sleep 25; done`. Gas is about 2-4 Tgas per push. `PYTH_API_KEY` is read from the environment: load it from the repo's `.env` (`node --env-file`, or `set -a; . ../../.env; set +a`). Never print it or commit it. `--dry` sends nothing. `chainlink-price --dry` without `--board` only reads the feeds and needs no NEAR account. `STEP=check` shows each board price.
+Run both from `scripts/keeper` with `KEEPER_ACCOUNT_ID=nf-keeper-$SUFFIX.testnet`. The vault wants prices under 60 s old. You don't need to loop them: `SUFFIX=$SUFFIX scripts/keeper/live.sh` runs the keeper with `--board`, which posts a vault's board prices just before its step goes (nothing due, nothing posted). Gas is about 2-4 Tgas per push. `PYTH_API_KEY` is read from the environment: load it from the repo's `.env` (`node --env-file`, or `set -a; . ../../.env; set +a`). Never print it or commit it. `--dry` sends nothing. `chainlink-price --dry` without `--board` only reads the feeds and needs no NEAR account. `STEP=check` shows each board price.
 
 The demo flow has no market floors on purpose: testnet Rhea pools don't track real prices (1 wNEAR buys about 1.24 testnet USDT), so a floor would refuse every swap.
 
