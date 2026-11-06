@@ -7,15 +7,11 @@
 //! Needs Foundry (anvil, cast). Skipped when anvil isn't installed.
 //! BASE_RPC overrides the public Base endpoint.
 
-use std::process::{Child, Command, Stdio};
+mod common;
 
+use common::{num, signed, Fork, ANVIL_KEY};
 use near_workspaces::types::NearToken;
 use serde_json::{json, Value};
-
-fn wasm(name: &str) -> Vec<u8> {
-    let path = format!("{}/../target/near/{name}/{name}.wasm", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read(&path).unwrap_or_else(|_| panic!("missing {path}: run `make build` first"))
-}
 
 // Base mainnet: Uniswap QuoterV2, WETH, USDC, Aave's aUSDC (the router and pool are in the templates).
 const QUOTER: &str = "0x3d4e44eb1374240ce5f1b871ab261cd16335b76a";
@@ -23,87 +19,29 @@ const AUSDC: &str = "0x4e65fe4dba92790696d040ac24aa414708f5c0ab";
 const WETH: &str = "0x4200000000000000000000000000000000000006";
 const USDC: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
 const GWEI: u128 = 1_000_000_000;
-const PORT: u16 = 8548;
-/// anvil's first test account (a well-known key, funded on every anvil chain).
-const ANVIL_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-
-fn foundry(bin: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let p = format!("{home}/.foundry/bin/{bin}");
-    if std::path::Path::new(&p).exists() { p } else { bin.to_string() }
-}
-
-struct Anvil(Child);
-impl Drop for Anvil {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-    }
-}
-
-fn rpc() -> String {
-    format!("http://127.0.0.1:{PORT}")
-}
-
-/// Run `cast`, return trimmed stdout (panics with stderr on failure).
-fn cast(args: &[&str]) -> String {
-    let out = Command::new(foundry("cast")).args(args).args(["--rpc-url", &rpc()]).output().expect("cast");
-    assert!(out.status.success(), "cast {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
-/// The first number cast prints ("222419608 [2.224e8]" -> 222419608).
-fn num(s: &str) -> u128 {
-    s.split_whitespace().next().unwrap().parse().unwrap()
-}
-
-fn balance(token: &str, who: &str) -> u128 {
-    num(&cast(&["call", token, "balanceOf(address)(uint256)", who]))
-}
-
-/// Broadcast a signed transaction; returns the receipt's status (1 = success).
-fn send_raw(raw: &str) -> u64 {
-    let hash: String = serde_json::from_str(&cast(&["rpc", "eth_sendRawTransaction", raw])).unwrap();
-    // `cast receipt` waits until the transaction is mined.
-    let receipt: Value = serde_json::from_str(&cast(&["receipt", &hash, "--json"])).unwrap();
-    u64::from_str_radix(receipt["status"].as_str().unwrap().trim_start_matches("0x"), 16).unwrap()
-}
-
-fn signed(r: &near_workspaces::result::ExecutionFinalResult) -> String {
-    let log = r.logs().iter().find(|l| l.contains(r#""event":"evm_signed""#)).unwrap_or_else(|| panic!("not signed: {:?} {:?}", r.logs(), r.failures())).to_string();
-    let v: Value = serde_json::from_str(log.trim_start_matches("EVENT_JSON:")).unwrap();
-    v["data"][0]["raw"].as_str().unwrap().to_string()
-}
 
 #[tokio::test]
 async fn the_vault_runs_uniswap_and_aave_templates_on_a_base_fork() -> anyhow::Result<()> {
-    if Command::new(foundry("anvil")).arg("--version").output().is_err() {
-        println!("SKIPPED: install Foundry (anvil) to run the Base fork test");
-        return Ok(());
-    }
     let url = std::env::var("BASE_RPC").unwrap_or_else(|_| "https://mainnet.base.org".into());
-    let _anvil = Anvil(Command::new(foundry("anvil")).args(["--fork-url", &url, "--port", &PORT.to_string(), "--silent"]).stdout(Stdio::null()).spawn()?);
-    for _ in 0..60 {
-        if Command::new(foundry("cast")).args(["chain-id", "--rpc-url", &rpc()]).output().map_or(false, |o| o.status.success()) {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
+    let Some(fork) = Fork::start(&url, 8548).await else { return Ok(()) };
+    let cast = |a: &[&str]| fork.cast(a);
+    let balance = |t: &str, w: &str| fork.balance(t, w);
+    let send_raw = |raw: &str| fork.send_raw(raw);
     assert_eq!(cast(&["chain-id"]), "8453", "a fork of Base mainnet");
     println!("Base fork at block {}", cast(&["block-number"]));
 
     // NEAR side: Alice's vault, set up for Base with the test signer.
     let worker = near_workspaces::sandbox().await?;
     let (alice, keeper) = (worker.dev_create_account().await?, worker.dev_create_account().await?);
-    let signer = worker.dev_deploy(&wasm("mock_signer")).await?;
-    let vault = worker.dev_deploy(&wasm("vault")).await?;
+    let signer = worker.dev_deploy(&common::wasm("mock_signer")).await?;
+    let vault = worker.dev_deploy(&common::wasm("vault")).await?;
     vault.call("new").args_json(json!({"owner": alice.id(), "keeper": keeper.id()})).transact().await?.into_result()?;
     alice.call(vault.id(), "evm_setup").args_json(json!({"signer": signer.id(), "chain_id": 8453u64,
         "max_fee": (2 * GWEI).to_string(), "max_tip": (GWEI / 10).to_string(), "gas_cap": 500_000u64})).max_gas().transact().await?.into_result()?;
     let me = vault.view("get_evm").await?.json::<Value>()?["address"].as_str().unwrap().to_string();
     println!("vault's EVM address on Base: {me}");
     // The node library's Base templates, exactly as published.
-    let lib: Value = serde_json::from_str(&std::fs::read_to_string(format!("{}/../../nodes/evm-templates.json", env!("CARGO_MANIFEST_DIR")))?)?;
-    for t in lib["chains"]["base"]["templates"].as_array().unwrap() {
+    for t in common::templates("base") {
         alice.call(vault.id(), "evm_template").args_json(json!({"template": t})).transact().await?.into_result()?;
     }
 

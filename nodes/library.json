@@ -437,12 +437,12 @@
     },
     {
       "id": "evm_template_call",
-      "label": "Any EVM call from a template (Uniswap swap, Aave supply/withdraw, approvals)",
+      "label": "Any EVM call from a template (Uniswap, Aave, StonkBrokers Smart LP, approvals)",
       "kind": "vault action: the vault BUILDS the call from an owner-set template (contract + function + a rule per argument), then MPC-signs it (secp256k1)",
-      "setup": "evm_setup(signer, chain_id, max_fee, max_tip, gas_cap); evm_template({name, to, function, args: [fixed|vault|at_most|floor], spends}) for each node; ready-made Base templates in nodes/evm-templates.json",
+      "setup": "evm_setup(signer, chain_id, max_fee, max_tip, gas_cap); evm_template({name, to, function, args: [fixed|vault|at_most|floor], spends}) for each node; ready-made Base and Robinhood Chain templates in nodes/evm-templates.json",
       "call": "evm_call({name, values, nonce, max_fee, max_tip, gas}) -> event evm_signed {raw}; broadcast with eth_sendRawTransaction",
       "guards": "static functions only; addresses are fixed or the vault itself (no rule lets a caller pick one); amounts capped; minimums = max(quote, amount x num / den); spending limit 'evm:<chain>:<token>'; gas caps; low-s",
-      "tested": "sandbox/tests/evm.rs (templates vs the viem-checked encoder, 13 refusals); sandbox/tests/evm_fork.rs EXECUTED on a Base mainnet fork: Uniswap 0.1 WETH -> ~222 USDC, Aave supply 445 USDC -> aUSDC and withdraw back. Earlier LIVE: real MPC-signed Sepolia swap (pre-template code)"
+      "tested": "sandbox/tests/evm.rs (templates vs the viem-checked encoder, 13 refusals); sandbox/tests/evm_fork.rs EXECUTED on a Base mainnet fork: Uniswap 0.1 WETH -> ~222 USDC, Aave supply 445 USDC -> aUSDC and withdraw back. Earlier LIVE: real MPC-signed Sepolia swap (pre-template code); sandbox/tests/evm_fork_robinhood.rs EXECUTED on a Robinhood Chain fork: StonkBrokers Smart LP sdAMZN-FR zapDeposit 50 USDG -> 49.67 shares, zapWithdraw -> 49.80 USDG (0.4% round trip)"
     }
   ]
 }
