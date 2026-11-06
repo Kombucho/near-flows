@@ -23,7 +23,8 @@ test:
 	cd contracts && cargo test -p math -p engine
 	cd contracts && cargo test -p market
 	cd contracts && cargo test -p bazaar
-	cd contracts && cargo test -p flow -p solguard -p priceboard
+	# solguard's template tests build their messages with its testkit feature.
+	cd contracts && cargo test -p flow -p solguard -p priceboard --features solguard/testkit
 	cd contracts && cargo test -p relay -p brain
 
 # Integration tests: real wasm in a local NEAR node (downloads the sandbox binary on first run).
