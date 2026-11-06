@@ -10,3 +10,7 @@ submission*.json
 .DS_Store
 contracts/sim-out/
 contracts/sandbox/protocols/*.wasm
+
+# agent worktrees and local fork caches
+.claude/worktrees/
+.surfpool/
