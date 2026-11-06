@@ -20,6 +20,7 @@
 //!   fee; amount in within the limit; and the least it can receive after
 //!   slippage is at least the owner's floor.
 
+mod jupiter;
 mod message;
 mod pda;
 pub mod template;
@@ -190,10 +191,10 @@ fn check_jupiter(m: &Message, ix: &Instruction, p: &SwapPolicy) -> Result<Verdic
         return Err(bad("too short"));
     }
     let disc: [u8; 8] = ix.data[..8].try_into().unwrap();
-    let layout = if disc == discriminator("route") {
-        &ROUTE
+    let (layout, has_id) = if disc == discriminator("route") {
+        (&ROUTE, false)
     } else if disc == discriminator("shared_accounts_route") {
-        &SHARED_ROUTE
+        (&SHARED_ROUTE, true)
     } else {
         return Err(bad("only route and shared_accounts_route (exact-in swaps)"));
     };
@@ -235,12 +236,10 @@ fn check_jupiter(m: &Message, ix: &Instruction, p: &SwapPolicy) -> Result<Verdic
     if acc(layout.platform_fee)? != jup {
         return Err(bad("no platform fee account allowed"));
     }
-    // The last 19 bytes: in_amount u64, quoted_out_amount u64, slippage_bps u16, platform_fee_bps u8.
-    let t = &ix.data[ix.data.len() - 19..];
-    let in_amount = u64::from_le_bytes(t[0..8].try_into().unwrap());
-    let quoted_out = u64::from_le_bytes(t[8..16].try_into().unwrap());
-    let slippage_bps = u16::from_le_bytes(t[16..18].try_into().unwrap());
-    let fee_bps = t[18];
+    // The amounts right after the route plan (decoded step by step), with nothing after them:
+    // Anchor ignores trailing bytes, so the last 19 bytes could be a decoy.
+    let jupiter::RouteArgs { in_amount, quoted_out, slippage_bps, platform_fee_bps: fee_bps } =
+        jupiter::route_args(&ix.data[8..], has_id).map_err(Refusal::Swap)?;
     if fee_bps != 0 {
         return Err(bad("no platform fee"));
     }
