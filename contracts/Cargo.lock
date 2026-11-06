@@ -2819,6 +2819,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "priceboard"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "k256",
+ "math",
+ "near-sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "primeorder"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

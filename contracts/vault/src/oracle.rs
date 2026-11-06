@@ -15,6 +15,14 @@
 //! - confirmed: a second reading (Pyth's EMA price, or another Pyth-compatible
 //!   contract) within `tolerance_bps`: a price that just jumped or got stuck fails.
 //! No price, no trade: there is no fallback to anyone's word.
+//!
+//! Coins Pyth doesn't list (fresh pump.fun memecoins) come from a price board
+//! (contracts/priceboard), which answers the same two reads, so a feed simply
+//! names it as `contract` (price id = the coin's Solana mint, hex) and, ideally,
+//! the other kind of board as `Backup::Other`:
+//! - an attested board: k of n keepers sign Jupiter's price. Trusts the attesters.
+//! - a Wormhole board: guardians attest the coin's bonding curve on Solana via
+//!   Wormhole Queries, the board checks their signatures. Trusts Wormhole's guardians.
 
 use near_sdk::json_types::{I64, U64};
 use near_sdk::{env, near, require, AccountId, Gas, NearToken, Promise};
@@ -246,5 +254,19 @@ mod tests {
         // Positive exponents and huge ones don't overflow silently.
         assert_eq!(usd_e18(&p(5, 2)).unwrap(), 500 * E18);
         assert!(usd_e18(&p(i64::MAX, 30)).is_none());
+    }
+
+    #[test]
+    fn memecoin_floors_keep_their_digits() {
+        // A pump.fun coin at $5.1204e-8 (a price board writes 51204 x 1e-12), bought with NEAR at $2.00.
+        let meme = usd_e18(&p(51_204, -12)).unwrap();
+        let near = usd_e18(&p(200_000_000, -8)).unwrap();
+        assert_eq!(meme, 51_204_000_000);
+        let buy = Market { sell: "near".into(), buy: "meme".into(), dec_in: 24, dec_out: 6, slippage_bps: 100 };
+        // 1 NEAR -> at least 2 / 5.1204e-8 x 0.99 = 38,668,853.99 coins: 38668853995781 base units (Python fractions).
+        assert_eq!(market_min(&buy, 10u128.pow(24), near, meme), 38_668_853_995_781);
+        // And selling 1 billion coins back: 1e9 x 5.1204e-8 / 2 x 0.99 = 25.345980 NEAR (exact).
+        let sell = Market { sell: "meme".into(), buy: "near".into(), dec_in: 6, dec_out: 24, slippage_bps: 100 };
+        assert_eq!(market_min(&sell, 10u128.pow(15), meme, near), 25_345_980_000_000_000_000_000_000);
     }
 }
