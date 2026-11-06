@@ -3,7 +3,7 @@
 // Used by the sandbox tests contracts/sandbox/tests/sol_fork*.rs (it prints JSON).
 //
 //   tsx src/fork-sol.ts pump-info <mint>...                 which coins are still on their bonding curve
-//   tsx src/fork-sol.ts pump-buy <vault> <mint> <lamports> <slippage%>
+//   tsx src/fork-sol.ts pump-buy <vault> <mint> <lamports> <slippage%> [exact]
 //   tsx src/fork-sol.ts pump-sell <vault> <mint> <units> <slippage%>
 //   tsx src/fork-sol.ts amm-info <mint>...                  a graduated coin's canonical pump AMM pool
 //   tsx src/fork-sol.ts amm-buy <vault> <mint> <lamports> <slippage%>
@@ -12,7 +12,7 @@
 //   tsx src/fork-sol.ts dlmm-open <vault> <owner-pubkey|-> <pool> <amountY> <bins>
 //   tsx src/fork-sol.ts dlmm-swap <trader-secret-b58> <pool> <lamports>   a trader sells SOL (signed and sent here)
 //   tsx src/fork-sol.ts dlmm-position <pool> <position>
-//   tsx src/fork-sol.ts dlmm-claim <vault> <pool> <position>
+//   tsx src/fork-sol.ts dlmm-claim <vault> <pool> <position> [unwrap]
 //   tsx src/fork-sol.ts dlmm-close <vault> <pool> <position>
 //   tsx src/fork-sol.ts send <message-b64> <vault-sig-hex> [signer-secret-b58 ...]
 //   tsx src/fork-sol.ts swap-key <message-b64> <from> <to>   a tampered copy (refusal tests)
@@ -21,7 +21,7 @@
 // SOLANA_RPC: the fork (default http://127.0.0.1:8899).
 
 import { Connection, Keypair, Message, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
-import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { createCloseAccountInstruction, getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import BN from "bn.js";
 import bs58 from "bs58";
 import { createRequire } from "node:module";
@@ -96,7 +96,9 @@ if (cmd === "pump-info") {
   }
   out(res);
 } else if (cmd === "pump-buy") {
-  const [vault, mint, lamports, slippage] = args;
+  // Default: buy what `lamports` quotes, paying up to slippage% more. "exact": pay at most
+  // `lamports` exactly (a flow node must spend exactly its input) and take slippage% fewer coins.
+  const [vault, mint, lamports, slippage, mode] = args;
   const user = new PublicKey(vault), coin = new PublicKey(mint);
   const sdk = new OnlinePumpSdk(conn);
   const global = await sdk.fetchGlobal();
@@ -104,9 +106,11 @@ if (cmd === "pump-info") {
   const tokenProgram = (await conn.getAccountInfo(coin))!.owner;
   const state = await sdk.fetchBuyState(coin, user, tokenProgram);
   const mintInfo = await conn.getTokenSupply(coin);
-  const amount = getBuyTokenAmountFromSolAmount({ global, feeConfig, mintSupply: new BN(mintInfo.value.amount), bondingCurve: state.bondingCurve, amount: new BN(lamports) } as any);
+  const quoted: BN = getBuyTokenAmountFromSolAmount({ global, feeConfig, mintSupply: new BN(mintInfo.value.amount), bondingCurve: state.bondingCurve, amount: new BN(lamports) } as any);
+  const exact = mode === "exact";
+  const amount = exact ? quoted.muln(100 - Number(slippage)).divn(100) : quoted;
   const ixs = await PUMP_SDK.buyInstructions({ global, bondingCurveAccountInfo: state.bondingCurveAccountInfo, bondingCurve: state.bondingCurve,
-    associatedUserAccountInfo: state.associatedUserAccountInfo, mint: coin, user, amount, solAmount: new BN(lamports), slippage: Number(slippage), tokenProgram });
+    associatedUserAccountInfo: state.associatedUserAccountInfo, mint: coin, user, amount, solAmount: new BN(lamports), slippage: exact ? 0 : Number(slippage), tokenProgram });
   out({ message: await message(user, ixs), tokens: amount.toString(), tokenProgram: tokenProgram.toBase58(), ata: getAssociatedTokenAddressSync(coin, user, true, tokenProgram).toBase58(), ixs: describe(ixs) });
 } else if (cmd === "pump-sell") {
   // Sell `amount` coin units back to the curve; SOL out lands in the vault itself.
@@ -211,6 +215,12 @@ if (cmd === "pump-info") {
   const user = new PublicKey(vault), d = await dlmm(pool);
   const txs: Transaction[] = await d.claimSwapFee({ owner: user, position: await d.getPosition(new PublicKey(position)) });
   const ixs = await trim(txs.flatMap((t) => t.instructions));
+  // "unwrap": close the vault's wSOL account in the same transaction, so the SOL fees land as
+  // plain SOL in the vault (what a pump.fun buy spends). Its rent comes back to the vault too.
+  if (args[3] === "unwrap") {
+    const wsol = new PublicKey("So11111111111111111111111111111111111111112");
+    ixs.push(createCloseAccountInstruction(getAssociatedTokenAddressSync(wsol, user, true), user, user));
+  }
   out({ message: await message(user, ixs), ixs: describe(ixs) });
 } else if (cmd === "dlmm-close") {
   // Withdraw everything, claim the fees, close the position (its rent back to the vault).
