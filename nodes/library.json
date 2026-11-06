@@ -420,7 +420,7 @@
     {
       "id": "intents_swap",
       "label": "Swap via NEAR Intents",
-      "kind": "vault action (not a recipe): the vault builds and MPC-signs its own token_diff intent",
+      "kind": "vault action (not a recipe), OWNER ONLY: the vault builds and MPC-signs its own token_diff intent",
       "setup": "intents_setup(verifier, signer) once; intents_allow({token_in, token_out, max_in, floor_out, floor_per_in})",
       "call": "intents_sign_swap({token_in, token_out, amount_in, min_out, valid_secs}) -> event intents_signed {signed}; a solver matches and submits execute_intents",
       "guards": "only allowed pairs; amount <= max_in and the spending limit 'intents:<token>'; minimum = max(min_out, owner floor); salt read from the verifier; withdrawals only to the vault",
@@ -429,7 +429,7 @@
     {
       "id": "solana_jupiter_swap",
       "label": "Swap on Solana via Jupiter",
-      "kind": "vault action: the vault checks every byte of a Jupiter message, then MPC-signs it (Ed25519)",
+      "kind": "vault action, OWNER ONLY: the vault checks every byte of a Jupiter message, then MPC-signs it (Ed25519)",
       "setup": "sol_setup(signer, max_cu_price, max_cu_limit); sol_allow({in_mint, out_mint, max_in, min_out_per_in_e12})",
       "call": "sol_sign_swap({message}) -> event sol_signed {signature}; helper: scripts/keeper `npm run jupiter` (simulates; --broadcast to send)",
       "guards": "solguard: one signer (the vault), no lookup tables, only ComputeBudget/ATA/Jupiter v1 routes, proceeds to the vault's own accounts, no platform fee, floor after slippage, size and fee caps",
@@ -438,7 +438,7 @@
     {
       "id": "evm_template_call",
       "label": "Any EVM call from a template (Uniswap v3/v4, Aave, StonkBrokers Smart LP and pair tokens, Permit2, approvals)",
-      "kind": "vault action: the vault BUILDS the call from an owner-set template (contract + function + a rule per argument), then MPC-signs it (secp256k1)",
+      "kind": "vault action, OWNER ONLY (a keeper signs on other chains only through remote flow nodes): the vault BUILDS the call from an owner-set template (contract + function + a rule per argument), then MPC-signs it (secp256k1)",
       "setup": "evm_setup(signer, chain_id, max_fee, max_tip, gas_cap); evm_template({name, to, function, args: rule tree [fixed|vault|at_most|floor|same|bytes|encoded|tuple|list], value, spends}); ready-made Base and Robinhood Chain templates in nodes/evm-templates.json",
       "call": "evm_call({name, values, nonce, max_fee, max_tip, gas}) -> event evm_signed {raw}; broadcast with eth_sendRawTransaction",
       "guards": "addresses are fixed or the vault itself (no rule lets a caller pick one); bytes fixed or nested encodings with the same rules; amounts capped; minimums = max(quote, amount x num / den); repeated amounts and attached ETH tied with 'same'; spending limits 'evm:<chain>:<token>' and 'evm:<chain>:eth'; gas caps; low-s",
