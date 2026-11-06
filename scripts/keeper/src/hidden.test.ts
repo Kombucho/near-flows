@@ -8,7 +8,10 @@ const salt = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
 test("the keeper's fingerprint matches the vault's, byte for byte", () => {
   // Same value pinned in contracts/vault/src/tests.rs, computed there by the vault's own code.
-  assert.equal(fingerprint(node, salt), "996e6f838080503aa9b3851e34d65d50c9aea0a4f0d21f941e68f9fc9f6008f2");
+  assert.equal(fingerprint(node, salt), "ad13adedfaed79107498ceb3bb79901e8dff115529609033291981e71bd0d36b");
+  // A remote node (an EVM ladder rung), every remote field set.
+  const remote: Node = JSON.parse(readFileSync(new URL("../../../contracts/vault/tests-data/fingerprint-remote-node.json", import.meta.url), "utf8"));
+  assert.equal(fingerprint(remote, salt), "cfb851d722d274c36161359966c9a849ee9b7a5a947156f6acd0f7aa2acfe35c");
 });
 
 test("any change to a node, or another salt, changes its fingerprint", () => {

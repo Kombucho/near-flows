@@ -49,7 +49,7 @@ impl Vault {
         require!(inputs.len() == fingerprints.len(), "one fingerprint per node");
         check_fingerprints(&fingerprints);
         for t in &inputs {
-            require!(t == NEAR || t == flow::NO_INPUT || self.trusted.iter().any(|x| x.contract.as_str() == t), format!("untrusted: contract {t}"));
+            require!(t == NEAR || t == flow::NO_INPUT || crate::remote::is_remote(t) || self.trusted.iter().any(|x| x.contract.as_str() == t), format!("untrusted: contract {t}"));
         }
         self.add_flow(FlowRec { name, ledger: Ledger::new(inputs.len()), nodes: Vec::new(), inputs, hidden: fingerprints })
     }

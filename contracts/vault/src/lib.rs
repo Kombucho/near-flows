@@ -27,6 +27,7 @@ pub mod hidden;
 pub mod intents;
 mod limits;
 pub mod oracle;
+pub mod remote;
 #[cfg(feature = "sol")]
 pub mod sol;
 #[cfg(feature = "sol")]
@@ -127,13 +128,23 @@ pub struct Recipe {
     /// price minus slippage, read when the step runs (oracle.rs).
     #[serde(default)]
     pub market: Option<oracle::Market>,
+    /// A node on another chain: it signs a transaction there instead of making
+    /// NEAR calls (remote.rs). `calls` is then empty and `out` None.
+    #[serde(default)]
+    pub remote: Option<remote::Remote>,
 }
 
 impl Action for Recipe {
     fn output(&self, _input: &Token) -> Option<Token> {
+        if let Some(r) = &self.remote {
+            return r.out.clone();
+        }
         self.out.as_ref().map(|a| a.to_string())
     }
     fn accepts(&self, input: &Token) -> bool {
+        if let Some(r) = &self.remote {
+            return self.calls.is_empty() && self.out.is_none() && self.label.len() <= 60 && r.accepts(input);
+        }
         let spenders: Vec<&Call> = self.calls.iter().filter(|c| c.spends_input()).collect();
         let right_kind = match spenders.as_slice() {
             // A collector spends nothing and must hand something out.
@@ -306,6 +317,11 @@ impl Vault {
         self.assert_idle();
         require!(amount.0 > 0, "nothing to fund");
         let input = self.flow(flow_id).inputs.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).clone();
+        if remote::is_remote(&input) {
+            // On another chain the vault can't read its balance: the owner's word.
+            self.credit(flow_id, node, amount.0);
+            return PromiseOrValue::Value(());
+        }
         if input == NEAR {
             require!(amount.0 <= self.free_near(), "not enough free NEAR");
             self.credit(flow_id, node, amount.0);
@@ -488,6 +504,9 @@ impl Vault {
             Some(t) if !t.methods.iter().any(|x| x == m) => Some(format!("method {a}.{m}")),
             Some(_) => None,
         };
+        if n.action.remote.is_some() {
+            return self.remote_untrusted(n);
+        }
         if n.input != NEAR && n.input != flow::NO_INPUT {
             let t: AccountId = n.input.parse().unwrap_or_else(|_| env::panic_str("bad input token"));
             if let Some(w) = contract_ok(&t) {
