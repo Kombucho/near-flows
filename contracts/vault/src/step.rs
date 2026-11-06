@@ -77,6 +77,7 @@ impl Vault {
         let by_owner = env::predecessor_account_id() == self.owner;
         require!(by_owner || Some(env::predecessor_account_id()) == self.keeper, "owner or keeper only");
         require!(self.busy.is_none(), "a step is running");
+        require!(n.action.remote.is_none(), "a remote node runs with step_remote");
         // Refuse up front if the caller attached too little gas: a step that runs out
         // halfway would leave the vault busy (found on testnet).
         let need: u64 = n.action.calls.iter().map(|c| match c { Call::Ft { tgas, .. } | Call::Fn { tgas, .. } => *tgas + PER_CALL_OVERHEAD_TGAS }).sum::<u64>()

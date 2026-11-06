@@ -1,0 +1,115 @@
+//! The NVDA take-profit ladder shared by the sandbox test (remote.rs) and the
+//! Robinhood Chain fork run (ladder_fork_robinhood.rs): one vault, one flow definition.
+#![allow(dead_code)]
+
+use crate::common::wasm;
+use near_workspaces::network::Sandbox;
+use near_workspaces::result::ExecutionFinalResult;
+use near_workspaces::{Account, Contract, Worker};
+use serde_json::{json, Value};
+
+pub const GWEI: u128 = 1_000_000_000;
+pub const E18: u128 = 1_000_000_000_000_000_000;
+pub const E24: u128 = 1_000_000_000_000_000_000_000_000;
+pub const NVDA: &str = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec";
+pub const ETHNVDA: &str = "0x0d142f0a847838f933114869f6f63bd618bedca8";
+/// Pyth's 24/7 NVDA/USD feed.
+pub const NVDA_FEED: &str = "a470c4ac46f44b547b2cba52338f311fb642b79375ce5f0cfd5cb5b99227b852";
+
+pub struct World {
+    pub worker: Worker<Sandbox>,
+    pub alice: Account,
+    pub keeper: Account,
+    pub pyth: Contract,
+    pub vault: Contract,
+}
+
+pub fn tok(addr: &str) -> String {
+    format!("evm:4663:{addr}")
+}
+
+/// A vault on Robinhood Chain (mock signer) with the node library's templates and an NVDA price feed.
+pub async fn world() -> anyhow::Result<World> {
+    let worker = near_workspaces::sandbox().await?;
+    let (alice, keeper) = (worker.dev_create_account().await?, worker.dev_create_account().await?);
+    let signer = worker.dev_deploy(&wasm("mock_signer")).await?;
+    let pyth = worker.dev_deploy(&wasm("mock_pyth")).await?;
+    pyth.call("new").transact().await?.into_result()?;
+    let vault = worker.dev_deploy(&wasm("vault")).await?;
+    vault.call("new").args_json(json!({"owner": alice.id(), "keeper": keeper.id()})).transact().await?.into_result()?;
+    alice.call(vault.id(), "evm_setup").args_json(json!({"signer": signer.id(), "chain_id": 4663u64,
+        "max_fee": GWEI.to_string(), "max_tip": (GWEI / 10).to_string(), "gas_cap": 1_500_000u64})).max_gas().transact().await?.into_result()?;
+    for t in crate::common::templates("robinhood") {
+        alice.call(vault.id(), "evm_template").args_json(json!({"template": t})).transact().await?.into_result()?;
+    }
+    alice.call(vault.id(), "oracle_setup").args_json(json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
+        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": {"kind": "ema"}}]}})).transact().await?.into_result()?;
+    let w = World { worker, alice, keeper, pyth, vault };
+    nvda_price(&w, 180, 0).await?;
+    Ok(w)
+}
+
+/// NVDA at `usd` dollars (Pyth: x 1e-8, confidence 0.05%, EMA equal), published `age_s` ago.
+pub async fn nvda_price(w: &World, usd: i64, age_s: i64) -> anyhow::Result<()> {
+    let p = usd * 100_000_000;
+    w.alice.call(w.pyth.id(), "set_price").args_json(json!({"price_id": NVDA_FEED, "price": p.to_string(), "conf": (p / 2000).to_string(),
+        "expo": -8, "ema": p.to_string(), "age_s": age_s})).transact().await?.into_result()?;
+    Ok(())
+}
+
+/// The ladder: 0 buys NVDA with ETH and splits it in three; 1-3 sell a third each when
+/// NVDA reaches 1.5x / 2x / 3x of $180; every sale's ETH goes to 4, which zaps it into
+/// StonkBrokers' ETHNVDA pair token (the basket).
+pub fn ladder() -> Vec<Value> {
+    let eth = tok("eth");
+    let v4 = |template: &str| json!({"chain": "evm", "template": template, "amount_leaf": 8, "min_leaf": 9, "deadline_leaf": 15});
+    let node = |input: &str, label: &str, call: Value, out: &str, cap: u128, when: Value, next: Value| json!({"input": input, "when": when, "next": next,
+        "action": {"label": label, "calls": [], "out": null, "min_out_per_in": null, "price": null,
+            "remote": {"call": call, "out": out, "max_out_per_in": cap.to_string(), "price": {"feed": "nvda"}}}});
+    let rung = |x10: u128| node(&tok(NVDA), &format!("Sell a third at {}x", x10 as f64 / 10.0), v4("v4_swap_nvda_eth"), &eth, 2 * E24 / 10,
+        json!({"when": "price_above", "price": (180 * x10 / 10 * E24).to_string()}), json!([{"to": 4, "bps": 10_000}]));
+    vec![
+        // At most 20 NVDA per ETH may be reported (the pool gives ~11.8), 0.2 ETH per NVDA (~0.08), 3 shares per ETH (~1.7).
+        node(&eth, "Buy NVDA", v4("v4_swap_eth_nvda"), &tok(NVDA), 20 * E24, json!({"when": "now"}),
+            json!([{"to": 1, "bps": 3_333}, {"to": 2, "bps": 3_333}, {"to": 3, "bps": 3_333}])),
+        rung(15),
+        rung(20),
+        rung(30),
+        node(&eth, "Into the ETHNVDA basket", json!({"chain": "evm", "template": "pairtoken_ethnvda_zap_eth", "amount_leaf": 1, "min_leaf": 2}),
+            &tok(ETHNVDA), 3 * E24, json!({"when": "now"}), json!([])),
+    ]
+}
+
+/// Keeper values for a v4 swap: 17 leaves (16 without the ETH value); the vault fills 8 (amount) and 15 (deadline).
+pub fn v4_values(min_out: u128, eth_in: bool) -> Vec<String> {
+    let mut v = vec![0u128; if eth_in { 17 } else { 16 }];
+    v[8] = 999 * E18; // the keeper "asks" for 999: the vault uses the node's input instead
+    v[9] = min_out;
+    v.iter().map(|x| x.to_string()).collect()
+}
+
+pub fn evm_args(values: Vec<String>, nonce: u64) -> Value {
+    json!({"chain": "evm", "values": values, "nonce": nonce, "max_fee": (GWEI / 10).to_string(), "max_tip": "0", "gas": 1_000_000u64})
+}
+
+pub async fn step(w: &World, who: &Account, flow: u32, node: u16, args: Value) -> anyhow::Result<ExecutionFinalResult> {
+    Ok(who.call(w.vault.id(), "step_remote").args_json(json!({"flow_id": flow, "node": node, "args": args})).max_gas().transact().await?)
+}
+
+pub async fn report(w: &World, who: &Account, flow: u32, node: u16, out: Option<u128>) -> anyhow::Result<ExecutionFinalResult> {
+    Ok(who.call(w.vault.id(), "remote_report").args_json(json!({"flow_id": flow, "node": node, "out": out.map(|o| o.to_string())})).transact().await?)
+}
+
+pub async fn ledger(w: &World, flow: u32) -> anyhow::Result<Value> {
+    Ok(w.vault.view("get_flow").args_json(json!({"flow_id": flow})).await?.json::<Value>()?["ledger"].clone())
+}
+
+pub fn inbox(l: &Value, i: usize) -> u128 {
+    l["nodes"][i]["inbox"].as_str().unwrap().parse().unwrap()
+}
+
+pub fn event(r: &ExecutionFinalResult, ev: &str) -> Value {
+    let log = r.logs().iter().find(|l| l.contains(&format!(r#""event":"{ev}""#))).unwrap_or_else(|| panic!("no {ev}: {:?} {:?}", r.logs(), r.failures())).to_string();
+    serde_json::from_str::<Value>(log.trim_start_matches("EVENT_JSON:")).unwrap()["data"][0].clone()
+}
+

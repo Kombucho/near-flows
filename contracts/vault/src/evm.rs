@@ -187,9 +187,19 @@ impl Vault {
 impl Vault {
     #[allow(clippy::too_many_arguments)]
     fn evm_build(&mut self, cfg: EvmConfig, t: EvmTemplate, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64, prices: &[(String, u128)]) -> Promise {
+        let (tx, _) = self.evm_prepare(&cfg, &t, values, nonce, max_fee, max_tip, gas, prices);
+        let (sign, carry) = evm_sign_request(cfg.signer, &tx);
+        sign.then(Self::ext(env::current_account_id()).with_static_gas(GAS_CB).on_evm_signed(carry))
+    }
+
+    /// Build template `t` with `values`: caps, floors and market minimums applied,
+    /// spending counted against the limits. Returns the unsigned transaction and
+    /// each leaf's final number (a flow node reads its signed minimum from them).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn evm_prepare(&mut self, cfg: &EvmConfig, t: &EvmTemplate, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64, prices: &[(String, u128)]) -> (Eip1559, Vec<Option<u128>>) {
         let name = t.name.clone();
         let me = parse_address(cfg.address.as_deref().unwrap_or_else(|| env::panic_str("the vault's EVM address isn't known yet"))).unwrap();
-        let rules = leaves(&t);
+        let rules = leaves(t);
         require!(values.len() == rules.len(), format!("one value per leaf ({})", rules.len()));
         let nums = numbers(&rules, &values, prices);
         let tys = sig::args(&t.function).unwrap();
@@ -204,18 +214,15 @@ impl Vault {
         if value > 0 {
             self.charge(&format!("evm:{}:eth", cfg.chain_id), value);
         }
-        let mut tx = self.evm_tx(&cfg, nonce, max_fee, max_tip, gas, parse_address(&t.to).unwrap(), data);
+        let mut tx = self.evm_tx(cfg, nonce, max_fee, max_tip, gas, parse_address(&t.to).unwrap(), data);
         tx.value = value;
         self.emit("evm_call_requested", &format!(r#"{{"template":"{name}","to":"{}","value":"{value}","data":"0x{}"}}"#, t.to, hex::encode(&tx.data)));
-        self.evm_sign(cfg.signer, tx)
+        (tx, nums)
     }
-}
 
-#[near]
-impl Vault {
-
-    #[private]
-    pub fn on_evm_signed(&mut self, tx: TxJson) {
+    /// The signer answered for `tx`: emit the signed transaction (`evm_signed`), or
+    /// `evm_sign_failed`. True if it was signed.
+    pub(crate) fn evm_emit_signed(&self, tx: &TxJson) -> bool {
         let cfg = self.evm.clone().unwrap();
         let t = Eip1559 {
             chain_id: cfg.chain_id, nonce: tx.nonce, max_priority_fee: tx.max_priority_fee.0, max_fee: tx.max_fee.0, gas_limit: tx.gas_limit,
@@ -227,9 +234,22 @@ impl Vault {
             Some((r, s, v)) => {
                 let raw = hex::encode(t.signed(v, &r, &s));
                 self.emit("evm_signed", &format!(r#"{{"hash":"0x{hash}","raw":"0x{raw}","r":"{}","s":"{}","v":{v}}}"#, hex::encode(r), hex::encode(s)));
+                true
             }
-            None => self.emit("evm_sign_failed", &format!(r#"{{"hash":"0x{hash}"}}"#)),
+            None => {
+                self.emit("evm_sign_failed", &format!(r#"{{"hash":"0x{hash}"}}"#));
+                false
+            }
         }
+    }
+}
+
+#[near]
+impl Vault {
+
+    #[private]
+    pub fn on_evm_signed(&mut self, tx: TxJson) {
+        self.evm_emit_signed(&tx);
     }
 
     pub fn get_evm(&self) -> Option<EvmConfig> {
@@ -251,13 +271,13 @@ impl Vault {
         Eip1559 { chain_id: cfg.chain_id, nonce, max_priority_fee: max_tip.0, max_fee: max_fee.0, gas_limit: gas, to, value: 0, data }
     }
 
-    fn evm_sign(&mut self, signer: AccountId, t: Eip1559) -> Promise {
-        let args = near_sdk::serde_json::json!({"request": {"path": EVM_PATH, "payload_v2": {"Ecdsa": hex::encode(t.signing_hash())}, "domain_id": ECDSA_DOMAIN}});
-        let carry = TxJson { nonce: t.nonce, max_priority_fee: U128(t.max_priority_fee), max_fee: U128(t.max_fee), gas_limit: t.gas_limit, to: hex_address(&t.to), value: U128(t.value), data: hex::encode(&t.data) };
-        Promise::new(signer)
-            .function_call("sign".to_string(), args.to_string().into_bytes(), NearToken::from_yoctonear(1), GAS_SIGN)
-            .then(Self::ext(env::current_account_id()).with_static_gas(GAS_CB).on_evm_signed(carry))
-    }
+}
+
+/// The signer call for `t`, and the transaction to carry to its callback.
+pub(crate) fn evm_sign_request(signer: AccountId, t: &Eip1559) -> (Promise, TxJson) {
+    let args = near_sdk::serde_json::json!({"request": {"path": EVM_PATH, "payload_v2": {"Ecdsa": hex::encode(t.signing_hash())}, "domain_id": ECDSA_DOMAIN}});
+    let carry = TxJson { nonce: t.nonce, max_priority_fee: U128(t.max_priority_fee), max_fee: U128(t.max_fee), gas_limit: t.gas_limit, to: hex_address(&t.to), value: U128(t.value), data: hex::encode(&t.data) };
+    (Promise::new(signer).function_call("sign".to_string(), args.to_string().into_bytes(), NearToken::from_yoctonear(1), GAS_SIGN), carry)
 }
 
 /// (r, s, y_parity) from the signer's answer:
@@ -408,7 +428,7 @@ fn rule_name(r: &Arg) -> &'static str {
 }
 
 /// The template's leaf rules, depth first, the value leaf last.
-fn leaves(t: &EvmTemplate) -> Vec<Arg> {
+pub(crate) fn leaves(t: &EvmTemplate) -> Vec<Arg> {
     fn walk(r: &Arg, out: &mut Vec<Arg>) {
         match r {
             Arg::Encoded { args, .. } | Arg::Tuple { args } => args.iter().for_each(|a| walk(a, out)),
@@ -422,7 +442,7 @@ fn leaves(t: &EvmTemplate) -> Vec<Arg> {
 }
 
 /// The feeds a template's market leaves need, each once.
-fn market_feeds(rules: &[Arg]) -> Vec<String> {
+pub(crate) fn market_feeds(rules: &[Arg]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for r in rules {
         if let Arg::Market { market, .. } = r {

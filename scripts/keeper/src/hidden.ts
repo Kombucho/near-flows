@@ -24,6 +24,16 @@ type Trigger =
   | { when: "price_below"; price: string }
   | { when: "price_above"; price: string }
   | { when: "manual" };
+// A node on another chain (contracts/vault/src/remote.rs).
+type Remote = {
+  call:
+    | { chain: "evm"; template: string; amount_leaf?: number | null; min_leaf?: number | null; deadline_leaf?: number | null }
+    | { chain: "sol"; template: string; amount_field?: number | null; min_field?: number | null };
+  out?: string | null;
+  max_out_per_in?: string | null;
+  max_out?: string | null;
+  price?: { feed: string; quote?: string | null } | null;
+};
 export type Node = {
   input: string;
   action: {
@@ -34,6 +44,7 @@ export type Node = {
     price: { contract: string; method: string; args: string; per: string } | null;
     scale_per_in?: string | null;
     market?: { sell: string; buy: string; dec_in: number; dec_out: number; slippage_bps: number } | null;
+    remote?: Remote | null;
   };
   when: Trigger;
   next?: { to: number; bps: number }[];
@@ -81,6 +92,16 @@ export function borshNode(n: Node): Buffer {
   w.opt(a.price, (p) => { w.str(p.contract); w.str(p.method); w.str(p.args); w.u128(p.per); });
   w.opt(a.scale_per_in, (v) => w.u128(v));
   w.opt(a.market, (m) => { w.str(m.sell); w.str(m.buy); w.u8(m.dec_in); w.u8(m.dec_out); w.u32(m.slippage_bps); });
+  w.opt(a.remote, (r) => {
+    const c = r.call;
+    const u8 = (v: number) => w.u8(v);
+    if (c.chain === "evm") { w.u8(0); w.str(c.template); w.opt(c.amount_leaf, u8); w.opt(c.min_leaf, u8); w.opt(c.deadline_leaf, u8); }
+    else { w.u8(1); w.str(c.template); w.opt(c.amount_field, u8); w.opt(c.min_field, u8); }
+    w.opt(r.out, (v) => w.str(v));
+    w.opt(r.max_out_per_in, (v) => w.u128(v));
+    w.opt(r.max_out, (v) => w.u128(v));
+    w.opt(r.price, (p) => { w.str(p.feed); w.opt(p.quote, (q) => w.str(q)); });
+  });
   const t = n.when;
   switch (t.when) {
     case "now": w.u8(0); break;
