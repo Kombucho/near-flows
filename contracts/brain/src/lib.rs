@@ -1,70 +1,84 @@
 //! The vault BRAIN: one shared, immutable contract holding every relay vault's
 //! rules and state (keyed by the vault's account). A vault (relay/src/lib.rs)
 //! forwards each request here with who sent it; the brain decides and answers
-//! with the actions the vault must execute, as the vault. Callbacks (balances,
-//! call results) come back through the vault, so the brain always knows which
-//! vault is talking: the predecessor. A vault can only ever touch its own record.
+//! with the actions the vault must execute, as the vault. The brain always
+//! knows which vault is talking: the predecessor. A vault only ever touches
+//! its own record.
 //!
-//! WHY: the full vault is ~600 KB, 59 NEAR to publish per version. The body is
-//! 9 KB (~1 NEAR); the brain is deployed normally (storage staked, refundable).
+//! WHY: the full vault is ~640 KB, ~64 NEAR to publish per version. The body is
+//! ~10 KB (~1 NEAR); the brain is deployed normally (storage staked, refundable).
 //!
-//! # Porting plan (everything not in this prototype)
+//! Three ways in, each with its own proof of who's talking:
+//! - `handle`: a request the vault forwards (relay `x`, a named door, `new`).
+//!   The header names the vault's real caller; the brain checks owner/keeper.
+//! - `on_vault`: the vault's callback on actions the brain asked it to run
+//!   (their results are the vault's to report). Only the vault's own `cb` makes
+//!   these, after the brain named this method in an answer: no sender in the
+//!   header, predecessor = a vault with a record.
+//! - `on_read`: the brain's OWN reads (balances, prices, the MPC key, the
+//!   Intents salt): views need no vault, so the brain issues them itself and
+//!   decides in this private callback; its answer becomes the value the vault's
+//!   `cb` receives. One relay round less per read. #[private]: only the brain.
 //!
-//! Rule of thumb: pure checks and state move into the brain unchanged; anything
-//! that must be done AS the vault (move money, sign with the vault's MPC path,
-//! register keys) becomes a CALL action the brain hands back.
+//! # Porting status
 //!
-//! - limits: pure state; `charge` runs in the brain when a step starts. Ports as is.
-//! - hidden: fingerprints live in the brain; `step_hidden` is a request carrying
-//!   the revealed node (as public as today: it's in the vault's tx args). As is.
-//! - oracle: price reads are views, and views don't need to come from the vault:
-//!   the brain can read Pyth itself (its own promise + private callback) and
-//!   return its answer as that promise's result; NEAR hands the final value to
-//!   the vault's `cb`. Same for price triggers. One relay round saved per read.
-//!   (The step's balance views could move the same way: measured in the brain,
-//!   only the recipe's calls go through the vault. Not done here, for clarity.)
-//! - evm / sol / soltemplates: evmtx/solguard run in the brain on the request;
-//!   the answer is a CALL `signer.sign{payload, path}` from the vault (so the
-//!   derived address is still per vault: MPC derives from predecessor + path),
-//!   then a brain callback assembles the signed tx and returns it to the keeper.
-//!   The vault's derived keys are views (`derived_public_key` takes the
-//!   predecessor as an argument), so the brain can learn them directly.
-//! - intents: `add_public_key` on intents.near and `sign` are CALLs from the
-//!   vault; intent building/checking (intentsig) runs in the brain. Withdrawals
-//!   to the vault arrive as `mt_on_transfer`/`ft_on_transfer` hooks: see below.
-//! - stealth (being built in parallel): same rule; anything it needs from the
-//!   vault's own account (a key, a signature path) becomes a CALL action.
+//! Ported (same request names and arguments as the vault's methods, so apps and
+//! keepers change only the door: `x` with `{"<method>": <args>}`):
+//! - core: trust, save/delete/fund/drain/resume/unstick, step, withdraw,
+//!   set_keeper, act (owner's one-off call).
+//! - limits.rs: spending limits, the 24 h delay on loosening. Pure state.
+//! - hidden.rs: fingerprints byte-identical (the vault's pinned vector is
+//!   tested here too); `step_hidden` carries the revealed node.
+//! - stealth.rs: the owner as an Ed25519 key, `exec` with nonce/expiry, the
+//!   same signed text. The relay exports `exec`, so the keeper's stealth.ts
+//!   calls it unchanged. The vault's "call myself" trick isn't needed: the
+//!   brain burns the nonce, then runs the command as the owner in the next
+//!   round (`on_vault` Exec), so a failed command still can't be replayed.
+//! - intents.rs: setup (the brain reads the vault's derived key itself),
+//!   allow, sign_swap (the brain reads the verifier's salt itself; the `sign`
+//!   CALL comes from the vault, so the MPC key is still per vault), withdraw.
 //!
-//! What can't port as is, and must be settled BEFORE the relay is published
-//! (it is immutable, so its exports are forever):
-//! - Receiver hooks. The relay answers `ft_on_transfer` itself ("keep it all").
-//!   `nft_on_transfer` and `mt_on_transfer` (intents withdrawals, multi-tokens)
-//!   don't exist yet: add them (or a generic hook forwarder that tags the
-//!   method and asks the brain, whose answer becomes the hook's return value).
+//! Not yet (other engineers are changing them; they port after their merges):
+//! - oracle.rs: market floors. A recipe or Intents pair WITH a `market` is
+//!   refused here rather than silently run without its floor. The field stays
+//!   in `Recipe` so hidden-flow fingerprints stay byte-identical. The pattern
+//!   is ready: Pyth views become `on_read` reads like balances.
+//! - evm.rs / sol.rs / soltemplates.rs: evmtx/solguard run in the brain on the
+//!   request; the answer is a CALL `signer.sign{payload, path}` from the vault
+//!   (derived addresses stay per vault), then `on_vault` assembles the signed
+//!   tx and returns it as the vault's return value to the keeper.
+//!
+//! What can't port as is:
 //! - The vault's synchronous state: balance and storage are a snapshot in the
-//!   header at call time; a decision can't re-read them mid-call. Today's
-//!   `free_near` works from the snapshot; a race with another receipt just
-//!   makes the vault's transfer fail, never the brain's books.
-//! - Atomicity: the brain commits, then the vault acts in a later receipt. A
-//!   vault that can't execute (out of gas or NEAR) leaves the brain believing a
-//!   step is in flight: the existing `unstick` covers it. Step ids (below)
-//!   stop a late callback from an old step landing in a new one.
-//! - Gas: each relay round costs a receipt (~a few Tgas). Long chains (oracle +
-//!   price + several calls) must fit in 300 Tgas: see `need_tgas`.
+//!   header. A race with another receipt only makes the vault's transfer fail,
+//!   never the brain's books.
+//! - Atomicity: the brain commits, the vault acts in a later receipt. A vault
+//!   that can't execute (out of gas or NEAR) leaves a step "in flight": the
+//!   existing `unstick` covers it; step ids stop a late callback landing in a
+//!   new step.
+//! - Hooks: NEAR has no fallback method, so a callback name the relay doesn't
+//!   export can never reach the brain (see relay/src/lib.rs, "named doors").
 //!
 //! Storage: the brain pays for every vault's record and charges it back: when a
 //! record grows past what its vault paid, the answer includes a `pay` call
 //! from the vault for the difference (plus a small buffer). A vault that can't
 //! afford it is refused the change.
 
+mod hidden;
+mod intents;
+mod limits;
+mod stealth;
 mod step;
 pub mod wire;
 
 use flow::{Action, Ledger, Node, Token};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::json_types::U128;
-use near_sdk::{env, near, require, AccountId, Gas, PanicOnDefault};
+use near_sdk::json_types::{U128, U64};
+use near_sdk::{env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise, PublicKey};
 
+pub use hidden::fingerprint;
+pub use intents::{IntentsConfig, IntentsPair};
+pub use limits::{Limit, PendingLimit};
 pub use step::StepCtx;
 use wire::{Answer, Ctx};
 
@@ -81,10 +95,14 @@ const RECORD_OVERHEAD: u64 = 40;
 /// Paid on top of what's owed, so not every small change needs a payment.
 const PAY_BUFFER_BYTES: u128 = 500;
 
+/// What the relay gives `handle` (relay GAS_HANDLE): the next round has the rest.
+pub(crate) const HANDLE_TGAS: u64 = 60;
 pub(crate) const GAS_VIEW: Gas = Gas::from_tgas(5);
-pub(crate) const GAS_BRAIN_CB: Gas = Gas::from_tgas(15);
+/// The brain's own read callback; one that may read again gets twice this.
+pub(crate) const GAS_READ: Gas = Gas::from_tgas(20);
 const GAS_FT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_PAY: Gas = Gas::from_tgas(5);
+const GAS_ACT: Gas = Gas::from_tgas(100);
 
 #[near(serializers = [borsh, json])]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -125,6 +143,18 @@ pub struct PriceSource {
     pub per: U128,
 }
 
+/// The vault's oracle.rs Market, as data only: kept so a recipe's borsh (and so a
+/// hidden node's fingerprint) is byte-identical to the vault's. Not run yet.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Market {
+    pub sell: String,
+    pub buy: String,
+    pub dec_in: u8,
+    pub dec_out: u8,
+    pub slippage_bps: u32,
+}
+
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Recipe {
@@ -135,6 +165,8 @@ pub struct Recipe {
     pub price: Option<PriceSource>,
     #[serde(default)]
     pub scale_per_in: Option<U128>,
+    #[serde(default)]
+    pub market: Option<Market>,
 }
 
 impl Action for Recipe {
@@ -168,7 +200,8 @@ pub struct Trust {
     pub methods: Vec<String>,
 }
 
-/// Methods that move funds out (same list as the vault). Never callable by a recipe.
+/// Methods that move funds out (same list as the vault). Never callable by a
+/// recipe or `act`. The brain itself can't be trusted at all (see `trust`).
 pub const NEVER_CALL: &[&str] = &[
     "ft_transfer", "ft_transfer_call", "nft_transfer", "nft_transfer_call", "mt_transfer", "mt_transfer_call",
     "mt_batch_transfer", "mt_batch_transfer_call", "near_withdraw", "storage_withdraw", "storage_unregister",
@@ -176,39 +209,55 @@ pub const NEVER_CALL: &[&str] = &[
     "add_public_key", "remove_public_key", "execute_intents", "set_auth_by_predecessor_id", "invalidate_nonces",
     "sign", "sign_v2", "request_app_private_key", "simple_withdraw",
 ];
-// New with the split: the brain itself can never be trusted (see `trust` and
-// `untrusted`): a recipe calling it from the vault would talk to the brain AS
-// the vault, outside a request.
 
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug)]
 pub struct FlowRec {
     pub name: String,
+    /// The nodes, readable by anyone. Empty while the flow is hidden.
     pub nodes: Vec<Node<Recipe>>,
     pub inputs: Vec<Token>,
+    /// A hidden flow's fingerprints, one per node. Empty when open.
+    pub hidden: Vec<String>,
     pub ledger: Ledger,
+}
+
+impl FlowRec {
+    pub fn is_hidden(&self) -> bool {
+        !self.hidden.is_empty()
+    }
 }
 
 /// One vault's record in the brain.
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug)]
 pub struct VaultState {
+    /// The owner's account; a stealth vault is its own owner (see stealth.rs).
     pub owner: AccountId,
     pub keeper: Option<AccountId>,
     pub flows: Vec<Option<FlowRec>>,
     pub busy: Option<StepCtx>,
     pub trusted: Vec<Trust>,
+    pub limits: Vec<Limit>,
+    pub pending: Vec<PendingLimit>,
+    pub intents: Option<IntentsConfig>,
+    #[serde(skip)]
+    pub stealth: Option<stealth::Stealth>,
     /// NEAR this vault paid the brain for its record's storage.
     pub paid: U128,
     /// Next step id: a callback must carry the id of the step in flight.
     pub next_step: u64,
 }
 
-/// Requests a vault forwards (its caller's JSON args), e.g. {"fund": {"flow_id": 0, "node": 0, "amount": "10"}}.
+/// Requests a vault forwards: `{"<method>": {<args>}}`, the vault's own method
+/// names and arguments.
 #[near(serializers = [json])]
 #[serde(rename_all = "snake_case")]
 pub enum Req {
+    // Made by the factory.
     Init { owner: AccountId, keeper: Option<AccountId> },
+    InitStealth { owner_key: PublicKey, keeper: Option<AccountId> },
+    // Owner.
     SetKeeper { keeper: Option<AccountId> },
     Trust { add: Vec<Trust>, remove: Vec<AccountId> },
     SaveFlow { name: String, nodes: Vec<Node<Recipe>> },
@@ -218,22 +267,72 @@ pub enum Req {
     Resume { flow_id: u32, node: u16 },
     Unstick {},
     Withdraw { token: String, amount: U128 },
+    Act { target: AccountId, method: String, json_args: String, one_yocto: bool },
+    SetLimit { token: String, max: Option<U128>, window_ns: u64 },
+    SaveHiddenFlow { name: String, inputs: Vec<Token>, fingerprints: Vec<String> },
+    HideFlow { flow_id: u32, fingerprints: Vec<String> },
+    RevealFlow { flow_id: u32, nodes: Vec<Node<Recipe>>, salts: Vec<String> },
+    SetOwnerKey { owner_key: PublicKey },
+    WithdrawTo { token: String, amount: U128, to: AccountId, via_intents: bool },
+    IntentsSetup { verifier: AccountId, signer: AccountId },
+    IntentsAllow { pair: IntentsPair },
+    // Owner or keeper.
     Step { flow_id: u32, node: u16 },
+    StepHidden { flow_id: u32, node: u16, reveal: Node<Recipe>, salt: String },
+    IntentsSignSwap { token_in: AccountId, token_out: AccountId, amount_in: U128, min_out: U128, valid_secs: u64 },
+    IntentsWithdraw { token: AccountId, amount: U128 },
+    // Anyone.
+    ApplyLimit { token: String },
+    /// A stealth owner's signed command (see stealth.rs).
+    Exec { method: String, args: String, nonce: U64, expires_ns: U64, tgas: u64, signature: String },
+    // Receiver hooks (relay named doors): answered, never acted on.
+    NftOnTransfer { sender_id: AccountId, previous_owner_id: AccountId, token_id: String, msg: String },
+    MtOnTransfer { sender_id: AccountId, previous_owner_ids: Vec<AccountId>, token_ids: Vec<String>, amounts: Vec<U128>, msg: String },
+}
+
+/// A brain callback routed through the vault: it needs a result only the vault has.
+#[derive(BorshSerialize, BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
+pub(crate) enum Next {
+    /// A recipe call of the step `id` returned.
+    Call { id: u64, i: u8 },
+    /// The MPC signer answered the vault's `sign` for an intent.
+    IntentsSigned { message: String, nonce: [u8; 32] },
+    /// A stealth command whose nonce is already burned: run it as the owner.
+    Exec { method: String, args: String, tgas: u64 },
+}
+
+/// The brain's own reads, and what to do with their results.
+#[derive(BorshSerialize, BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
+pub(crate) enum Read {
+    Measured { id: u64, before: bool },
+    Price { flow_id: u32, node: u16, by_owner: bool, per: u128, revealed: Option<Node<Recipe>> },
+    Fund { flow_id: u32, node: u16, amount: u128 },
+    Withdraw { token: AccountId, amount: u128, to: AccountId, via_intents: bool },
+    IntentsKey,
+    IntentsSalt(intents::Pending),
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
 #[borsh(crate = "near_sdk::borsh")]
-pub(crate) struct FundArgs {
-    flow_id: u32,
-    node: u16,
-    amount: u128,
+pub struct ReadArgs {
+    vault: AccountId,
+    ctx: Ctx,
+    read: Read,
 }
 
-#[derive(BorshSerialize, BorshDeserialize)]
-#[borsh(crate = "near_sdk::borsh")]
-pub(crate) struct WithdrawArgs {
-    token: AccountId,
-    amount: u128,
+/// What a decision produces: an answer for the vault now, or a read whose
+/// callback will produce the answer.
+pub(crate) enum Reply {
+    Answer(Answer),
+    Read(Promise),
+}
+
+impl From<Answer> for Reply {
+    fn from(a: Answer) -> Self {
+        Reply::Answer(a)
+    }
 }
 
 #[near(contract_state)]
@@ -257,20 +356,30 @@ impl Brain {
         Self { factory }
     }
 
-    /// A request forwarded by a vault (relay `x` or `new`).
+    /// A request forwarded by a vault (relay `x`, a named door, or `new`).
     pub fn handle(&self) {
         let input = env::input().unwrap_or_default();
         let (ctx, body) = wire::parse(&input);
         let sender = ctx.sender.clone().unwrap_or_else(|| env::panic_str("a request names its sender"));
         let vault = env::predecessor_account_id();
         let req: Req = near_sdk::serde_json::from_slice(body).unwrap_or_else(|e| env::panic_str(&format!("bad request: {e}")));
-        if let Req::Init { owner, keeper } = req {
-            return self.init(vault, ctx, sender, owner, keeper);
+        match req {
+            Req::Init { owner, keeper } => return self.init(vault, ctx, sender, owner, keeper, None),
+            Req::InitStealth { owner_key, keeper } => {
+                let key = stealth::ed25519(&owner_key);
+                return self.init(vault.clone(), ctx, sender, vault, keeper, Some(key));
+            }
+            // Hooks: anyone can call them with any claims; the answer is always "keep it".
+            Req::NftOnTransfer { .. } => return Answer::default().ret("false").send(),
+            Req::MtOnTransfer { amounts, .. } => {
+                let zeros = vec![r#""0""#; amounts.len()].join(",");
+                return Answer::default().ret(&format!("[{zeros}]")).send();
+            }
+            _ => {}
         }
-        let vs = load(&vault).unwrap_or_else(|| env::panic_str("not a vault"));
-        let mut t = Talk { vault, ctx, vs };
-        let a = t.request(sender, req);
-        t.save(a).send();
+        let mut t = Talk::open(vault, ctx, HANDLE_TGAS);
+        let r = t.request(sender, req);
+        t.finish(r);
     }
 
     /// A vault paying for its record (asked for in an answer).
@@ -282,28 +391,40 @@ impl Brain {
         store(&vault, &vs);
     }
 
-    // ---------- callbacks: always from the vault, on results of its own actions ----------
-
-    pub fn on_fund(&self) {
-        let (mut t, a): (Talk, FundArgs) = callback();
-        t.idle();
-        let token = t.flow(a.flow_id).inputs[a.node as usize].clone();
-        let balance = amount_result(0).unwrap_or_else(|| env::panic_str("balance unknown"));
-        let free = balance.saturating_sub(t.allocated(&token));
-        require!(a.amount <= free, "not enough free balance");
-        t.credit(a.flow_id, a.node, a.amount);
-        t.save(Answer::default()).send();
+    /// A callback the vault's `cb` makes on the results of actions the brain asked for.
+    pub fn on_vault(&self) {
+        let input = env::input().unwrap_or_default();
+        let (ctx, body) = wire::parse(&input);
+        require!(ctx.sender.is_none(), "callbacks come from the vault itself");
+        let next = Next::try_from_slice(body).unwrap_or_else(|_| env::panic_str("bad callback"));
+        let spent = match &next {
+            Next::Call { .. } => step::GAS_ON_CALL.as_tgas(),
+            Next::IntentsSigned { .. } => intents::GAS_SIGNED.as_tgas(),
+            Next::Exec { tgas, .. } => *tgas,
+        };
+        let mut t = Talk::open(env::predecessor_account_id(), ctx, spent);
+        let r = match next {
+            Next::Call { id, i } => t.on_call(id, i),
+            Next::IntentsSigned { message, nonce } => t.on_intents_signed(message, nonce),
+            Next::Exec { method, args, .. } => t.run_command(method, args),
+        };
+        t.finish(r);
     }
 
-    pub fn on_withdraw(&self) {
-        let (t, a): (Talk, WithdrawArgs) = callback();
-        t.idle();
-        let balance = amount_result(0).unwrap_or_else(|| env::panic_str("balance unknown"));
-        let free = balance.saturating_sub(t.allocated(a.token.as_str()));
-        require!(a.amount <= free, "not enough free balance");
-        let args = format!(r#"{{"receiver_id":"{}","amount":"{}"}}"#, t.vs.owner, a.amount);
-        let ans = Answer::default().call(&a.token, "ft_transfer", args.as_bytes(), 1, GAS_FT_TRANSFER);
-        t.save(ans).send();
+    /// The brain's own reads came back.
+    #[private]
+    pub fn on_read(&self, #[serializer(borsh)] a: ReadArgs) {
+        let vs = load(&a.vault).unwrap_or_else(|| env::panic_str("not a vault"));
+        let mut t = Talk { vault: a.vault, ctx: a.ctx, vs };
+        let r = match a.read {
+            Read::Measured { id, before } => t.on_measured(id, before),
+            Read::Price { flow_id, node, by_owner, per, revealed } => t.on_price(flow_id, node, by_owner, per, revealed),
+            Read::Fund { flow_id, node, amount } => t.on_fund(flow_id, node, amount),
+            Read::Withdraw { token, amount, to, via_intents } => t.on_withdraw(token, amount, to, via_intents),
+            Read::IntentsKey => t.on_intents_key(),
+            Read::IntentsSalt(p) => t.on_intents_salt(p),
+        };
+        t.finish(r);
     }
 
     // ---------- views ----------
@@ -321,13 +442,36 @@ impl Brain {
     }
 
     pub fn get_allocated(&self, vault: AccountId, token: String) -> U128 {
-        let vs = load(&vault).unwrap_or_else(|| env::panic_str("not a vault"));
-        U128(allocated(&vs, &token))
+        U128(allocated(&must_load(&vault), &token))
+    }
+
+    pub fn get_limits(&self, vault: AccountId) -> (Vec<Limit>, Vec<PendingLimit>) {
+        let vs = must_load(&vault);
+        (vs.limits, vs.pending)
+    }
+
+    pub fn get_intents(&self, vault: AccountId) -> Option<IntentsConfig> {
+        must_load(&vault).intents
+    }
+
+    /// A stealth vault's owner key (`ed25519:<base58>`).
+    pub fn get_owner_key(&self, vault: AccountId) -> Option<String> {
+        must_load(&vault).stealth.map(|s| format!("ed25519:{}", near_sdk::bs58::encode(s.key).into_string()))
+    }
+
+    /// The last nonce a stealth command used (the next needs a bigger one).
+    pub fn get_nonce(&self, vault: AccountId) -> U64 {
+        U64(must_load(&vault).stealth.map_or(0, |s| s.nonce))
+    }
+
+    /// A node's fingerprint (ask your own RPC: whoever answers sees the node).
+    pub fn fingerprint_of(&self, node: Node<Recipe>, salt: String) -> String {
+        fingerprint(&node, &salt)
     }
 
     /// What this vault's record costs and what it has paid.
     pub fn get_storage(&self, vault: AccountId) -> (U128, U128) {
-        let vs = load(&vault).unwrap_or_else(|| env::panic_str("not a vault"));
+        let vs = must_load(&vault);
         (U128(record_cost(&vault, &vs)), vs.paid)
     }
 }
@@ -335,45 +479,116 @@ impl Brain {
 impl Brain {
     /// The factory made this vault (a direct sub-account of the factory, and the
     /// factory itself called the vault's `new`): give it an empty record.
-    fn init(&self, vault: AccountId, ctx: Ctx, sender: AccountId, owner: AccountId, keeper: Option<AccountId>) {
+    fn init(&self, vault: AccountId, ctx: Ctx, sender: AccountId, owner: AccountId, keeper: Option<AccountId>, key: Option<[u8; 32]>) {
         require!(sender == self.factory, "vaults are made by the factory");
         let name = vault.as_str().strip_suffix(&format!(".{}", self.factory)).unwrap_or("");
         require!(!name.is_empty() && !name.contains('.'), "not one of the factory's vaults");
         require!(load(&vault).is_none(), "already a vault");
-        let vs = VaultState { owner, keeper, flows: Vec::new(), busy: None, trusted: Vec::new(), paid: U128(0), next_step: 0 };
+        let vs = VaultState {
+            owner,
+            keeper,
+            flows: Vec::new(),
+            busy: None,
+            trusted: Vec::new(),
+            limits: Vec::new(),
+            pending: Vec::new(),
+            intents: None,
+            stealth: key.map(|key| stealth::Stealth { key, nonce: 0 }),
+            paid: U128(0),
+            next_step: 0,
+        };
         Talk { vault, ctx, vs }.save(Answer::default()).send();
     }
 }
 
 impl Talk {
-    fn request(&mut self, sender: AccountId, req: Req) -> Answer {
+    /// Load the vault's record. `spent_tgas`: what the call now running took from
+    /// the vault's round, so `ctx.gas_left` becomes what the vault's NEXT round has.
+    fn open(vault: AccountId, mut ctx: Ctx, spent_tgas: u64) -> Self {
+        let vs = load(&vault).unwrap_or_else(|| env::panic_str("not a vault"));
+        ctx.gas_left = ctx.gas_left.saturating_sub(spent_tgas * 1_000_000_000_000);
+        Talk { vault, ctx, vs }
+    }
+
+    pub(crate) fn finish(self, r: Reply) {
+        match r {
+            Reply::Answer(a) => self.save(a).send(),
+            // The read's callback saves again and asks for any payment then.
+            Reply::Read(p) => {
+                store(&self.vault, &self.vs);
+                let _ = p.as_return();
+            }
+        }
+    }
+
+    /// The brain reads `views` itself (in parallel), then `on_read` decides with `read`.
+    pub(crate) fn read(&self, views: Vec<(AccountId, String, String)>, read: Read, gas: Gas) -> Reply {
+        let mut joint: Option<Promise> = None;
+        for (to, method, args) in views {
+            let p = Promise::new(to).function_call(method, args.into_bytes(), NearToken::from_yoctonear(0), GAS_VIEW);
+            joint = Some(match joint {
+                None => p,
+                Some(j) => j.and(p),
+            });
+        }
+        let cb = Brain::ext(env::current_account_id()).with_static_gas(gas).on_read(ReadArgs { vault: self.vault.clone(), ctx: self.ctx.clone(), read });
+        Reply::Read(match joint {
+            Some(j) => j.then(cb),
+            None => cb,
+        })
+    }
+
+    pub(crate) fn balance_view(&self, token: &AccountId) -> (AccountId, String, String) {
+        (token.clone(), "ft_balance_of".into(), format!(r#"{{"account_id":"{}"}}"#, self.vault))
+    }
+
+    fn request(&mut self, sender: AccountId, req: Req) -> Reply {
         let owner = sender == self.vs.owner;
+        let keeper = Some(&sender) == self.vs.keeper.as_ref();
         let owner_only = || require!(owner, "owner only");
+        let crew_only = || require!(owner || keeper, "owner or keeper only");
         match req {
-            Req::Init { .. } => unreachable!(),
-            Req::Step { flow_id, node } => return self.begin_step(&sender, flow_id, node),
-            Req::SetKeeper { keeper } => {
-                owner_only();
-                self.vs.keeper = keeper;
+            Req::Init { .. } | Req::InitStealth { .. } | Req::NftOnTransfer { .. } | Req::MtOnTransfer { .. } => env::panic_str("not here"),
+            Req::Step { flow_id, node } => {
+                require!(!self.flow(flow_id).is_hidden(), "a hidden flow runs with step_hidden");
+                let n = self.flow(flow_id).nodes.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).clone();
+                return self.begin_step(&sender, flow_id, node, n, false);
             }
-            Req::Trust { add, remove } => {
-                owner_only();
-                self.trust(add, remove);
+            Req::StepHidden { flow_id, node, reveal, salt } => return self.step_hidden(&sender, flow_id, node, reveal, salt),
+            Req::IntentsSignSwap { token_in, token_out, amount_in, min_out, valid_secs } => {
+                crew_only();
+                return self.intents_sign_swap(owner, token_in, token_out, amount_in.0, min_out.0, valid_secs);
             }
+            Req::IntentsWithdraw { token, amount } => {
+                crew_only();
+                return self.intents_withdraw(token, amount.0).into();
+            }
+            Req::ApplyLimit { token } => self.apply_limit(token),
+            Req::Exec { method, args, nonce, expires_ns, tgas, signature } => return self.exec(method, args, nonce.0, expires_ns.0, tgas, signature).into(),
+            other => {
+                owner_only();
+                return self.owner_request(other);
+            }
+        }
+        Answer::default().into()
+    }
+
+    /// Everything only the owner may ask.
+    fn owner_request(&mut self, req: Req) -> Reply {
+        match req {
+            Req::SetKeeper { keeper } => self.vs.keeper = keeper,
+            Req::Trust { add, remove } => self.trust(add, remove),
             Req::SaveFlow { name, nodes } => {
-                owner_only();
                 let id = self.save_flow(name, nodes);
-                return Answer::default().ret(&id.to_string());
+                return Answer::default().ret(&id.to_string()).into();
             }
             Req::DeleteFlow { flow_id } => {
-                owner_only();
                 self.idle();
                 let f = self.flow(flow_id);
                 require!(f.ledger.holdings_inputs(&f.inputs).is_empty(), "drain the flow first");
                 self.vs.flows[flow_id as usize] = None;
             }
             Req::Fund { flow_id, node, amount } => {
-                owner_only();
                 self.idle();
                 require!(amount.0 > 0, "nothing to fund");
                 let input = self.flow(flow_id).inputs.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).clone();
@@ -382,36 +597,83 @@ impl Talk {
                     self.credit(flow_id, node, amount.0);
                 } else {
                     let token: AccountId = input.parse().unwrap();
-                    let args = borsh::to_vec(&FundArgs { flow_id, node, amount: amount.0 }).unwrap();
-                    return self.balance_of(&token).then("on_fund", args, GAS_BRAIN_CB);
+                    return self.read(vec![self.balance_view(&token)], Read::Fund { flow_id, node, amount: amount.0 }, GAS_READ);
                 }
             }
             Req::Drain { flow_id } => {
-                owner_only();
                 let f = self.flow_mut(flow_id);
                 f.ledger.drain_inputs(&f.inputs).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
             }
             Req::Resume { flow_id, node } => {
-                owner_only();
                 self.flow_mut(flow_id).ledger.resume(node).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
             }
-            Req::Unstick {} => {
-                owner_only();
-                self.unstick();
-            }
+            Req::Unstick {} => self.unstick(),
             Req::Withdraw { token, amount } => {
-                owner_only();
-                self.idle();
-                if token == NEAR {
-                    require!(amount.0 <= self.free_near(), "not enough free NEAR");
-                    return Answer::default().transfer(&self.vs.owner.clone(), amount.0);
-                }
-                let t: AccountId = token.parse().unwrap_or_else(|_| env::panic_str("bad token"));
-                let args = borsh::to_vec(&WithdrawArgs { token: t.clone(), amount: amount.0 }).unwrap();
-                return self.balance_of(&t).then("on_withdraw", args, GAS_BRAIN_CB);
+                require!(self.vs.stealth.is_none(), "a stealth vault withdraws with withdraw_to");
+                let to = self.vs.owner.clone();
+                return self.withdraw(token, amount.0, to, false);
             }
+            Req::WithdrawTo { token, amount, to, via_intents } => {
+                require!(to != self.vault, "to: another account");
+                return self.withdraw(token, amount.0, to, via_intents);
+            }
+            Req::Act { target, method, json_args, one_yocto } => {
+                self.idle();
+                let t = self.trusted(&target).unwrap_or_else(|| env::panic_str("untrusted: contract"));
+                require!(!NEVER_CALL.contains(&method.as_str()), "that method moves funds: use withdraw");
+                require!(t.methods.iter().any(|m| *m == method), "untrusted: method");
+                return Answer::default().call(&target, &method, json_args.as_bytes(), one_yocto as u128, GAS_ACT).into();
+            }
+            Req::SetLimit { token, max, window_ns } => self.set_limit(token, max, window_ns),
+            Req::SaveHiddenFlow { name, inputs, fingerprints } => {
+                let id = self.save_hidden_flow(name, inputs, fingerprints);
+                return Answer::default().ret(&id.to_string()).into();
+            }
+            Req::HideFlow { flow_id, fingerprints } => self.hide_flow(flow_id, fingerprints),
+            Req::RevealFlow { flow_id, nodes, salts } => self.reveal_flow(flow_id, nodes, salts),
+            Req::SetOwnerKey { owner_key } => self.set_owner_key(owner_key),
+            Req::IntentsSetup { verifier, signer } => return self.intents_setup(verifier, signer),
+            Req::IntentsAllow { pair } => self.intents_allow(pair),
+            _ => env::panic_str("not here"),
         }
-        Answer::default()
+        Answer::default().into()
+    }
+
+    /// Free balance out: native NEAR at once, a token after reading the balance.
+    fn withdraw(&mut self, token: String, amount: u128, to: AccountId, via_intents: bool) -> Reply {
+        self.idle();
+        if token == NEAR {
+            require!(!via_intents, "wrap NEAR first: Intents takes tokens");
+            require!(amount <= self.free_near(), "not enough free NEAR");
+            return Answer::default().transfer(&to, amount).into();
+        }
+        let t: AccountId = token.parse().unwrap_or_else(|_| env::panic_str("bad token"));
+        self.read(vec![self.balance_view(&t)], Read::Withdraw { token: t, amount, to, via_intents }, GAS_READ)
+    }
+
+    fn on_withdraw(&mut self, token: AccountId, amount: u128, to: AccountId, via_intents: bool) -> Reply {
+        self.idle();
+        let balance = amount_result(0).unwrap_or_else(|| env::panic_str("balance unknown"));
+        let free = balance.saturating_sub(self.allocated(token.as_str()));
+        require!(amount <= free, "not enough free balance");
+        if via_intents {
+            let verifier = self.vs.intents.as_ref().map(|c| c.verifier.clone()).unwrap_or_else(|| env::panic_str("run intents_setup first"));
+            // The verifier credits the account named in `msg`, not the sender.
+            let args = near_sdk::serde_json::json!({"receiver_id": verifier, "amount": amount.to_string(), "msg": to}).to_string();
+            return Answer::default().call(&token, "ft_transfer_call", args.as_bytes(), 1, Gas::from_tgas(40)).into();
+        }
+        let args = format!(r#"{{"receiver_id":"{to}","amount":"{amount}"}}"#);
+        Answer::default().call(&token, "ft_transfer", args.as_bytes(), 1, GAS_FT_TRANSFER).into()
+    }
+
+    fn on_fund(&mut self, flow_id: u32, node: u16, amount: u128) -> Reply {
+        self.idle();
+        let token = self.flow(flow_id).inputs[node as usize].clone();
+        let balance = amount_result(0).unwrap_or_else(|| env::panic_str("balance unknown"));
+        let free = balance.saturating_sub(self.allocated(&token));
+        require!(amount <= free, "not enough free balance");
+        self.credit(flow_id, node, amount);
+        Answer::default().into()
     }
 
     fn trust(&mut self, add: Vec<Trust>, remove: Vec<AccountId>) {
@@ -436,11 +698,20 @@ impl Talk {
             env::panic_str(&format!("bad flow: {e:?}"));
         }
         for n in &nodes {
-            if let Some(why) = self.untrusted(n) {
-                env::panic_str(&format!("untrusted: {why}"));
-            }
+            self.check_node(n);
         }
-        let rec = FlowRec { name, ledger: Ledger::new(nodes.len()), inputs: flow::inputs(&nodes), nodes };
+        self.add_flow(FlowRec { name, ledger: Ledger::new(nodes.len()), inputs: flow::inputs(&nodes), hidden: Vec::new(), nodes })
+    }
+
+    /// Trusted, and nothing the brain doesn't run yet.
+    pub(crate) fn check_node(&self, n: &Node<Recipe>) {
+        require!(n.action.market.is_none(), "market floors aren't ported to the brain yet");
+        if let Some(why) = self.untrusted(n) {
+            env::panic_str(&format!("untrusted: {why}"));
+        }
+    }
+
+    pub(crate) fn add_flow(&mut self, rec: FlowRec) -> u32 {
         if let Some(i) = self.vs.flows.iter().position(Option::is_none) {
             self.vs.flows[i] = Some(rec);
             return i as u32;
@@ -448,10 +719,6 @@ impl Talk {
         require!(self.vs.flows.len() < MAX_FLOWS, "too many flows");
         self.vs.flows.push(Some(rec));
         (self.vs.flows.len() - 1) as u32
-    }
-
-    pub(crate) fn balance_of(&self, token: &AccountId) -> Answer {
-        Answer::default().call(token, "ft_balance_of", format!(r#"{{"account_id":"{}"}}"#, self.vault).as_bytes(), 0, GAS_VIEW)
     }
 
     pub(crate) fn idle(&self) {
@@ -466,13 +733,16 @@ impl Talk {
         self.vs.flows.get_mut(id as usize).and_then(Option::as_mut).unwrap_or_else(|| env::panic_str("no such flow"))
     }
 
+    /// A trusted contract: never the vault itself, never the brain.
+    pub(crate) fn trusted(&self, a: &AccountId) -> Option<&Trust> {
+        let brain = env::current_account_id();
+        self.vs.trusted.iter().find(|t| t.contract == *a && *a != self.vault && *a != brain)
+    }
+
     /// Why node `n` may not run, if it may not (same rules as the vault).
     pub(crate) fn untrusted(&self, n: &Node<Recipe>) -> Option<String> {
-        let me = &self.vault;
-        let brain = env::current_account_id();
-        let trust = |a: &AccountId| self.vs.trusted.iter().find(|t| t.contract == *a && a != me && *a != brain);
-        let contract_ok = |a: &AccountId| trust(a).map_or(Some(format!("contract {a}")), |_| None);
-        let method_ok = |a: &AccountId, m: &str| match trust(a) {
+        let contract_ok = |a: &AccountId| self.trusted(a).map_or(Some(format!("contract {a}")), |_| None);
+        let method_ok = |a: &AccountId, m: &str| match self.trusted(a) {
             None => Some(format!("contract {a}")),
             Some(_) if NEVER_CALL.contains(&m) => Some(format!("{a}.{m} moves funds")),
             Some(t) if !t.methods.iter().any(|x| x == m) => Some(format!("method {a}.{m}")),
@@ -501,7 +771,9 @@ impl Talk {
 
     pub(crate) fn credit(&mut self, flow_id: u32, node: u16, amount: u128) {
         let f = self.flow_mut(flow_id);
-        f.ledger.fund(&f.nodes, node, amount).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
+        // A hidden flow's routes aren't known, so its owner may fund any node.
+        let r = if f.is_hidden() { f.ledger.fund_node(&f.inputs[node as usize], node, amount) } else { f.ledger.fund(&f.nodes, node, amount) };
+        r.unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
     }
 
     pub(crate) fn allocated(&self, token: &str) -> u128 {
@@ -516,8 +788,8 @@ impl Talk {
     }
 
     /// Store the record; if it now costs more than the vault paid, the answer
-    /// also makes the vault pay the difference (last action, so the brain's own
-    /// callbacks still find their results at the indices they expect).
+    /// also makes the vault pay the difference (last action, so callbacks still
+    /// find their own results at the indices they expect).
     pub(crate) fn save(self, ans: Answer) -> Answer {
         let owed = record_cost(&self.vault, &self.vs).saturating_sub(self.vs.paid.0);
         store(&self.vault, &self.vs);
@@ -530,32 +802,21 @@ impl Talk {
     }
 
     pub(crate) fn emit(&self, event: &str, data: &str) {
-        env::log_str(&format!(r#"EVENT_JSON:{{"standard":"flows","version":"1.0.0","event":"{event}","data":[{{"vault":"{}",{data}}}]}}"#, self.vault));
+        let sep = if data.is_empty() { "" } else { "," };
+        env::log_str(&format!(r#"EVENT_JSON:{{"standard":"flows","version":"1.0.0","event":"{event}","data":[{{"vault":"{}"{sep}{data}}}]}}"#, self.vault));
     }
 }
 
-/// A brain callback: from a vault (predecessor), carrying no sender (only the
-/// vault's own `cb` makes those), with the brain's own borsh args.
-pub(crate) fn callback<A: BorshDeserialize>() -> (Talk, A) {
-    let input = env::input().unwrap_or_default();
-    let (ctx, body) = wire::parse(&input);
-    require!(ctx.sender.is_none(), "callbacks come from the vault itself");
-    let vault = env::predecessor_account_id();
-    let vs = load(&vault).unwrap_or_else(|| env::panic_str("not a vault"));
-    let a = A::try_from_slice(body).unwrap_or_else(|_| env::panic_str("bad callback"));
-    (Talk { vault, ctx, vs }, a)
-}
-
-/// A promise result (at most 1 KB: we only read amounts), or None if it failed.
-pub(crate) fn result(i: u64) -> Option<Vec<u8>> {
+/// A promise result (at most `max` bytes), or None if it failed or isn't there.
+pub(crate) fn result(i: u64, max: usize) -> Option<Vec<u8>> {
     if i >= env::promise_results_count() {
         return None;
     }
-    env::promise_result_checked(i, 1024).ok()
+    env::promise_result_checked(i, max).ok()
 }
 
 pub(crate) fn amount_result(i: u64) -> Option<u128> {
-    result(i).and_then(|v| near_sdk::serde_json::from_slice::<U128>(&v).ok()).map(|a| a.0)
+    result(i, 1024).and_then(|v| near_sdk::serde_json::from_slice::<U128>(&v).ok()).map(|a| a.0)
 }
 
 fn key(vault: &AccountId) -> Vec<u8> {
@@ -564,6 +825,10 @@ fn key(vault: &AccountId) -> Vec<u8> {
 
 fn load(vault: &AccountId) -> Option<VaultState> {
     env::storage_read(&key(vault)).map(|b| VaultState::try_from_slice(&b).unwrap_or_else(|_| env::panic_str("bad record")))
+}
+
+fn must_load(vault: &AccountId) -> VaultState {
+    load(vault).unwrap_or_else(|| env::panic_str("not a vault"))
 }
 
 fn store(vault: &AccountId, vs: &VaultState) {
