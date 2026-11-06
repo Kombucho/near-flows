@@ -157,10 +157,12 @@ async fn a_hidden_flow_runs_one_revealed_node_with_the_vaults_fingerprints() -> 
     x(&w.alice, &w.vault, json!({"reveal_flow": {"flow_id": f, "nodes": [node], "salts": [salt]}})).await?.into_result()?;
     let stored: Value = w.brain.view("get_flow").args_json(json!({"vault": w.vault, "flow_id": f})).await?.json()?;
     assert_eq!(stored["nodes"].as_array().unwrap().len(), 1);
-    // A market floor isn't run by the brain yet: refused, never silently dropped.
+    // A market floor with no oracle set up: saved, but it never runs without a price.
     let mut floored = node.clone();
     floored["action"]["market"] = json!({"sell": "near", "buy": "usdc", "dec_in": 24, "dec_out": 18, "slippage_bps": 50});
-    assert!(fails_with(&x(&w.alice, &w.vault, json!({"save_flow": {"name": "m", "nodes": [floored]}})).await?, "market floors"));
+    let m: u32 = x(&w.alice, &w.vault, json!({"save_flow": {"name": "m", "nodes": [floored]}})).await?.json()?;
+    x(&w.alice, &w.vault, json!({"fund": {"flow_id": m, "node": 0, "amount": ONE.to_string()}})).await?.into_result()?;
+    assert!(fails_with(&x(&w.keeper, &w.vault, json!({"step": {"flow_id": m, "node": 0}})).await?, "no oracle set up"));
     Ok(())
 }
 
@@ -374,9 +376,24 @@ async fn a_relay_vault_swaps_on_real_intents_with_intents_the_brain_built() -> a
         let r = x(who, &w.vault, json!({"intents_sign_swap": args})).await?;
         assert!(r.is_failure() && !r.logs().iter().any(|l| l.contains("intents_signed")));
     }
-    let r = x(&w.alice, &w.vault, json!({"intents_allow": {"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": "1", "floor_out": "95", "floor_per_in": "100",
-        "market": {"sell": "a", "buy": "b", "dec_in": 18, "dec_out": 18, "slippage_bps": 100}}}})).await?;
-    assert!(fails_with(&r, "market floors"));
+    // 7. A market floor: A and B both at $1 per the oracle (read by the brain), 1% slippage. The keeper
+    //    asks for 1 wei, the hard floor says 95, the market says 99: the brain signs for 99.
+    let pyth = w.worker.dev_deploy(&wasm("mock_pyth")).await?;
+    pyth.call("new").transact().await?.into_result()?;
+    let ids = ["1111111111111111111111111111111111111111111111111111111111111111", "2222222222222222222222222222222222222222222222222222222222222222"];
+    for id in ids {
+        w.alice.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": "100000000", "conf": "0", "expo": -8, "ema": "100000000", "age_s": 0}))
+            .transact().await?.into_result()?;
+    }
+    x(&w.alice, &w.vault, json!({"oracle_setup": {"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
+        {"name": "a", "contract": pyth.id(), "price_id": ids[0], "backup": {"kind": "ema"}},
+        {"name": "b", "contract": pyth.id(), "price_id": ids[1], "backup": {"kind": "ema"}}]}}})).await?.into_result()?;
+    x(&w.alice, &w.vault, json!({"intents_allow": {"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": (200 * ONE).to_string(), "floor_out": "95", "floor_per_in": "100",
+        "market": {"sell": "a", "buy": "b", "dec_in": 18, "dec_out": 18, "slippage_bps": 100}}}})).await?.into_result()?;
+    let r = x(&w.keeper, &w.vault, json!({"intents_sign_swap": {"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600}})).await?;
+    println!("GAS sign an intent with a market floor: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
+    let signed: Value = r.json()?;
+    assert!(signed["payload"]["message"].as_str().unwrap().contains(&format!(r#""nep141:{}":"{}""#, b.id(), 99 * ONE)), "{signed}");
     // Recipes and act can never reach sign / add_public_key / ft_withdraw.
     for (contract, method) in [(signer.id(), "sign"), (verifier.id(), "add_public_key"), (verifier.id(), "ft_withdraw")] {
         assert!(x(&w.alice, &w.vault, json!({"trust": {"add": [{"contract": contract, "methods": [method]}], "remove": []}})).await?.is_failure());
