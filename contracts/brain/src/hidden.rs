@@ -83,14 +83,15 @@ impl Talk {
 mod tests {
     use super::*;
 
-    /// The vault's pinned vector (vault/src/tests.rs): the brain's Recipe must
-    /// encode byte for byte like the vault's, or every saved hidden plan breaks.
+    /// The pinned vector, shared with the keeper (scripts/keeper/src/hidden.test.ts):
+    /// two independent encoders of borsh(Node<Recipe>) must agree byte for byte,
+    /// or every saved hidden plan breaks.
     #[test]
-    fn the_fingerprint_matches_the_vaults_pinned_vector() {
-        let node: Node<Recipe> = near_sdk::serde_json::from_str(include_str!("../../vault/tests-data/fingerprint-node.json")).unwrap();
+    fn the_fingerprint_matches_the_pinned_vector() {
+        let node: Node<Recipe> = near_sdk::serde_json::from_str(include_str!("../tests-data/fingerprint-node.json")).unwrap();
         let p = fingerprint(&node, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
         assert_eq!(p, "ad13adedfaed79107498ceb3bb79901e8dff115529609033291981e71bd0d36b");
-        let remote: Node<Recipe> = near_sdk::serde_json::from_str(include_str!("../../vault/tests-data/fingerprint-remote-node.json")).unwrap();
+        let remote: Node<Recipe> = near_sdk::serde_json::from_str(include_str!("../tests-data/fingerprint-remote-node.json")).unwrap();
         let p = fingerprint(&remote, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
         assert_eq!(p, "cfb851d722d274c36161359966c9a849ee9b7a5a947156f6acd0f7aa2acfe35c");
     }

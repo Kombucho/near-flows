@@ -7,7 +7,7 @@ import { createPublicKey, verify } from "node:crypto";
 import { baseDecode } from "near-api-js";
 import { execTgas, message, OwnerKey, STEP_TGAS } from "./stealth.ts";
 
-// The same vector is pinned in contracts/vault/src/stealth.rs, where the vault's own
+// The same vector is pinned in contracts/brain/src/stealth.rs, where the brain's own
 // code builds the message and checks this signature with env::ed25519_verify.
 const seed = Uint8Array.from({ length: 32 }, (_, i) => i);
 const vault = "k7xq2m.vaults.near";

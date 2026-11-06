@@ -1,12 +1,12 @@
 // Hidden flows, off chain: the owner's plan and the salts that unlock it.
 //
 // On chain a hidden flow is only input tokens and fingerprints,
-// sha256(salt || borsh(node)) per node (contracts/vault/src/hidden.rs).
+// sha256(salt || borsh(node)) per node (contracts/brain/src/hidden.rs).
 // The plain nodes and salts live here, in ~/.flows/hidden/<vault>.json,
 // readable only by the owner and the keeper they share it with.
 //
 // borsh is written out by hand so the byte layout is visible and matches the
-// vault's types field by field; a test pins it to a fingerprint the vault computed.
+// brain's types field by field; a test pins it to a fingerprint the brain computed.
 
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
@@ -24,7 +24,7 @@ type Trigger =
   | { when: "price_below"; price: string }
   | { when: "price_above"; price: string }
   | { when: "manual" };
-// A node on another chain (contracts/vault/src/remote.rs).
+// A node on another chain (contracts/brain/src/remote.rs).
 type Remote = {
   call:
     | { chain: "evm"; template: string; amount_leaf?: number | null; min_leaf?: number | null; deadline_leaf?: number | null }
