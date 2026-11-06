@@ -12,4 +12,4 @@ fn fingerprint_is_pinned() {
     assert_eq!(p, PIN);
 }
 
-const PIN: &str = "dc1b9b766ada17527508e3c4b9ba99fde2d75a9bf5c0d56a28180d4648416eeb";
+const PIN: &str = "996e6f838080503aa9b3851e34d65d50c9aea0a4f0d21f941e68f9fc9f6008f2";

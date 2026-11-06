@@ -8,7 +8,7 @@ const salt = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
 test("the keeper's fingerprint matches the vault's, byte for byte", () => {
   // Same value pinned in contracts/vault/src/tests.rs, computed there by the vault's own code.
-  assert.equal(fingerprint(node, salt), "dc1b9b766ada17527508e3c4b9ba99fde2d75a9bf5c0d56a28180d4648416eeb");
+  assert.equal(fingerprint(node, salt), "996e6f838080503aa9b3851e34d65d50c9aea0a4f0d21f941e68f9fc9f6008f2");
 });
 
 test("any change to a node, or another salt, changes its fingerprint", () => {

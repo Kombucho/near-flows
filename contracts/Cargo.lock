@@ -901,6 +901,7 @@ dependencies = [
 name = "evmtx"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "serde_json",
  "tiny-keccak",
 ]
@@ -1938,6 +1939,13 @@ name = "mock_nft"
 version = "0.1.0"
 dependencies = [
  "near-contract-standards",
+ "near-sdk",
+]
+
+[[package]]
+name = "mock_pyth"
+version = "0.1.0"
+dependencies = [
  "near-sdk",
 ]
 

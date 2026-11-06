@@ -134,6 +134,33 @@ async fn the_vault_builds_and_signs_evm_calls_only_from_its_templates() -> anyho
     assert!(ok.logs().iter().any(|l| l.contains("evm_signed")), "{:?}", ok.failures());
     let r = keeper.call(vault.id(), "evm_call").args_json(call("swap_usdc_weth", &[0, 0, 0, 0, 20_000_000, 0, 0], 4, 30)).max_gas().transact().await?;
     assert!(format!("{:?}", r.failures()).contains("spending limit"));
+
+    // 5. A market floor: the minimum follows the oracle (USDC $1.0001, ETH $2,224.50, 0.5% slippage),
+    //    whatever the keeper quotes. 5 USDC -> at least 0.0022366... WETH (exact, computed with Python fractions).
+    let pyth = worker.dev_deploy(&wasm("mock_pyth")).await?;
+    pyth.call("new").transact().await?.into_result()?;
+    let (eth_id, usdc_id) = ("ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace", "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a");
+    let set = |id: &str, p: i64, age: i64| json!({"price_id": id, "price": p.to_string(), "conf": "0", "expo": -8, "ema": p.to_string(), "age_s": age});
+    alice.call(pyth.id(), "set_price").args_json(set(eth_id, 222_450_000_000, 0)).transact().await?.into_result()?;
+    alice.call(pyth.id(), "set_price").args_json(set(usdc_id, 100_010_000, 0)).transact().await?.into_result()?;
+    alice.call(vault.id(), "oracle_setup").args_json(json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
+        {"name": "eth", "contract": pyth.id(), "price_id": eth_id, "backup": {"kind": "ema"}},
+        {"name": "usdc", "contract": pyth.id(), "price_id": usdc_id, "backup": {"kind": "ema"}}]}})).transact().await?.into_result()?;
+    let mut t = swap_t();
+    t["name"] = json!("swap_usdc_weth_market");
+    t["args"][0]["args"][5] = json!({"rule": "market", "of": 4, "num": "0", "den": "1",
+        "market": {"sell": "usdc", "buy": "eth", "dec_in": 6, "dec_out": 18, "slippage_bps": 50}});
+    alice.call(vault.id(), "evm_template").args_json(json!({"template": t})).transact().await?.into_result()?;
+    alice.call(vault.id(), "set_limit").args_json(json!({"token": format!("evm:11155111:{USDC}"), "max": "1000000000", "window_ns": 86_400_000_000_000u64}))
+        .transact().await?.into_result()?;
+    let r = keeper.call(vault.id(), "evm_call").args_json(call("swap_usdc_weth_market", &[0, 0, 0, 0, 5_000_000, 1, 0], 5, 30)).max_gas().transact().await?;
+    let req = r.logs().iter().find(|l| l.contains("evm_call_requested")).unwrap_or_else(|| panic!("{:?} {:?}", r.logs(), r.failures())).to_string();
+    assert!(req.contains(&format!("{:064x}", 2_236_681_276_691_391u128)), "the oracle floor is the minimum: {req}");
+    assert!(r.logs().iter().any(|l| l.contains("evm_signed")));
+    // A stale price: nothing is signed.
+    alice.call(pyth.id(), "set_price").args_json(set(eth_id, 222_450_000_000, 300)).transact().await?.into_result()?;
+    let r = keeper.call(vault.id(), "evm_call").args_json(call("swap_usdc_weth_market", &[0, 0, 0, 0, 5_000_000, 1, 0], 6, 30)).max_gas().transact().await?;
+    assert!(!r.logs().iter().any(|l| l.contains("evm_signed")) && format!("{:?}", r.failures()).contains("no price fresher"), "{:?}", r.failures());
     let _ = alice.transfer_near(vault.id(), NearToken::from_millinear(1)).await?;
     Ok(())
 }

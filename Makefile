@@ -11,6 +11,7 @@ build:
 	cd contracts/factory && cargo near build non-reproducible-wasm --no-abi
 	cd contracts/mock_dex && cargo near build non-reproducible-wasm --no-abi
 	cd contracts/mock_signer && cargo near build non-reproducible-wasm --no-abi
+	cd contracts/mock_pyth && cargo near build non-reproducible-wasm --no-abi
 
 # Unit tests: math, engine, contract. Two runs: built together, the contract's
 # "near" feature would switch the engine's own tests to on-chain storage maps.

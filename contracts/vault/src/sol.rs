@@ -28,8 +28,11 @@ pub struct SolPair {
     pub out_mint: String,
     /// most input per swap, in the input token's base units
     pub max_in: U128,
-    /// least output per input, scaled 1e12
+    /// least output per input, scaled 1e12 (the owner's hard floor)
     pub min_out_per_in_e12: U128,
+    /// A floor that follows the market, checked on top of the hard floor (oracle.rs).
+    #[serde(default)]
+    pub market: Option<crate::oracle::Market>,
 }
 
 #[near(serializers = [borsh, json])]
@@ -87,6 +90,27 @@ impl Vault {
     pub fn sol_sign_swap(&mut self, message: String) -> Promise {
         let by_owner = env::predecessor_account_id() == self.owner;
         require!(by_owner || Some(env::predecessor_account_id()) == self.keeper, "owner or keeper only");
+        let (pair, _) = self.sol_check(&message, None);
+        match pair.market {
+            None => self.sol_sign(&message, None),
+            // A market floor: read the prices, then check the message again against it.
+            Some(m) => self.oracle_fetch(&[m.sell.clone(), m.buy.clone()]).then(Self::ext(env::current_account_id()).with_static_gas(Gas::from_tgas(90)).on_sol_prices(message)),
+        }
+    }
+
+    #[private]
+    pub fn on_sol_prices(&mut self, message: String) -> Promise {
+        let (pair, _) = self.sol_check(&message, None);
+        let m = pair.market.unwrap();
+        let p = self.oracle_prices(&[m.sell.clone(), m.buy.clone()], 0);
+        self.sol_sign(&message, Some(crate::oracle::market_per_in(&m, p[0], p[1], 1_000_000_000_000)))
+    }
+}
+
+impl Vault {
+    /// The first allowed pair whose policy accepts the message, with solguard's verdict.
+    /// `market_e12`: a market floor (per unit of input, 1e12) the output must also meet.
+    fn sol_check(&self, message: &str, market_e12: Option<u128>) -> (SolPair, solguard::Verdict) {
         let bytes = near_sdk::base64::Engine::decode(&near_sdk::base64::engine::general_purpose::STANDARD, &message)
             .unwrap_or_else(|_| env::panic_str("message: base64"));
         require!(bytes.len() <= 1232, "a Solana message fits in 1232 bytes");
@@ -102,7 +126,7 @@ impl Vault {
                 in_mint: solguard::pubkey(&pair.in_mint),
                 out_mint: solguard::pubkey(&pair.out_mint),
                 max_in: u64::try_from(pair.max_in.0).unwrap_or(u64::MAX),
-                min_out_per_in_e12: pair.min_out_per_in_e12.0,
+                min_out_per_in_e12: pair.min_out_per_in_e12.0.max(if pair.market.is_some() { market_e12.unwrap_or(0) } else { 0 }),
                 max_cu_price: cfg.max_cu_price,
                 max_cu_limit: cfg.max_cu_limit,
             };
@@ -114,7 +138,13 @@ impl Vault {
                 Err(e) => why = format!("{e:?}"),
             }
         }
-        let (pair, verdict) = found.unwrap_or_else(|| env::panic_str(&format!("refused: {why}")));
+        found.unwrap_or_else(|| env::panic_str(&format!("refused: {why}")))
+    }
+
+    fn sol_sign(&mut self, message: &str, market_e12: Option<u128>) -> Promise {
+        let (pair, verdict) = self.sol_check(message, market_e12);
+        let cfg = self.sol.clone().unwrap();
+        let bytes = near_sdk::base64::Engine::decode(&near_sdk::base64::engine::general_purpose::STANDARD, message).unwrap();
         // The amount counted is the one READ FROM THE MESSAGE, not what anyone claims.
         self.charge(&format!("sol:{}", pair.in_mint), verdict.in_amount as u128);
         let hash = hex::encode(env::sha256(&bytes));
@@ -128,6 +158,10 @@ impl Vault {
             .function_call("sign".to_string(), args.to_string().into_bytes(), NearToken::from_yoctonear(1), GAS_SIGN)
             .then(Self::ext(env::current_account_id()).with_static_gas(GAS_CB).on_sol_signed(hash))
     }
+}
+
+#[near]
+impl Vault {
 
     /// The signer answered: publish the signature for the helper to broadcast.
     #[private]

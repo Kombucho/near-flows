@@ -21,6 +21,8 @@ const GAS_CALLBACK: Gas = Gas::from_tgas(10);
 /// What a step needs on top of its recipe's calls: our views and callbacks.
 const STEP_OVERHEAD_TGAS: u64 = 60;
 const PER_CALL_OVERHEAD_TGAS: u64 = 15;
+/// Reading two feeds (with backups) and the callback that follows.
+const ORACLE_OVERHEAD_TGAS: u64 = 40;
 
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +38,8 @@ pub struct StepCtx {
     pub failed: bool,
     /// A hidden flow's node, as revealed to run this step.
     pub revealed: Option<Node<Recipe>>,
+    /// The market floor read from the oracle for this step (per unit of input, 1e24).
+    pub market_per_in: Option<U128>,
 }
 
 #[near]
@@ -55,6 +59,16 @@ impl Vault {
         let price = crate::mul_div(amount.0, PRICE_SCALE, per.0);
         self.start(flow_id, node, Some(price), by_owner, revealed)
     }
+
+    /// The oracle answered for a recipe with a market floor: check the prices, then start.
+    #[private]
+    pub fn on_step_prices(&mut self, flow_id: u32, node: u16, price: Option<U128>, by_owner: bool, revealed: Option<Node<Recipe>>) -> Promise {
+        let m = revealed.as_ref().unwrap_or_else(|| &self.flow(flow_id).nodes[node as usize]).action.market.clone().unwrap();
+        let p = self.oracle_prices(&[m.sell.clone(), m.buy.clone()], 0);
+        let per_in = crate::oracle::market_per_in(&m, p[0], p[1], PRICE_SCALE);
+        self.emit("market_floor", &format!(r#"{{"flow":{flow_id},"node":{node},"sell":"{}","buy":"{}","min_out_per_in":"{per_in}"}}"#, m.sell, m.buy));
+        self.start_now(flow_id, node, price.map(|p| p.0), by_owner, revealed, Some(per_in))
+    }
 }
 
 impl Vault {
@@ -65,7 +79,9 @@ impl Vault {
         require!(self.busy.is_none(), "a step is running");
         // Refuse up front if the caller attached too little gas: a step that runs out
         // halfway would leave the vault busy (found on testnet).
-        let need: u64 = n.action.calls.iter().map(|c| match c { Call::Ft { tgas, .. } | Call::Fn { tgas, .. } => *tgas + PER_CALL_OVERHEAD_TGAS }).sum::<u64>() + STEP_OVERHEAD_TGAS;
+        let need: u64 = n.action.calls.iter().map(|c| match c { Call::Ft { tgas, .. } | Call::Fn { tgas, .. } => *tgas + PER_CALL_OVERHEAD_TGAS }).sum::<u64>()
+            + STEP_OVERHEAD_TGAS
+            + if n.action.market.is_some() { ORACLE_OVERHEAD_TGAS } else { 0 };
         require!(env::prepaid_gas().as_tgas() >= need, format!("attach at least {need} Tgas for this step"));
         // Trust can be withdrawn after a flow was saved: check again before every step.
         if let Some(why) = self.untrusted(&n) {
@@ -159,7 +175,18 @@ impl Vault {
         Self::ext(env::current_account_id()).with_static_gas(GAS_CALLBACK).with_unused_gas_weight(1)
     }
 
+    /// Start the step; a recipe with a market floor reads the oracle first.
     fn start(&mut self, flow_id: u32, node: u16, price: Option<u128>, by_owner: bool, revealed: Option<Node<Recipe>>) -> Promise {
+        let market = revealed.as_ref().unwrap_or_else(|| &self.flow(flow_id).nodes[node as usize]).action.market.clone();
+        match market {
+            None => self.start_now(flow_id, node, price, by_owner, revealed, None),
+            Some(m) => self
+                .oracle_fetch(&[m.sell.clone(), m.buy.clone()])
+                .then(Self::ext(env::current_account_id()).with_static_gas(GAS_CALLBACK).with_unused_gas_weight(1).on_step_prices(flow_id, node, price.map(U128), by_owner, revealed)),
+        }
+    }
+
+    fn start_now(&mut self, flow_id: u32, node: u16, price: Option<u128>, by_owner: bool, revealed: Option<Node<Recipe>>, market_per_in: Option<u128>) -> Promise {
         require!(self.busy.is_none(), "a step is running");
         let now = env::block_timestamp();
         let f = self.flow_mut(flow_id);
@@ -177,6 +204,7 @@ impl Vault {
             native_used: U128(0),
             failed: false,
             revealed,
+            market_per_in: market_per_in.map(U128),
         });
         self.measure(true)
     }
@@ -228,7 +256,7 @@ impl Vault {
             return self.measure(false);
         }
         let amount = ctx.amount.0;
-        let min_out = node.action.min_out_per_in.map_or(0, |m| crate::mul_div(amount, m.0, PRICE_SCALE));
+        let min_out = crate::mul_div(amount, min_per_in(&node.action, &ctx), PRICE_SCALE);
         let scaled = node.action.scale_per_in.map_or(0, |m| crate::mul_div(amount, m.0, PRICE_SCALE));
         let fill = |s: &str| {
             s.replace("{amount}", &amount.to_string())
@@ -270,7 +298,7 @@ impl Vault {
         let (min, promises_output) = {
             let n = &node;
             // A collector finding nothing yet is normal; only spenders must get something back.
-            (n.action.min_out_per_in.map_or(0, |m| crate::mul_div(extra, m.0, PRICE_SCALE)), n.action.out.is_some() && n.input != flow::NO_INPUT)
+            (crate::mul_div(extra, min_per_in(&n.action, &ctx), PRICE_SCALE), n.action.out.is_some() && n.input != flow::NO_INPUT)
         };
         let f = self.flow_mut(ctx.flow);
         f.ledger.finish_node(&node, ctx.node, result).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
@@ -299,4 +327,9 @@ impl Vault {
         // Promise chains need a promise; a self-view is the cheapest no-op.
         Promise::new(env::current_account_id()).function_call_weight("get_owner".to_string(), b"{}".to_vec(), NearToken::from_yoctonear(0), GAS_VIEW, GasWeight(0))
     }
+}
+
+/// The least output per unit of input (1e24): the owner's floor or the market's, whichever is higher.
+fn min_per_in(r: &Recipe, ctx: &StepCtx) -> u128 {
+    r.min_out_per_in.map_or(0, |m| m.0).max(ctx.market_per_in.map_or(0, |m| m.0))
 }

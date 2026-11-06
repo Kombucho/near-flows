@@ -31,6 +31,9 @@ pub struct IntentsPair {
     /// token_in (e.g. 0.25 wNEAR per 1 USDC = 25e22 per 1e6). Exact for any decimals.
     pub floor_out: U128,
     pub floor_per_in: U128,
+    /// A floor that follows the market, on top of the hard floor (oracle.rs).
+    #[serde(default)]
+    pub market: Option<crate::oracle::Market>,
 }
 
 #[near(serializers = [borsh, json])]
@@ -110,15 +113,27 @@ impl Vault {
         let out_min = min_out.0.max(floor).max(1);
         self.charge(&format!("intents:{token_in}"), amount_in.0);
         let pending = Pending { token_in, amount_in, token_out, min_out: U128(out_min), deadline_ns: env::block_timestamp() + valid_secs * 1_000_000_000 };
-        // The salt comes from the verifier itself, not from anyone's say-so.
-        Promise::new(cfg.verifier)
-            .function_call("current_salt".to_string(), b"{}".to_vec(), NearToken::from_yoctonear(0), Gas::from_tgas(5))
-            .then(Self::ext(env::current_account_id()).with_static_gas(Gas::from_tgas(80)).on_intents_salt(pending))
+        // The salt comes from the verifier itself, not from anyone's say-so; a market
+        // floor's prices are read in the same round.
+        let mut p = Promise::new(cfg.verifier).function_call("current_salt".to_string(), b"{}".to_vec(), NearToken::from_yoctonear(0), Gas::from_tgas(5));
+        if let Some(m) = &pair.market {
+            p = p.and(self.oracle_fetch(&[m.sell.clone(), m.buy.clone()]));
+        }
+        p.then(Self::ext(env::current_account_id()).with_static_gas(Gas::from_tgas(90)).on_intents_salt(pending))
     }
 
     #[private]
-    pub fn on_intents_salt(&mut self, pending: Pending, #[callback_unwrap] salt: String) -> Promise {
+    pub fn on_intents_salt(&mut self, pending: Pending) -> Promise {
+        let mut pending = pending;
+        let raw = env::promise_result_checked(0, 256).unwrap_or_else(|_| env::panic_str("the verifier didn't answer"));
+        let salt: String = near_sdk::serde_json::from_slice(&raw).unwrap_or_else(|_| env::panic_str("bad salt"));
         let salt: [u8; 4] = hex::decode(&salt).ok().and_then(|v| v.try_into().ok()).unwrap_or_else(|| env::panic_str("bad salt"));
+        let market = self.intents.as_ref().unwrap().pairs.iter().find(|p| p.token_in == pending.token_in && p.token_out == pending.token_out).and_then(|p| p.market.clone());
+        if let Some(m) = market {
+            let p = self.oracle_prices(&[m.sell.clone(), m.buy.clone()], 1);
+            let floor = crate::oracle::market_min(&m, pending.amount_in.0, p[0], p[1]);
+            pending.min_out = U128(pending.min_out.0.max(floor));
+        }
         let cfg = self.intents.clone().unwrap();
         let random: [u8; 15] = env::random_seed_array()[..15].try_into().unwrap();
         let nonce = intentsig::versioned_nonce(salt, pending.deadline_ns as i64, random);

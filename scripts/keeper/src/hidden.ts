@@ -33,6 +33,7 @@ export type Node = {
     min_out_per_in: string | null;
     price: { contract: string; method: string; args: string; per: string } | null;
     scale_per_in?: string | null;
+    market?: { sell: string; buy: string; dec_in: number; dec_out: number; slippage_bps: number } | null;
   };
   when: Trigger;
   next?: { to: number; bps: number }[];
@@ -79,6 +80,7 @@ export function borshNode(n: Node): Buffer {
   w.opt(a.min_out_per_in, (v) => w.u128(v));
   w.opt(a.price, (p) => { w.str(p.contract); w.str(p.method); w.str(p.args); w.u128(p.per); });
   w.opt(a.scale_per_in, (v) => w.u128(v));
+  w.opt(a.market, (m) => { w.str(m.sell); w.str(m.buy); w.u8(m.dec_in); w.u8(m.dec_out); w.u32(m.slippage_bps); });
   const t = n.when;
   switch (t.when) {
     case "now": w.u8(0); break;

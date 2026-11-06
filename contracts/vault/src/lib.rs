@@ -24,6 +24,7 @@ pub mod evm;
 pub mod hidden;
 pub mod intents;
 mod limits;
+pub mod oracle;
 pub mod sol;
 mod step;
 #[cfg(test)]
@@ -117,6 +118,10 @@ pub struct Recipe {
     /// Fills {scaled}: amount * scale_per_in / 1e24.
     #[serde(default)]
     pub scale_per_in: Option<U128>,
+    /// A minimum that follows the market: {min_out} is also at least the oracle
+    /// price minus slippage, read when the step runs (oracle.rs).
+    #[serde(default)]
+    pub market: Option<oracle::Market>,
 }
 
 impl Action for Recipe {
@@ -210,13 +215,15 @@ pub struct Vault {
     pub evm: Option<evm::EvmConfig>,
     /// NEAR Intents, signed via Chain Signatures (intents.rs).
     pub intents: Option<intents::IntentsConfig>,
+    /// Price feeds for market floors (oracle.rs).
+    pub oracle: Option<oracle::OracleConfig>,
 }
 
 #[near]
 impl Vault {
     #[init]
     pub fn new(owner: AccountId, keeper: Option<AccountId>) -> Self {
-        Self { owner, keeper, flows: Vec::new(), busy: None, trusted: Vec::new(), limits: Vec::new(), pending: Vec::new(), sol: None, evm: None, intents: None }
+        Self { owner, keeper, flows: Vec::new(), busy: None, trusted: Vec::new(), limits: Vec::new(), pending: Vec::new(), sol: None, evm: None, intents: None, oracle: None }
     }
 
     // ---------- owner ----------

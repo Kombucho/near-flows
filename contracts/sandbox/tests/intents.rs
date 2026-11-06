@@ -140,6 +140,25 @@ async fn a_keyless_vault_swaps_on_real_intents_with_intents_it_signed_itself() -
         let r = who.call(vault.id(), "intents_sign_swap").args_json(args).max_gas().transact().await?;
         assert!(r.is_failure() && !r.logs().iter().any(|l| l.contains("intents_signed")));
     }
+    // 7. A market floor: A and B both at $1 per the oracle, 1% slippage. The keeper asks for 1 wei;
+    //    the hard floor says 95; the market says 99: the vault signs for 99.
+    let pyth = worker.dev_deploy(&ours("mock_pyth")).await?;
+    pyth.call("new").transact().await?.into_result()?;
+    let ids = ["1111111111111111111111111111111111111111111111111111111111111111", "2222222222222222222222222222222222222222222222222222222222222222"];
+    for id in ids {
+        alice.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": "100000000", "conf": "0", "expo": -8, "ema": "100000000", "age_s": 0}))
+            .transact().await?.into_result()?;
+    }
+    alice.call(vault.id(), "oracle_setup").args_json(json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
+        {"name": "a", "contract": pyth.id(), "price_id": ids[0], "backup": {"kind": "ema"}},
+        {"name": "b", "contract": pyth.id(), "price_id": ids[1], "backup": {"kind": "ema"}}]}})).transact().await?.into_result()?;
+    alice.call(vault.id(), "intents_allow").args_json(json!({"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": (200 * ONE).to_string(), "floor_out": "95", "floor_per_in": "100",
+        "market": {"sell": "a", "buy": "b", "dec_in": 18, "dec_out": 18, "slippage_bps": 100}}})).transact().await?.into_result()?;
+    let r = keeper.call(vault.id(), "intents_sign_swap").args_json(json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600}))
+        .max_gas().transact().await?;
+    let ev = r.logs().iter().find(|l| l.contains("intents_signed")).cloned().unwrap_or_else(|| panic!("{:?} {:?}", r.logs(), r.failures()));
+    assert!(ev.contains(&format!(r#"\"nep141:{}\":\"{}\""#, b.id(), 99 * ONE)), "signed for the market floor: {ev}");
+
     // Recipes can never move Intents balances directly (mt_transfer / ft_withdraw are fund-moving).
     let r = alice.call(vault.id(), "trust").args_json(json!({"add": [{"contract": verifier.id(), "methods": ["ft_withdraw"]}], "remove": []})).transact().await?;
     assert!(r.is_failure(), "ft_withdraw can't be handed to recipes");

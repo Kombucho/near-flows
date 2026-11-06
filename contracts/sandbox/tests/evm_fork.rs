@@ -103,7 +103,7 @@ async fn the_vault_runs_uniswap_and_aave_templates_on_a_base_fork() -> anyhow::R
     let ausdc = balance(AUSDC, &me);
     println!("supplied {:.2} USDC to Aave: vault holds {:.2} aUSDC", usdc as f64 / 1e6, ausdc as f64 / 1e6);
     assert_eq!(balance(USDC, &me), 0);
-    assert!(ausdc + 1 >= usdc, "aUSDC 1:1 (rounding)");
+    assert!(ausdc + 2 >= usdc, "aUSDC 1:1, give or take Aave's index rounding (seen: 2 wei)");
     let r = keeper.call(vault.id(), "evm_call").args_json(call("aave_withdraw_usdc", vec![0, ausdc, 0])).max_gas().transact().await?;
     assert_eq!(send_raw(&signed(&r)), 1, "Aave withdraw executed");
     println!("withdrew: vault holds {:.2} USDC, {:.2} aUSDC", balance(USDC, &me) as f64 / 1e6, balance(AUSDC, &me) as f64 / 1e6);

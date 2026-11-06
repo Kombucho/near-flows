@@ -1,0 +1,11 @@
+[package]
+name = "mock_pyth"
+version = "0.1.0"
+edition = "2021"
+description = "Test-only stand-in for the Pyth receiver on NEAR: the same price views (get_price_no_older_than, get_ema_price_no_older_than), prices set by hand."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = "5.30.0"

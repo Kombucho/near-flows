@@ -8,7 +8,8 @@
     "flows": "tsx src/flows-main.ts",
     "jupiter": "tsx src/jupiter.ts",
     "intents": "tsx src/intents-solver.ts",
-    "hidden": "tsx src/hidden-main.ts"
+    "hidden": "tsx src/hidden-main.ts",
+    "pyth": "tsx src/pyth.ts"
   },
   "author": "",
   "license": "MIT",

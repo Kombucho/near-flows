@@ -8,6 +8,7 @@
 //! - vault: the vault's own EVM address (recipient, onBehalfOf, to),
 //! - at_most: a number the keeper picks, up to a cap (an amount),
 //! - floor: a minimum the keeper quotes, never below amount x num / den (the owner's floor),
+//! - market: like floor, and also never below the oracle price minus slippage (oracle.rs),
 //! - same: equal to another number (an amount repeated, e.g. the ETH attached),
 //! - bytes: always these bytes (a router command, Universal Router actions).
 //! A keeper fills in numbers; it never picks an address or a byte. There is no
@@ -51,6 +52,9 @@ pub enum Arg {
     AtMost { max: U128 },
     /// A minimum the keeper quotes; the vault uses at least `leaf[of] * num / den`.
     Floor { of: u8, num: U128, den: U128 },
+    /// A minimum that follows the market: at least the hard floor `leaf[of] * num / den`
+    /// AND the oracle price of `market` (read by the vault before it signs).
+    Market { of: u8, num: U128, den: U128, market: crate::oracle::Market },
     /// Equal to number leaf `of`.
     Same { of: u8 },
     /// `bytes` that are always these (hex).
@@ -162,10 +166,32 @@ impl Vault {
     pub fn evm_call(&mut self, name: String, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64) -> Promise {
         let cfg = self.evm_caller_cfg();
         let t = cfg.templates.iter().find(|t| t.name == name).cloned().unwrap_or_else(|| env::panic_str("refused: no such template"));
+        let feeds = market_feeds(&leaves(&t));
+        if feeds.is_empty() {
+            return self.evm_build(cfg, t, values, nonce, max_fee, max_tip, gas, &[]);
+        }
+        // Market minimums: read the prices first, then build in the callback.
+        self.oracle_fetch(&feeds).then(Self::ext(env::current_account_id()).with_static_gas(Gas::from_tgas(80)).on_evm_prices(name, values, nonce, max_fee, max_tip, gas))
+    }
+
+    #[private]
+    pub fn on_evm_prices(&mut self, name: String, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64) -> Promise {
+        let cfg = self.evm.clone().unwrap();
+        let t = cfg.templates.iter().find(|t| t.name == name).cloned().unwrap_or_else(|| env::panic_str("refused: no such template"));
+        let feeds = market_feeds(&leaves(&t));
+        let prices: Vec<(String, u128)> = feeds.iter().cloned().zip(self.oracle_prices(&feeds, 0)).collect();
+        self.evm_build(cfg, t, values, nonce, max_fee, max_tip, gas, &prices)
+    }
+}
+
+impl Vault {
+    #[allow(clippy::too_many_arguments)]
+    fn evm_build(&mut self, cfg: EvmConfig, t: EvmTemplate, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64, prices: &[(String, u128)]) -> Promise {
+        let name = t.name.clone();
         let me = parse_address(cfg.address.as_deref().unwrap_or_else(|| env::panic_str("the vault's EVM address isn't known yet"))).unwrap();
         let rules = leaves(&t);
         require!(values.len() == rules.len(), format!("one value per leaf ({})", rules.len()));
-        let nums = numbers(&rules, &values);
+        let nums = numbers(&rules, &values, prices);
         let tys = sig::args(&t.function).unwrap();
         let mut at = 0;
         let vals: Vec<Val> = t.args.iter().zip(&tys).map(|(r, ty)| build(r, ty, &me, &nums, &mut at)).collect();
@@ -183,6 +209,10 @@ impl Vault {
         self.emit("evm_call_requested", &format!(r#"{{"template":"{name}","to":"{}","value":"{value}","data":"0x{}"}}"#, t.to, hex::encode(&tx.data)));
         self.evm_sign(cfg.signer, tx)
     }
+}
+
+#[near]
+impl Vault {
 
     #[private]
     pub fn on_evm_signed(&mut self, tx: TxJson) {
@@ -301,7 +331,7 @@ fn check_template(t: &mut EvmTemplate) {
     let rules: Vec<Arg> = leaves(t);
     for (i, r) in rules.iter().enumerate() {
         match r {
-            Arg::Floor { of, .. } => require!(kinds.get(*of as usize) == Some(&Leaf::Amount), format!("leaf {i}: a floor is relative to an at_most amount")),
+            Arg::Floor { of, .. } | Arg::Market { of, .. } => require!(kinds.get(*of as usize) == Some(&Leaf::Amount), format!("leaf {i}: a floor is relative to an at_most amount")),
             Arg::Same { of } => require!(matches!(kinds.get(*of as usize), Some(Leaf::Amount | Leaf::Min)), format!("leaf {i}: same as an at_most or floor number")),
             _ => {}
         }
@@ -326,6 +356,10 @@ fn check_rule(r: &mut Arg, ty: &Ty, kinds: &mut Vec<Leaf>, depth: u8) {
         (Arg::AtMost { .. }, Ty::Uint(_)) => kinds.push(Leaf::Amount),
         (Arg::Floor { den, .. }, Ty::Uint(_)) => {
             require!(den.0 > 0, format!("leaf {i}: den > 0"));
+            kinds.push(Leaf::Min)
+        }
+        (Arg::Market { den, market, .. }, Ty::Uint(_)) => {
+            require!(den.0 > 0 && market.slippage_bps <= 5_000 && market.dec_in <= 36 && market.dec_out <= 36, format!("leaf {i}: den > 0, slippage <= 50%, decimals <= 36"));
             kinds.push(Leaf::Min)
         }
         (Arg::Same { .. }, Ty::Uint(_)) => kinds.push(Leaf::Same),
@@ -364,6 +398,7 @@ fn rule_name(r: &Arg) -> &'static str {
         Arg::Vault => "vault",
         Arg::AtMost { .. } => "at_most",
         Arg::Floor { .. } => "floor",
+        Arg::Market { .. } => "market",
         Arg::Same { .. } => "same",
         Arg::Bytes { .. } => "bytes",
         Arg::Encoded { .. } => "encoded",
@@ -386,9 +421,24 @@ fn leaves(t: &EvmTemplate) -> Vec<Arg> {
     out
 }
 
+/// The feeds a template's market leaves need, each once.
+fn market_feeds(rules: &[Arg]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in rules {
+        if let Arg::Market { market, .. } = r {
+            for f in [&market.sell, &market.buy] {
+                if !out.contains(f) {
+                    out.push(f.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The number each numeric leaf ends up with: amounts capped, minimums at least
-/// their floor, `same` copied. None for non-numeric leaves.
-fn numbers(rules: &[Arg], values: &[U128]) -> Vec<Option<u128>> {
+/// their floor (and the market's, from `prices`), `same` copied. None for non-numeric leaves.
+fn numbers(rules: &[Arg], values: &[U128], prices: &[(String, u128)]) -> Vec<Option<u128>> {
     let mut nums: Vec<Option<u128>> = vec![None; rules.len()];
     for (i, r) in rules.iter().enumerate() {
         if let Arg::AtMost { max } = r {
@@ -397,9 +447,18 @@ fn numbers(rules: &[Arg], values: &[U128]) -> Vec<Option<u128>> {
         }
     }
     for (i, r) in rules.iter().enumerate() {
-        if let Arg::Floor { of, num, den } = r {
-            let floor = crate::mul_div(nums[*of as usize].unwrap_or(0), num.0, den.0);
-            nums[i] = Some(values[i].0.max(floor));
+        match r {
+            Arg::Floor { of, num, den } => {
+                let floor = crate::mul_div(nums[*of as usize].unwrap_or(0), num.0, den.0);
+                nums[i] = Some(values[i].0.max(floor));
+            }
+            Arg::Market { of, num, den, market } => {
+                let amount = nums[*of as usize].unwrap_or(0);
+                let price = |f: &String| prices.iter().find(|(n, _)| n == f).map(|(_, p)| *p).unwrap_or_else(|| env::panic_str("refused: no price"));
+                let floor = crate::mul_div(amount, num.0, den.0).max(crate::oracle::market_min(market, amount, price(&market.sell), price(&market.buy)));
+                nums[i] = Some(values[i].0.max(floor));
+            }
+            _ => {}
         }
     }
     for (i, r) in rules.iter().enumerate() {
