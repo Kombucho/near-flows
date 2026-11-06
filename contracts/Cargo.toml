@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["math", "engine", "flow", "sim", "market", "bazaar", "vault", "factory", "solguard", "evmtx", "intentsig", "mock_ft", "mock_nft", "mock_dex", "mock_signer", "mock_pyth", "sandbox"]
+members = ["math", "engine", "flow", "sim", "market", "bazaar", "vault", "factory", "relay", "brain", "factory_relay", "mock_brain", "solguard", "evmtx", "intentsig", "mock_ft", "mock_nft", "mock_dex", "mock_signer", "mock_pyth", "sandbox"]
 
 # Contracts handle money: an overflow must abort the call, never wrap around silently.
 [profile.release]
@@ -9,6 +9,12 @@ codegen-units = 1
 opt-level = "z"
 lto = true
 panic = "abort"
+
+# The relay (vault body) is built with plain cargo, no cargo-near (it has no near-sdk):
+# cargo build -p relay --profile relay --target wasm32-unknown-unknown
+[profile.relay]
+inherits = "release"
+strip = true
 
 # The simulator must CATCH panics (to count them per seed), so it needs unwinding.
 # Build it with: cargo run --profile sim -p sim

@@ -1,0 +1,11 @@
+[package]
+name = "mock_brain"
+version = "0.1.0"
+edition = "2021"
+description = "Test-only fake brain: answers every vault call with whatever bytes were set. Used to forge answers and check the relay refuses them."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = "5.30.0"

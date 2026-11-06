@@ -1,0 +1,17 @@
+[package]
+name = "brain"
+version = "0.1.0"
+edition = "2021"
+description = "NEAR contract: the shared vault BRAIN. Holds every relay vault's rules and state, decides, and hands each vault the actions to execute."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = "5.30.0"
+flow = { path = "../flow", features = ["borsh", "serde"] }
+math = { path = "../math" }
+
+[dev-dependencies]
+near-sdk = { version = "5.30.0", features = ["unit-testing"] }
+relay = { path = "../relay" }

@@ -225,6 +225,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain"
+version = "0.1.0"
+dependencies = [
+ "flow",
+ "math",
+ "near-sdk",
+ "relay",
+]
+
+[[package]]
 name = "bs58"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -908,6 +918,13 @@ dependencies = [
 
 [[package]]
 name = "factory"
+version = "0.1.0"
+dependencies = [
+ "near-sdk",
+]
+
+[[package]]
+name = "factory_relay"
 version = "0.1.0"
 dependencies = [
  "near-sdk",
@@ -1915,6 +1932,13 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mock_brain"
+version = "0.1.0"
+dependencies = [
+ "near-sdk",
 ]
 
 [[package]]
@@ -3045,6 +3069,10 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "relay"
+version = "0.1.0"
 
 [[package]]
 name = "reqwest"
