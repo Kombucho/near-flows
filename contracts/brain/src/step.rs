@@ -2,7 +2,7 @@
 //! so the brain reads them ITSELF (its own promises, `on_read`); only the
 //! recipe's calls go through the vault, because only they must come from it:
 //!
-//!   vault x -> brain: [price view] -> balances before -> answer: call 1
+//!   vault x -> brain: [price view] -> [market floor] -> balances before -> answer: call 1
 //!   vault cb runs call 1 -> brain on_vault -> answer: call 2 ...
 //!   ... last call -> brain on_vault: balances after -> answer: done
 //!
@@ -36,6 +36,8 @@ pub struct StepCtx {
     pub failed: bool,
     /// A hidden flow's node, as revealed to run this step.
     pub revealed: Option<Node<Recipe>>,
+    /// The market floor read from the oracle for this step (per unit of input, 1e24).
+    pub market_per_in: Option<U128>,
 }
 
 /// Gas the vault's rounds need after the brain's first answer.
@@ -49,6 +51,7 @@ impl Talk {
         let by_owner = *sender == self.vs.owner;
         require!(by_owner || Some(sender) == self.vs.keeper.as_ref(), "owner or keeper only");
         self.idle();
+        require!(n.action.remote.is_none(), "a remote node runs with step_remote");
         // A step that runs out of gas halfway leaves the vault busy: refuse up front.
         let need = need_tgas(&n);
         require!(self.ctx.gas_left / 1_000_000_000_000 >= need, format!("attach at least {} Tgas for this step", need + crate::HANDLE_TGAS));
@@ -57,9 +60,9 @@ impl Talk {
         let revealed = hidden.then(|| n.clone());
         if matches!(n.when, flow::Trigger::PriceBelow { .. } | flow::Trigger::PriceAbove { .. }) {
             let src = n.action.price.clone().unwrap_or_else(|| env::panic_str("price trigger without a price source"));
-            // Its callback reads the balances next, so it gets two reads' worth.
+            // Its callback may read the market and then the balances: three reads' worth.
             let read = Read::Price { flow_id, node, by_owner, per: src.per.0, revealed };
-            return self.read(vec![(src.contract, src.method, src.args)], read, Gas::from_tgas(2 * GAS_READ.as_tgas()));
+            return self.read(vec![(src.contract, src.method, src.args)], read, Gas::from_tgas(3 * GAS_READ.as_tgas()));
         }
         self.start(flow_id, node, None, by_owner, revealed)
     }
@@ -70,7 +73,29 @@ impl Talk {
         self.start(flow_id, node, Some(mul_div(amount, PRICE_SCALE, per)), by_owner, revealed)
     }
 
+    /// Start the step; a recipe with a market floor has the brain read the oracle first.
     fn start(&mut self, flow_id: u32, node: u16, price: Option<u128>, by_owner: bool, revealed: Option<Node<Recipe>>) -> Reply {
+        let market = revealed.as_ref().unwrap_or_else(|| &self.flow(flow_id).nodes[node as usize]).action.market.clone();
+        match market {
+            None => self.start_now(flow_id, node, price, by_owner, revealed, None),
+            Some(m) => {
+                let views = self.feed_views(&[m.sell.clone(), m.buy.clone()]);
+                let read = Read::StepPrices { flow_id, node, price, by_owner, revealed };
+                self.read(views, read, Gas::from_tgas(2 * GAS_READ.as_tgas()))
+            }
+        }
+    }
+
+    /// The oracle answered for a recipe with a market floor: check the prices, then start.
+    pub(crate) fn on_step_prices(&mut self, flow_id: u32, node: u16, price: Option<u128>, by_owner: bool, revealed: Option<Node<Recipe>>) -> Reply {
+        let m = revealed.as_ref().unwrap_or_else(|| &self.flow(flow_id).nodes[node as usize]).action.market.clone().unwrap();
+        let p = self.prices(&[m.sell.clone(), m.buy.clone()], 0);
+        let per_in = crate::oracle::market_per_in(&m, p[0], p[1], PRICE_SCALE);
+        self.emit("market_floor", &format!(r#""flow":{flow_id},"node":{node},"sell":"{}","buy":"{}","min_out_per_in":"{per_in}""#, m.sell, m.buy));
+        self.start_now(flow_id, node, price, by_owner, revealed, Some(per_in))
+    }
+
+    fn start_now(&mut self, flow_id: u32, node: u16, price: Option<u128>, by_owner: bool, revealed: Option<Node<Recipe>>, market_per_in: Option<u128>) -> Reply {
         self.idle();
         let now = env::block_timestamp();
         let f = self.flow_mut(flow_id);
@@ -90,6 +115,7 @@ impl Talk {
             native_used: U128(0),
             failed: false,
             revealed,
+            market_per_in: market_per_in.map(U128),
         });
         self.measure(true)
     }
@@ -218,7 +244,7 @@ impl Talk {
             return self.measure(false);
         }
         let amount = ctx.amount.0;
-        let min_out = mul_div(amount, node.action.min_out_per_in.map_or(0, |m| m.0), PRICE_SCALE);
+        let min_out = mul_div(amount, min_per_in(&node.action, &ctx), PRICE_SCALE);
         let scaled = node.action.scale_per_in.map_or(0, |m| mul_div(amount, m.0, PRICE_SCALE));
         let fill = |s: &str| {
             s.replace("{amount}", &amount.to_string())
@@ -251,7 +277,7 @@ impl Talk {
     fn end(&mut self, result: Result<u128, u128>, extra: u128, ok: bool) -> Reply {
         let ctx = self.vs.busy.take().unwrap();
         let node = self.node(&ctx);
-        let min = mul_div(extra, node.action.min_out_per_in.map_or(0, |m| m.0), PRICE_SCALE);
+        let min = mul_div(extra, min_per_in(&node.action, &ctx), PRICE_SCALE);
         // A collector finding nothing yet is normal; only spenders must get something back.
         let promises_output = node.action.out.is_some() && node.input != flow::NO_INPUT;
         let f = self.flow_mut(ctx.flow);
@@ -276,4 +302,9 @@ impl Talk {
         self.emit(if ok { "step" } else { "step_failed" }, &data);
         Answer::default().ret(&format!("{{{data}}}")).into()
     }
+}
+
+/// The least output per unit of input (1e24): the owner's floor or the market's, whichever is higher.
+fn min_per_in(r: &Recipe, ctx: &StepCtx) -> u128 {
+    r.min_out_per_in.map_or(0, |m| m.0).max(ctx.market_per_in.map_or(0, |m| m.0))
 }

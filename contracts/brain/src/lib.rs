@@ -22,31 +22,20 @@
 //!
 //! # Porting status
 //!
-//! Ported (same request names and arguments as the vault's methods, so apps and
-//! keepers change only the door: `x` with `{"<method>": <args>}`):
+//! Everything the full vault does, with the same request names and arguments
+//! as the vault's methods (apps and keepers change only the door: `x` with
+//! `{"<method>": <args>}`; stealth relayers call `exec` unchanged):
 //! - core: trust, save/delete/fund/drain/resume/unstick, step, withdraw,
-//!   set_keeper, act (owner's one-off call).
-//! - limits.rs: spending limits, the 24 h delay on loosening. Pure state.
-//! - hidden.rs: fingerprints byte-identical (the vault's pinned vector is
-//!   tested here too); `step_hidden` carries the revealed node.
-//! - stealth.rs: the owner as an Ed25519 key, `exec` with nonce/expiry, the
-//!   same signed text. The relay exports `exec`, so the keeper's stealth.ts
-//!   calls it unchanged. The vault's "call myself" trick isn't needed: the
-//!   brain burns the nonce, then runs the command as the owner in the next
-//!   round (`on_vault` Exec), so a failed command still can't be replayed.
-//! - intents.rs: setup (the brain reads the vault's derived key itself),
-//!   allow, sign_swap (the brain reads the verifier's salt itself; the `sign`
-//!   CALL comes from the vault, so the MPC key is still per vault), withdraw.
-//!
-//! Not yet (other engineers are changing them; they port after their merges):
-//! - oracle.rs: market floors. A recipe or Intents pair WITH a `market` is
-//!   refused here rather than silently run without its floor. The field stays
-//!   in `Recipe` so hidden-flow fingerprints stay byte-identical. The pattern
-//!   is ready: Pyth views become `on_read` reads like balances.
-//! - evm.rs / sol.rs / soltemplates.rs: evmtx/solguard run in the brain on the
-//!   request; the answer is a CALL `signer.sign{payload, path}` from the vault
-//!   (derived addresses stay per vault), then `on_vault` assembles the signed
-//!   tx and returns it as the vault's return value to the keeper.
+//!   withdraw_to, set_keeper, act.
+//! - limits, hidden (fingerprints byte-identical to the vault's pins, remote
+//!   nodes included), stealth (same signed text), intents.
+//! - oracle: market floors on recipes, EVM leaves, Solana pairs and Intents
+//!   pairs; Pyth / priceboard reads issued by the brain itself.
+//! - evm: templates and rule trees, built and checked here, signed by the
+//!   vault's `sign` (the address stays per vault).
+//! - sol + soltemplates: Jupiter checks and instruction templates (owner
+//!   co-sign), signed by the vault's `sign`.
+//! - remote: flow nodes on other chains, keeper-reported outputs capped and floored.
 //!
 //! What can't port as is:
 //! - The vault's synchronous state: balance and storage are a snapshot in the
@@ -64,9 +53,13 @@
 //! from the vault for the difference (plus a small buffer). A vault that can't
 //! afford it is refused the change.
 
+pub mod evm;
 mod hidden;
-mod intents;
+pub mod intents;
 mod limits;
+pub mod oracle;
+pub mod remote;
+pub mod sol;
 mod stealth;
 mod step;
 pub mod wire;
@@ -79,6 +72,8 @@ use near_sdk::{env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Pr
 pub use hidden::fingerprint;
 pub use intents::{IntentsConfig, IntentsPair};
 pub use limits::{Limit, PendingLimit};
+pub use oracle::{Market, OracleConfig};
+pub use remote::Remote;
 pub use step::StepCtx;
 use wire::{Answer, Ctx};
 
@@ -96,7 +91,7 @@ const RECORD_OVERHEAD: u64 = 40;
 const PAY_BUFFER_BYTES: u128 = 500;
 
 /// What the relay gives `handle` (relay GAS_HANDLE): the next round has the rest.
-pub(crate) const HANDLE_TGAS: u64 = 60;
+pub(crate) const HANDLE_TGAS: u64 = 100;
 pub(crate) const GAS_VIEW: Gas = Gas::from_tgas(5);
 /// The brain's own read callback; one that may read again gets twice this.
 pub(crate) const GAS_READ: Gas = Gas::from_tgas(20);
@@ -143,18 +138,6 @@ pub struct PriceSource {
     pub per: U128,
 }
 
-/// The vault's oracle.rs Market, as data only: kept so a recipe's borsh (and so a
-/// hidden node's fingerprint) is byte-identical to the vault's. Not run yet.
-#[near(serializers = [borsh, json])]
-#[derive(Clone, Debug, PartialEq)]
-pub struct Market {
-    pub sell: String,
-    pub buy: String,
-    pub dec_in: u8,
-    pub dec_out: u8,
-    pub slippage_bps: u32,
-}
-
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Recipe {
@@ -167,13 +150,22 @@ pub struct Recipe {
     pub scale_per_in: Option<U128>,
     #[serde(default)]
     pub market: Option<Market>,
+    /// A node on another chain (remote.rs): `calls` empty, `out` None.
+    #[serde(default)]
+    pub remote: Option<Remote>,
 }
 
 impl Action for Recipe {
     fn output(&self, _input: &Token) -> Option<Token> {
+        if let Some(r) = &self.remote {
+            return r.out.clone();
+        }
         self.out.as_ref().map(|a| a.to_string())
     }
     fn accepts(&self, input: &Token) -> bool {
+        if let Some(r) = &self.remote {
+            return self.calls.is_empty() && self.out.is_none() && self.label.len() <= 60 && r.accepts(input);
+        }
         let spenders: Vec<&Call> = self.calls.iter().filter(|c| c.spends_input()).collect();
         let right_kind = match spenders.as_slice() {
             [] => input == flow::NO_INPUT && self.out.is_some(),
@@ -241,6 +233,11 @@ pub struct VaultState {
     pub limits: Vec<Limit>,
     pub pending: Vec<PendingLimit>,
     pub intents: Option<IntentsConfig>,
+    pub oracle: Option<OracleConfig>,
+    pub evm: Option<evm::EvmConfig>,
+    pub sol: Option<sol::SolConfig>,
+    /// Remote steps waiting for their report (remote.rs).
+    pub remote: Vec<remote::Pending>,
     #[serde(skip)]
     pub stealth: Option<stealth::Stealth>,
     /// NEAR this vault paid the brain for its record's storage.
@@ -276,11 +273,25 @@ pub enum Req {
     WithdrawTo { token: String, amount: U128, to: AccountId, via_intents: bool },
     IntentsSetup { verifier: AccountId, signer: AccountId },
     IntentsAllow { pair: IntentsPair },
+    OracleSetup { config: OracleConfig },
+    EvmSetup { signer: AccountId, chain_id: u64, max_fee: U128, max_tip: U128, gas_cap: u64 },
+    EvmTemplate { template: evm::EvmTemplate },
+    EvmTemplateRemove { name: String },
+    SolSetup { signer: AccountId, max_cu_price: u64, max_cu_limit: u32 },
+    SolAllow { pair: sol::SolPair },
+    SolOwnerWallet { wallet: Option<String> },
+    SolTemplate { template: sol::SolTemplate },
+    SolTemplateRemove { name: String },
     // Owner or keeper.
     Step { flow_id: u32, node: u16 },
     StepHidden { flow_id: u32, node: u16, reveal: Node<Recipe>, salt: String },
     IntentsSignSwap { token_in: AccountId, token_out: AccountId, amount_in: U128, min_out: U128, valid_secs: u64 },
     IntentsWithdraw { token: AccountId, amount: U128 },
+    EvmCall { name: String, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64 },
+    SolSignSwap { message: String },
+    SolSignTx { message: String },
+    StepRemote { flow_id: u32, node: u16, args: remote::RemoteArgs, #[serde(default)] reveal: Option<Node<Recipe>>, #[serde(default)] salt: Option<String> },
+    RemoteReport { flow_id: u32, node: u16, out: Option<U128> },
     // Anyone.
     ApplyLimit { token: String },
     /// A stealth owner's signed command (see stealth.rs).
@@ -300,6 +311,10 @@ pub(crate) enum Next {
     IntentsSigned { message: String, nonce: [u8; 32] },
     /// A stealth command whose nonce is already burned: run it as the owner.
     Exec { method: String, args: String, tgas: u64 },
+    EvmSigned(evm::TxJson),
+    SolSigned(String),
+    RemoteEvmSigned { flow_id: u32, node: u16, tx: evm::TxJson },
+    RemoteSolSigned { flow_id: u32, node: u16, hash: String },
 }
 
 /// The brain's own reads, and what to do with their results.
@@ -312,6 +327,13 @@ pub(crate) enum Read {
     Withdraw { token: AccountId, amount: u128, to: AccountId, via_intents: bool },
     IntentsKey,
     IntentsSalt(intents::Pending),
+    /// A recipe step with a market floor: the oracle answered.
+    StepPrices { flow_id: u32, node: u16, price: Option<u128>, by_owner: bool, revealed: Option<Node<Recipe>> },
+    EvmAddress,
+    EvmPrices(evm::EvmArgs),
+    SolAddress,
+    SolPrices(String),
+    RemotePrices(remote::Begin),
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
@@ -401,12 +423,18 @@ impl Brain {
             Next::Call { .. } => step::GAS_ON_CALL.as_tgas(),
             Next::IntentsSigned { .. } => intents::GAS_SIGNED.as_tgas(),
             Next::Exec { tgas, .. } => *tgas,
+            Next::EvmSigned(_) | Next::RemoteEvmSigned { .. } => evm::GAS_SIGNED.as_tgas(),
+            Next::SolSigned(_) | Next::RemoteSolSigned { .. } => sol::GAS_SIGNED.as_tgas(),
         };
         let mut t = Talk::open(env::predecessor_account_id(), ctx, spent);
         let r = match next {
             Next::Call { id, i } => t.on_call(id, i),
             Next::IntentsSigned { message, nonce } => t.on_intents_signed(message, nonce),
             Next::Exec { method, args, .. } => t.run_command(method, args),
+            Next::EvmSigned(tx) => t.on_evm_signed(tx),
+            Next::SolSigned(hash) => t.on_sol_signed(hash),
+            Next::RemoteEvmSigned { flow_id, node, tx } => t.on_remote_evm_signed(flow_id, node, tx),
+            Next::RemoteSolSigned { flow_id, node, hash } => t.on_remote_sol_signed(flow_id, node, hash),
         };
         t.finish(r);
     }
@@ -423,6 +451,12 @@ impl Brain {
             Read::Withdraw { token, amount, to, via_intents } => t.on_withdraw(token, amount, to, via_intents),
             Read::IntentsKey => t.on_intents_key(),
             Read::IntentsSalt(p) => t.on_intents_salt(p),
+            Read::StepPrices { flow_id, node, price, by_owner, revealed } => t.on_step_prices(flow_id, node, price, by_owner, revealed),
+            Read::EvmAddress => t.on_evm_address(),
+            Read::EvmPrices(a) => t.on_evm_prices(a),
+            Read::SolAddress => t.on_sol_address(),
+            Read::SolPrices(m) => t.on_sol_prices(m),
+            Read::RemotePrices(b) => t.on_remote_prices(b),
         };
         t.finish(r);
     }
@@ -452,6 +486,22 @@ impl Brain {
 
     pub fn get_intents(&self, vault: AccountId) -> Option<IntentsConfig> {
         must_load(&vault).intents
+    }
+
+    pub fn get_oracle(&self, vault: AccountId) -> Option<OracleConfig> {
+        must_load(&vault).oracle
+    }
+
+    pub fn get_evm(&self, vault: AccountId) -> Option<evm::EvmConfig> {
+        must_load(&vault).evm
+    }
+
+    pub fn get_sol(&self, vault: AccountId) -> Option<sol::SolConfig> {
+        must_load(&vault).sol
+    }
+
+    pub fn get_remote_pending(&self, vault: AccountId, flow_id: u32, node: u16) -> Option<remote::Pending> {
+        must_load(&vault).remote.into_iter().find(|p| p.flow == flow_id && p.node == node)
     }
 
     /// A stealth vault's owner key (`ed25519:<base58>`).
@@ -493,6 +543,10 @@ impl Brain {
             limits: Vec::new(),
             pending: Vec::new(),
             intents: None,
+            oracle: None,
+            evm: None,
+            sol: None,
+            remote: Vec::new(),
             stealth: key.map(|key| stealth::Stealth { key, nonce: 0 }),
             paid: U128(0),
             next_step: 0,
@@ -563,6 +617,20 @@ impl Talk {
                 crew_only();
                 return self.intents_withdraw(token, amount.0).into();
             }
+            Req::EvmCall { name, values, nonce, max_fee, max_tip, gas } => {
+                crew_only();
+                return self.evm_call(evm::EvmArgs { name, values, nonce, max_fee, max_tip, gas });
+            }
+            Req::SolSignSwap { message } => {
+                crew_only();
+                return self.sol_sign_swap(message);
+            }
+            Req::SolSignTx { message } => {
+                crew_only();
+                return self.sol_sign_tx(message);
+            }
+            Req::StepRemote { flow_id, node, args, reveal, salt } => return self.step_remote(&sender, flow_id, node, args, reveal, salt),
+            Req::RemoteReport { flow_id, node, out } => self.remote_report(&sender, flow_id, node, out),
             Req::ApplyLimit { token } => self.apply_limit(token),
             Req::Exec { method, args, nonce, expires_ns, tgas, signature } => return self.exec(method, args, nonce.0, expires_ns.0, tgas, signature).into(),
             other => {
@@ -592,7 +660,10 @@ impl Talk {
                 self.idle();
                 require!(amount.0 > 0, "nothing to fund");
                 let input = self.flow(flow_id).inputs.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).clone();
-                if input == NEAR {
+                if remote::is_remote(&input) {
+                    // On another chain nobody here can read the balance: the owner's word.
+                    self.credit(flow_id, node, amount.0);
+                } else if input == NEAR {
                     require!(amount.0 <= self.free_near(), "not enough free NEAR");
                     self.credit(flow_id, node, amount.0);
                 } else {
@@ -634,6 +705,15 @@ impl Talk {
             Req::SetOwnerKey { owner_key } => self.set_owner_key(owner_key),
             Req::IntentsSetup { verifier, signer } => return self.intents_setup(verifier, signer),
             Req::IntentsAllow { pair } => self.intents_allow(pair),
+            Req::OracleSetup { config } => self.oracle_setup(config),
+            Req::EvmSetup { signer, chain_id, max_fee, max_tip, gas_cap } => return self.evm_setup(signer, chain_id, max_fee, max_tip, gas_cap),
+            Req::EvmTemplate { template } => self.evm_template(template),
+            Req::EvmTemplateRemove { name } => self.evm_template_remove(name),
+            Req::SolSetup { signer, max_cu_price, max_cu_limit } => return self.sol_setup(signer, max_cu_price, max_cu_limit),
+            Req::SolAllow { pair } => self.sol_allow(pair),
+            Req::SolOwnerWallet { wallet } => self.sol_owner_wallet(wallet),
+            Req::SolTemplate { template } => self.sol_template(template),
+            Req::SolTemplateRemove { name } => self.sol_template_remove(name),
             _ => env::panic_str("not here"),
         }
         Answer::default().into()
@@ -705,8 +785,8 @@ impl Talk {
 
     /// Trusted, and nothing the brain doesn't run yet.
     pub(crate) fn check_node(&self, n: &Node<Recipe>) {
-        require!(n.action.market.is_none(), "market floors aren't ported to the brain yet");
-        if let Some(why) = self.untrusted(n) {
+        let why = if n.action.remote.is_some() { self.remote_untrusted(n) } else { self.untrusted(n) };
+        if let Some(why) = why {
             env::panic_str(&format!("untrusted: {why}"));
         }
     }

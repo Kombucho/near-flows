@@ -269,7 +269,7 @@ fn answer(calls: &[(&str, &str, &[u8])]) -> Vec<u8> {
         a.extend((args.len() as u32).to_le_bytes());
         a.extend(*args);
         a.extend(0u128.to_le_bytes());
-        a.extend((100 * TGAS).to_le_bytes());
+        a.extend((200 * TGAS).to_le_bytes());
     }
     a.push(0);
     a.extend(0u32.to_le_bytes());
