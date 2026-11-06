@@ -232,12 +232,16 @@ async fn a_stranger_cant_make_the_relay_do_anything() -> anyhow::Result<()> {
     let r = m.call(&w.vault, "new").args(init).max_gas().transact().await?;
     assert!(fails_with(&r, "already initialised"), "the brain is fixed for good");
     // The brain's doors, called directly: only vaults talk to it.
-    for method in ["handle", "on_measured", "on_call", "on_fund", "on_withdraw", "on_price"] {
+    for method in ["handle", "on_vault", "on_read"] {
         let mut hdr = vec![1u8];
         hdr.extend([0u8; 48]);
         hdr.push(0);
+        if method == "on_vault" {
+            hdr.extend([0u8; 10]); // a well-formed Next::Call {id: 0, i: 0}: refused for who sends it, not its shape
+        }
         let r = m.call(w.brain.id(), method).args(hdr).max_gas().transact().await?;
-        assert!(r.is_failure(), "{method} from a stranger");
+        let why = [("handle", "a request names its sender"), ("on_vault", "not a vault"), ("on_read", "is private")].iter().find(|(m, _)| *m == method).unwrap().1;
+        assert!(fails_with(&r, why), "{method} from a stranger: {:?}", r.failures());
     }
     assert!(fails_with(&m.call(w.brain.id(), "pay").deposit(NearToken::from_millinear(1)).transact().await?, "not a vault"));
 
