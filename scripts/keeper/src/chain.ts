@@ -23,6 +23,19 @@ export type MarketConfig = {
   current_fee_bps: number;
 };
 
+/** Mainnet caps a transaction at 300 Tgas prepaid: we never ask for more. */
+export const MAX_TGAS = 300n;
+
+/**
+ * A relay vault has one door for everything we send, `x`. It passes its raw
+ * args to the brain, which reads them as {"<method>": <args>} with the full
+ * vault's method names and arguments. So a vault call is the old call, wrapped.
+ */
+export function wrap(method: string, args: Record<string, unknown> = {}): Record<string, unknown> {
+  if (!/^[a-z][a-z0-9_]*$/.test(method)) throw new Error(`not a vault method: ${method}`);
+  return { [method]: args };
+}
+
 export function loadKey(network: string, accountId: string): KeyPairString {
   const fromEnv = process.env.KEEPER_PRIVATE_KEY;
   if (fromEnv) return fromEnv as KeyPairString;
@@ -81,7 +94,27 @@ export class Chain {
     return this.signer().callFunction({ contractId: this.market, methodName: "settle", args: { position_id: positionId }, gas: 100n * TGAS });
   }
 
-  /** Any call, as the keeper (flow keeper: the vault's `step`). */
+  /** The brain a relay vault obeys (the relay's own view). The vault views live there now. */
+  brainOf(vault: string): Promise<string> {
+    return this.view<string>(vault, "brain_id");
+  }
+
+  /** A brain view about one vault (get_vault, get_flow, get_oracle...): the vault is an argument. */
+  brainView<T>(brain: string, vault: string, method: string, args: Record<string, unknown> = {}): Promise<T> {
+    return this.view<T>(brain, method, { vault, ...args });
+  }
+
+  /** A request to a relay vault: `x` with {"<method>": args}. Returns what the brain answered. */
+  vaultCall(vault: string, method: string, args: Record<string, unknown>, tgas = MAX_TGAS, deposit = 0n) {
+    return this.call(vault, "x", wrap(method, args), tgas * TGAS, deposit);
+  }
+
+  /** The same, with the whole outcome: the brain's events are in its receipts' logs. */
+  vaultCallRaw(vault: string, method: string, args: Record<string, unknown>, tgas = MAX_TGAS) {
+    return this.callRaw(vault, "x", wrap(method, args), tgas * TGAS);
+  }
+
+  /** Any call, as the keeper. */
   call(contractId: string, methodName: string, args: Record<string, unknown>, gas: bigint, deposit = 0n) {
     return this.signer().callFunction({ contractId, methodName, args, gas, deposit });
   }

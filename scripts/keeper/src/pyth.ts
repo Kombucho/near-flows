@@ -1,7 +1,7 @@
 // Push fresh Pyth prices to NEAR, so vaults' market floors have something to read.
 //
 //   npm run pyth -- eth usdc near        push those feeds (names from the vault's oracle config)
-//   npm run pyth -- --vault <vault>      push every feed that vault uses
+//   npm run pyth -- --vault <vault>      push every feed that (relay) vault uses: its oracle config, read from its brain
 //   ... --dry                            fetch and estimate the fee, send nothing
 //
 // Pyth is a pull oracle: prices are signed by Pyth's publishers, carried by
@@ -38,7 +38,7 @@ const chain = new Chain(rpc, pyth, keeperId, o.dry ? undefined : loadKey(network
 
 let ids: string[];
 if (o.vault) {
-  const cfg = await chain.view<{ feeds: { name: string; contract: string; price_id: string }[] } | null>(o.vault, "get_oracle");
+  const cfg = await chain.brainView<{ feeds: { name: string; contract: string; price_id: string }[] } | null>(await chain.brainOf(o.vault), o.vault, "get_oracle");
   if (!cfg) throw new Error(`${o.vault} has no oracle set up`);
   ids = cfg.feeds.filter((f) => f.contract === pyth).map((f) => f.price_id);
 } else {

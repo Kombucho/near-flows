@@ -17,8 +17,15 @@ use flow::Node;
 use crate::wire::Answer;
 use crate::{amount_result, mul_div, result, Call, Deposit, Next, Read, Recipe, Reply, Talk, GAS_READ, NEAR, PRICE_SCALE};
 
-/// The brain's callback after a recipe call: it may read two balances and decide again.
-pub(crate) const GAS_ON_CALL: Gas = Gas::from_tgas(45);
+/// The callback deciding on the balances read after a step: it only answers
+/// (burns ~2.5 Tgas in the sandbox), so 10 is plenty. Kept apart from GAS_READ
+/// because every recipe call pays for it, and mainnet caps a transaction at 300 Tgas.
+const GAS_MEASURE: Gas = Gas::from_tgas(10);
+/// The brain's callback after a recipe call: it may read two balances (5 each)
+/// and decide in GAS_MEASURE: 20 passed on, plus ~10 for its own work and the
+/// three receipts it creates (25 ran out of prepaid gas in the sandbox). Was 45:
+/// a 120 Tgas swap then needed 285 of the 300 Tgas a mainnet transaction may carry.
+pub(crate) const GAS_ON_CALL: Gas = Gas::from_tgas(30);
 /// The vault's `cb` (relay GAS_CB) and receipt costs, per round.
 const RELAY_TGAS: u64 = 10;
 
@@ -156,7 +163,7 @@ impl Talk {
             return self.measured(ctx, before, None, None);
         }
         let views = input.iter().chain(out.iter()).map(|t| self.balance_view(t)).collect();
-        self.read(views, Read::Measured { id: ctx.id, before }, GAS_READ)
+        self.read(views, Read::Measured { id: ctx.id, before }, GAS_MEASURE)
     }
 
     pub(crate) fn on_measured(&mut self, id: u64, before: bool) -> Reply {

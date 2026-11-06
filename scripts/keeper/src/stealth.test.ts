@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPublicKey, verify } from "node:crypto";
 import { baseDecode } from "near-api-js";
-import { message, OwnerKey } from "./stealth.ts";
+import { execTgas, message, OwnerKey, STEP_TGAS } from "./stealth.ts";
 
 // The same vector is pinned in contracts/vault/src/stealth.rs, where the vault's own
 // code builds the message and checks this signature with env::ed25519_verify.
@@ -49,4 +49,11 @@ test("a keypair file round-trips in near-cli's format", () => {
   const back = OwnerKey.load(file);
   assert.equal(back.publicKey, k.publicKey);
   assert.deepEqual(Buffer.from(back.seed), Buffer.from(k.seed));
+});
+
+test("exec needs the signed gas, the brain's 10 and the relay's 100 first round, never over 300", () => {
+  assert.equal(execTgas(50), 165);
+  assert.equal(execTgas(STEP_TGAS), 195);
+  assert.equal(execTgas(185), 300);
+  assert.throws(() => execTgas(200), /mainnet allows 300/, "a step signed for 200 can never run on mainnet");
 });
