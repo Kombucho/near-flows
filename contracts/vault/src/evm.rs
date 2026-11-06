@@ -1,20 +1,26 @@
 //! EVM chains from the vault, through NEAR Chain Signatures (secp256k1).
 //!
 //! The vault BUILDS every transaction it signs, from a TEMPLATE its owner set:
-//! a contract, a function signature, and a rule for each argument:
-//! - fixed: always this address or number (the pool's tokens, a fee tier),
+//! a contract, a function signature, and a rule for every argument, nested to
+//! match the ABI types (tuples, arrays, and `bytes` that are themselves an
+//! encoding, like Uniswap v4's Universal Router inputs). The leaf rules:
+//! - fixed: always this address / number / bool (a pool's tokens, a fee tier),
 //! - vault: the vault's own EVM address (recipient, onBehalfOf, to),
 //! - at_most: a number the keeper picks, up to a cap (an amount),
-//! - floor: a minimum the keeper quotes, never below amount x num / den (the owner's floor).
-//! A keeper fills in numbers; it never picks an address. There is no rule for
-//! "an address the caller chooses", so no template can pay a stranger.
-//! Uniswap swaps, ERC-20 approvals and Aave supply/withdraw are all templates
-//! (nodes/evm-templates.json); a new protocol is a new template, not new code.
+//! - floor: a minimum the keeper quotes, never below amount x num / den (the owner's floor),
+//! - same: equal to another number (an amount repeated, e.g. the ETH attached),
+//! - bytes: always these bytes (a router command, Universal Router actions).
+//! A keeper fills in numbers; it never picks an address or a byte. There is no
+//! rule for "an address the caller chooses", so no template can pay a stranger.
+//! A template may attach ETH (`value`: at_most or same), counted as "evm:<chain>:eth".
+//! Uniswap v3/v4, Aave and StonkBrokers are templates (nodes/evm-templates.json);
+//! a new protocol is a new template, not new code.
 //!
 //! The keeper also supplies nonce and gas prices (capped by the owner). The vault
 //! signs the hash, assembles the signed transaction, and emits it for broadcast.
 
-use evmtx::sig::Kind;
+use evmtx::enc::{encode, Val};
+use evmtx::sig::{self, Ty};
 use evmtx::{abi, address_of, hex_address, parse_address, Eip1559};
 use near_sdk::json_types::U128;
 use near_sdk::{env, near, require, AccountId, Gas, NearToken, Promise};
@@ -32,22 +38,32 @@ const N: [u8; 32] = [
     0x8c, 0xd0, 0x36, 0x41, 0x41,
 ];
 
-/// The rule for one argument of a template.
+/// The rule for one argument (or part of one) of a template.
 #[near(serializers = [borsh, json])]
 #[serde(tag = "rule", rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Arg {
-    /// Always this value: a 0x address, or a number (decimal).
+    /// Always this value: a 0x address, a number (decimal, may be negative for intN), or a bool.
     Fixed { value: String },
     /// The vault's own EVM address.
     Vault,
     /// A number the keeper picks, at most `max`.
     AtMost { max: U128 },
-    /// A minimum the keeper quotes; the vault uses at least `args[of] * num / den`.
+    /// A minimum the keeper quotes; the vault uses at least `leaf[of] * num / den`.
     Floor { of: u8, num: U128, den: U128 },
+    /// Equal to number leaf `of`.
+    Same { of: u8 },
+    /// `bytes` that are always these (hex).
+    Bytes { hex: String },
+    /// `bytes` that are abi.encode(types) of these nested rules.
+    Encoded { types: String, args: Vec<Arg> },
+    /// A tuple, field by field.
+    Tuple { args: Vec<Arg> },
+    /// A dynamic array with exactly these items.
+    List { items: Vec<Arg> },
 }
 
-/// Which argument spends a token, and which token: counted against the spending limit "evm:<chain>:<token>".
+/// Which leaf spends a token, and which token: counted against the spending limit "evm:<chain>:<token>".
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Spend {
@@ -65,6 +81,10 @@ pub struct EvmTemplate {
     /// The function, e.g. "approve(address,uint256)". Static arguments only.
     pub function: String,
     pub args: Vec<Arg>,
+    /// ETH attached: at_most or same (None = 0).
+    #[serde(default)]
+    pub value: Option<Arg>,
+    /// Which leaf spends a token (leaves are numbered depth first; the value leaf comes last).
     pub spends: Option<Spend>,
 }
 
@@ -89,6 +109,7 @@ pub struct TxJson {
     max_fee: U128,
     gas_limit: u64,
     to: String,
+    value: U128,
     data: String,
 }
 
@@ -135,35 +156,31 @@ impl Vault {
         }
     }
 
-    /// Owner or keeper: call template `name` with `values` (one per argument; only
-    /// at_most and floor arguments read theirs). The vault builds, checks and signs it.
+    /// Owner or keeper: call template `name` with `values`, one per leaf rule (depth
+    /// first, the value leaf last; only at_most and floor leaves read theirs).
+    /// The vault builds, checks and signs it.
     pub fn evm_call(&mut self, name: String, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64) -> Promise {
         let cfg = self.evm_caller_cfg();
         let t = cfg.templates.iter().find(|t| t.name == name).cloned().unwrap_or_else(|| env::panic_str("refused: no such template"));
-        require!(values.len() == t.args.len(), "one value per argument");
         let me = parse_address(cfg.address.as_deref().unwrap_or_else(|| env::panic_str("the vault's EVM address isn't known yet"))).unwrap();
-        let kinds = evmtx::sig::words(&t.function).unwrap();
+        let rules = leaves(&t);
+        require!(values.len() == rules.len(), format!("one value per leaf ({})", rules.len()));
+        let nums = numbers(&rules, &values);
+        let tys = sig::args(&t.function).unwrap();
+        let mut at = 0;
+        let vals: Vec<Val> = t.args.iter().zip(&tys).map(|(r, ty)| build(r, ty, &me, &nums, &mut at)).collect();
         let mut data = abi::selector(&t.function).to_vec();
-        for (i, (rule, kind)) in t.args.iter().zip(&kinds).enumerate() {
-            let word = match rule {
-                Arg::Fixed { value } => fixed_word(value, *kind),
-                Arg::Vault => addr_word(&me),
-                Arg::AtMost { max } => {
-                    require!(values[i].0 <= max.0, format!("refused: argument {i} over its cap"));
-                    uint_word(values[i].0, *kind)
-                }
-                Arg::Floor { of, num, den } => {
-                    let floor = crate::mul_div(values[*of as usize].0, num.0, den.0);
-                    uint_word(values[i].0.max(floor), *kind)
-                }
-            };
-            data.extend(word);
-        }
+        data.extend(encode(&tys, &vals));
+        let value = if t.value.is_some() { nums[rules.len() - 1].unwrap_or(0) } else { 0 };
         if let Some(sp) = &t.spends {
-            self.charge(&format!("evm:{}:{}", cfg.chain_id, sp.token), values[sp.arg as usize].0);
+            self.charge(&format!("evm:{}:{}", cfg.chain_id, sp.token), nums[sp.arg as usize].unwrap_or(0));
         }
-        let tx = self.evm_tx(&cfg, nonce, max_fee, max_tip, gas, parse_address(&t.to).unwrap(), data);
-        self.emit("evm_call_requested", &format!(r#"{{"template":"{name}","to":"{}","data":"0x{}"}}"#, t.to, hex::encode(&tx.data)));
+        if value > 0 {
+            self.charge(&format!("evm:{}:eth", cfg.chain_id), value);
+        }
+        let mut tx = self.evm_tx(&cfg, nonce, max_fee, max_tip, gas, parse_address(&t.to).unwrap(), data);
+        tx.value = value;
+        self.emit("evm_call_requested", &format!(r#"{{"template":"{name}","to":"{}","value":"{value}","data":"0x{}"}}"#, t.to, hex::encode(&tx.data)));
         self.evm_sign(cfg.signer, tx)
     }
 
@@ -172,7 +189,7 @@ impl Vault {
         let cfg = self.evm.clone().unwrap();
         let t = Eip1559 {
             chain_id: cfg.chain_id, nonce: tx.nonce, max_priority_fee: tx.max_priority_fee.0, max_fee: tx.max_fee.0, gas_limit: tx.gas_limit,
-            to: parse_address(&tx.to).unwrap(), value: 0, data: hex::decode(&tx.data).unwrap(),
+            to: parse_address(&tx.to).unwrap(), value: tx.value.0, data: hex::decode(&tx.data).unwrap(),
         };
         let hash = hex::encode(t.signing_hash());
         let sig = env::promise_result_checked(0, 4096).ok().and_then(|raw| ecdsa_from(&raw));
@@ -206,7 +223,7 @@ impl Vault {
 
     fn evm_sign(&mut self, signer: AccountId, t: Eip1559) -> Promise {
         let args = near_sdk::serde_json::json!({"request": {"path": EVM_PATH, "payload_v2": {"Ecdsa": hex::encode(t.signing_hash())}, "domain_id": ECDSA_DOMAIN}});
-        let carry = TxJson { nonce: t.nonce, max_priority_fee: U128(t.max_priority_fee), max_fee: U128(t.max_fee), gas_limit: t.gas_limit, to: hex_address(&t.to), data: hex::encode(&t.data) };
+        let carry = TxJson { nonce: t.nonce, max_priority_fee: U128(t.max_priority_fee), max_fee: U128(t.max_fee), gas_limit: t.gas_limit, to: hex_address(&t.to), value: U128(t.value), data: hex::encode(&t.data) };
         Promise::new(signer)
             .function_call("sign".to_string(), args.to_string().into_bytes(), NearToken::from_yoctonear(1), GAS_SIGN)
             .then(Self::ext(env::current_account_id()).with_static_gas(GAS_CB).on_evm_signed(carry))
@@ -255,33 +272,164 @@ fn sub(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     out
 }
 
-/// Check a template once, when the owner saves it: a static function, one rule
-/// per argument word, each rule fitting its word's type.
+/// What a leaf is, for checking cross references.
+#[derive(Clone, Copy, PartialEq)]
+enum Leaf {
+    Amount,
+    Min,
+    Same,
+    Other,
+}
+
+/// Check a template once, when the owner saves it: a parsable function, rules
+/// shaped like its types, every leaf fitting its type, and references (floor,
+/// same) pointing at an amount or a minimum, never at another `same`.
 fn check_template(t: &mut EvmTemplate) {
     require!(!t.name.is_empty() && t.name.len() <= 40, "name: 1 to 40 characters");
     require!(parse_address(&t.to).is_some(), "to: a 0x address");
-    let kinds = evmtx::sig::words(&t.function).unwrap_or_else(|| env::panic_str("function: a signature with static arguments only"));
-    require!(kinds.len() == t.args.len() && kinds.len() <= 16, "one rule per argument (at most 16)");
-    for (i, (rule, kind)) in t.args.iter_mut().zip(&kinds).enumerate() {
-        match rule {
-            Arg::Fixed { value } => {
-                *value = value.to_lowercase();
-                let _ = fixed_word(value, *kind);
-            }
-            Arg::Vault => require!(*kind == Kind::Address, format!("argument {i}: only an address can be the vault")),
-            Arg::AtMost { .. } => require!(matches!(kind, Kind::Uint(_)), format!("argument {i}: at_most needs a number")),
-            Arg::Floor { den, .. } => require!(matches!(kind, Kind::Uint(_)) && den.0 > 0, format!("argument {i}: floor needs a number and den > 0")),
-        }
+    let tys = sig::args(&t.function).unwrap_or_else(|| env::panic_str("function: a signature of address/uintN/intN/bool/bytes, tuples and T[]"));
+    require!(tys.len() == t.args.len(), "one rule per argument");
+    let mut kinds = Vec::new();
+    for (r, ty) in t.args.iter_mut().zip(&tys) {
+        check_rule(r, ty, &mut kinds, 0);
     }
-    for (i, rule) in t.args.iter().enumerate() {
-        if let Arg::Floor { of, .. } = rule {
-            require!(matches!(t.args.get(*of as usize), Some(Arg::AtMost { .. })), format!("argument {i}: a floor is relative to an at_most amount"));
+    if let Some(v) = t.value.as_mut() {
+        require!(matches!(v, Arg::AtMost { .. } | Arg::Same { .. }), "value: at_most or same");
+        check_rule(v, &Ty::Uint(256), &mut kinds, 0);
+    }
+    require!(kinds.len() <= 64, "at most 64 leaves");
+    let rules: Vec<Arg> = leaves(t);
+    for (i, r) in rules.iter().enumerate() {
+        match r {
+            Arg::Floor { of, .. } => require!(kinds.get(*of as usize) == Some(&Leaf::Amount), format!("leaf {i}: a floor is relative to an at_most amount")),
+            Arg::Same { of } => require!(matches!(kinds.get(*of as usize), Some(Leaf::Amount | Leaf::Min)), format!("leaf {i}: same as an at_most or floor number")),
+            _ => {}
         }
     }
     if let Some(sp) = t.spends.as_mut() {
         sp.token = sp.token.to_lowercase();
         require!(parse_address(&sp.token).is_some(), "spends: a token address");
-        require!(matches!(t.args.get(sp.arg as usize), Some(Arg::AtMost { .. })), "spends: an at_most amount");
+        require!(kinds.get(sp.arg as usize) == Some(&Leaf::Amount), "spends: an at_most amount");
+    }
+}
+
+fn check_rule(r: &mut Arg, ty: &Ty, kinds: &mut Vec<Leaf>, depth: u8) {
+    require!(depth < 8, "rules nested too deep");
+    let i = kinds.len();
+    match (r, ty) {
+        (Arg::Fixed { value }, _) => {
+            *value = value.to_lowercase();
+            let _ = fixed_word(value, ty);
+            kinds.push(Leaf::Other);
+        }
+        (Arg::Vault, Ty::Address) => kinds.push(Leaf::Other),
+        (Arg::AtMost { .. }, Ty::Uint(_)) => kinds.push(Leaf::Amount),
+        (Arg::Floor { den, .. }, Ty::Uint(_)) => {
+            require!(den.0 > 0, format!("leaf {i}: den > 0"));
+            kinds.push(Leaf::Min)
+        }
+        (Arg::Same { .. }, Ty::Uint(_)) => kinds.push(Leaf::Same),
+        (Arg::Bytes { hex: h }, Ty::Bytes) => {
+            *h = h.to_lowercase();
+            let b = hex::decode(h.trim_start_matches("0x")).unwrap_or_else(|_| env::panic_str("bytes: hex"));
+            require!(b.len() <= 1024, "bytes: at most 1 KB");
+            kinds.push(Leaf::Other);
+        }
+        (Arg::Encoded { types, args }, Ty::Bytes) => {
+            let tys = sig::list(types).unwrap_or_else(|| env::panic_str("encoded: types like (address,uint256)"));
+            require!(tys.len() == args.len(), "encoded: one rule per type");
+            for (r, t) in args.iter_mut().zip(&tys) {
+                check_rule(r, t, kinds, depth + 1);
+            }
+        }
+        (Arg::Tuple { args }, Ty::Tuple(tys)) => {
+            require!(tys.len() == args.len(), "tuple: one rule per field");
+            for (r, t) in args.iter_mut().zip(tys) {
+                check_rule(r, t, kinds, depth + 1);
+            }
+        }
+        (Arg::List { items }, Ty::Array(t)) => {
+            require!(items.len() <= 16, "list: at most 16 items");
+            for r in items.iter_mut() {
+                check_rule(r, t, kinds, depth + 1);
+            }
+        }
+        (r, ty) => env::panic_str(&format!("leaf {i}: rule {} doesn't fit type {ty:?}", rule_name(r))),
+    }
+}
+
+fn rule_name(r: &Arg) -> &'static str {
+    match r {
+        Arg::Fixed { .. } => "fixed",
+        Arg::Vault => "vault",
+        Arg::AtMost { .. } => "at_most",
+        Arg::Floor { .. } => "floor",
+        Arg::Same { .. } => "same",
+        Arg::Bytes { .. } => "bytes",
+        Arg::Encoded { .. } => "encoded",
+        Arg::Tuple { .. } => "tuple",
+        Arg::List { .. } => "list",
+    }
+}
+
+/// The template's leaf rules, depth first, the value leaf last.
+fn leaves(t: &EvmTemplate) -> Vec<Arg> {
+    fn walk(r: &Arg, out: &mut Vec<Arg>) {
+        match r {
+            Arg::Encoded { args, .. } | Arg::Tuple { args } => args.iter().for_each(|a| walk(a, out)),
+            Arg::List { items } => items.iter().for_each(|a| walk(a, out)),
+            leaf => out.push(leaf.clone()),
+        }
+    }
+    let mut out = Vec::new();
+    t.args.iter().chain(t.value.iter()).for_each(|r| walk(r, &mut out));
+    out
+}
+
+/// The number each numeric leaf ends up with: amounts capped, minimums at least
+/// their floor, `same` copied. None for non-numeric leaves.
+fn numbers(rules: &[Arg], values: &[U128]) -> Vec<Option<u128>> {
+    let mut nums: Vec<Option<u128>> = vec![None; rules.len()];
+    for (i, r) in rules.iter().enumerate() {
+        if let Arg::AtMost { max } = r {
+            require!(values[i].0 <= max.0, format!("refused: leaf {i} over its cap"));
+            nums[i] = Some(values[i].0);
+        }
+    }
+    for (i, r) in rules.iter().enumerate() {
+        if let Arg::Floor { of, num, den } = r {
+            let floor = crate::mul_div(nums[*of as usize].unwrap_or(0), num.0, den.0);
+            nums[i] = Some(values[i].0.max(floor));
+        }
+    }
+    for (i, r) in rules.iter().enumerate() {
+        if let Arg::Same { of } = r {
+            nums[i] = nums[*of as usize];
+        }
+    }
+    nums
+}
+
+/// The value of rule `r` for type `ty`; `at` counts leaves depth first.
+fn build(r: &Arg, ty: &Ty, me: &evmtx::Address, nums: &[Option<u128>], at: &mut usize) -> Val {
+    match (r, ty) {
+        (Arg::Encoded { types, args }, Ty::Bytes) => {
+            let tys = sig::list(types).unwrap();
+            let vals: Vec<Val> = args.iter().zip(&tys).map(|(r, t)| build(r, t, me, nums, at)).collect();
+            Val::Bytes(encode(&tys, &vals))
+        }
+        (Arg::Tuple { args }, Ty::Tuple(tys)) => Val::Tuple(args.iter().zip(tys).map(|(r, t)| build(r, t, me, nums, at)).collect()),
+        (Arg::List { items }, Ty::Array(t)) => Val::Array(items.iter().map(|r| build(r, t, me, nums, at)).collect()),
+        (leaf, _) => {
+            let i = *at;
+            *at += 1;
+            match leaf {
+                Arg::Fixed { value } => Val::Word(fixed_word(value, ty)),
+                Arg::Vault => Val::Word(addr_word(me)),
+                Arg::Bytes { hex: h } => Val::Bytes(hex::decode(h.trim_start_matches("0x")).unwrap()),
+                _ => Val::Word(uint_word(nums[i].unwrap_or(0), ty)),
+            }
+        }
     }
 }
 
@@ -291,12 +439,12 @@ fn addr_word(a: &evmtx::Address) -> [u8; 32] {
     w
 }
 
-/// A number as a word of type `kind` (refused if it doesn't fit).
-fn uint_word(v: u128, kind: Kind) -> [u8; 32] {
-    let bits = match kind {
-        Kind::Uint(b) => b,
-        Kind::Bool => 1,
-        Kind::Address => env::panic_str("a number where an address goes"),
+/// A number as a word of type `ty` (refused if it doesn't fit).
+fn uint_word(v: u128, ty: &Ty) -> [u8; 32] {
+    let bits = match ty {
+        Ty::Uint(b) => *b,
+        Ty::Bool => 1,
+        _ => env::panic_str("a number where something else goes"),
     };
     require!(bits >= 128 || v >> bits == 0, "refused: number too big for its type");
     let mut w = [0u8; 32];
@@ -304,9 +452,19 @@ fn uint_word(v: u128, kind: Kind) -> [u8; 32] {
     w
 }
 
-fn fixed_word(value: &str, kind: Kind) -> [u8; 32] {
-    match kind {
-        Kind::Address => addr_word(&parse_address(value).unwrap_or_else(|| env::panic_str("fixed: a 0x address"))),
-        _ => uint_word(value.parse().unwrap_or_else(|_| env::panic_str("fixed: a decimal number")), kind),
+fn fixed_word(value: &str, ty: &Ty) -> [u8; 32] {
+    match ty {
+        Ty::Address => addr_word(&parse_address(value).unwrap_or_else(|| env::panic_str("fixed: a 0x address"))),
+        Ty::Bool => uint_word(match value { "true" | "1" => 1, "false" | "0" => 0, _ => env::panic_str("fixed: a bool") }, ty),
+        Ty::Uint(_) => uint_word(value.parse().unwrap_or_else(|_| env::panic_str("fixed: a decimal number")), ty),
+        Ty::Int(bits) => {
+            let v: i128 = value.parse().unwrap_or_else(|_| env::panic_str("fixed: a decimal number"));
+            let lim = if *bits >= 128 { i128::MAX } else { (1i128 << (bits - 1)) - 1 };
+            require!(v <= lim && v >= -lim - 1, "fixed: number too big for its type");
+            let mut w = if v < 0 { [0xffu8; 32] } else { [0u8; 32] };
+            w[16..].copy_from_slice(&v.to_be_bytes());
+            w
+        }
+        _ => env::panic_str("fixed: only addresses, numbers and bools"),
     }
 }

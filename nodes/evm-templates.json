@@ -1,5 +1,5 @@
 {
-  "about": "EVM nodes as templates the vault enforces (contracts/vault/src/evm.rs). The vault builds each call: fixed arguments are fixed here, 'vault' is the vault's own address, the keeper only fills at_most amounts (capped) and floor minimums (never below amount x num / den). Floors below were set on 2026-11-06 (Base: 1 WETH ~ 2,224 USDC; Smart LP sdAMZN-FR: 50 USDG ~ 49.68 shares): owners set their own. Tested on a Base mainnet fork: contracts/sandbox/tests/evm_fork.rs.",
+  "about": "EVM nodes as templates the vault enforces (contracts/vault/src/evm.rs). The vault builds each call: fixed arguments are fixed here, 'vault' is the vault's own address, the keeper only fills at_most amounts (capped) and floor minimums (never below amount x num / den). Floors below were set on 2026-11-06 (Base: 1 WETH ~ 2,224 USDC; Smart LP sdAMZN-FR: 50 USDG ~ 49.68 shares): owners set their own. Tested on a Base mainnet fork: contracts/sandbox/tests/evm_fork.rs. Floors for the Robinhood v4 and pair token nodes: 0.01 ETH ~ 0.1186 NVDA, 0.05 NVDA ~ 0.0041 ETH, 0.01 ETH ~ 0.01707 ETHNVDA shares (fork, 2026-11-06), owner floor ~90% of that.",
   "chains": {
     "base": {
       "chain_id": 8453,
@@ -32,33 +32,38 @@
           "function": "exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))",
           "args": [
             {
-              "rule": "fixed",
-              "value": "0x4200000000000000000000000000000000000006"
-            },
-            {
-              "rule": "fixed",
-              "value": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-            },
-            {
-              "rule": "fixed",
-              "value": "500"
-            },
-            {
-              "rule": "vault"
-            },
-            {
-              "rule": "at_most",
-              "max": "200000000000000000"
-            },
-            {
-              "rule": "floor",
-              "of": 4,
-              "num": "2000",
-              "den": "1000000000000"
-            },
-            {
-              "rule": "fixed",
-              "value": "0"
+              "rule": "tuple",
+              "args": [
+                {
+                  "rule": "fixed",
+                  "value": "0x4200000000000000000000000000000000000006"
+                },
+                {
+                  "rule": "fixed",
+                  "value": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+                },
+                {
+                  "rule": "fixed",
+                  "value": "500"
+                },
+                {
+                  "rule": "vault"
+                },
+                {
+                  "rule": "at_most",
+                  "max": "200000000000000000"
+                },
+                {
+                  "rule": "floor",
+                  "of": 4,
+                  "num": "2000",
+                  "den": "1000000000000"
+                },
+                {
+                  "rule": "fixed",
+                  "value": "0"
+                }
+              ]
             }
           ],
           "spends": {
@@ -135,7 +140,10 @@
       "tokens": {
         "USDG": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
         "AMZN": "0x12f190a9f9d7d37a250758b26824b97ce941bf54",
-        "sdAMZN-FR": "0x5019fca4c0193908727810209b7621a90fc9f17a"
+        "sdAMZN-FR": "0x5019fca4c0193908727810209b7621a90fc9f17a",
+        "ETH (native)": "0x0000000000000000000000000000000000000000",
+        "NVDA": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec",
+        "ETHNVDA (pair token)": "0x0d142f0a847838f933114869f6f63bd618bedca8"
       },
       "templates": [
         {
@@ -210,8 +218,352 @@
             }
           ],
           "spends": null
+        },
+        {
+          "name": "v4_swap_eth_nvda",
+          "to": "0x8876789976decbfcbbbe364623c63652db8c0904",
+          "function": "execute(bytes,bytes[],uint256)",
+          "args": [
+            {
+              "rule": "bytes",
+              "hex": "0x10"
+            },
+            {
+              "rule": "list",
+              "items": [
+                {
+                  "rule": "encoded",
+                  "types": "(bytes,bytes[])",
+                  "args": [
+                    {
+                      "rule": "bytes",
+                      "hex": "0x060c0f"
+                    },
+                    {
+                      "rule": "list",
+                      "items": [
+                        {
+                          "rule": "encoded",
+                          "types": "(((address,address,uint24,int24,address),bool,uint128,uint128,bytes))",
+                          "args": [
+                            {
+                              "rule": "tuple",
+                              "args": [
+                                {
+                                  "rule": "tuple",
+                                  "args": [
+                                    {
+                                      "rule": "fixed",
+                                      "value": "0x0000000000000000000000000000000000000000"
+                                    },
+                                    {
+                                      "rule": "fixed",
+                                      "value": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+                                    },
+                                    {
+                                      "rule": "fixed",
+                                      "value": "10000"
+                                    },
+                                    {
+                                      "rule": "fixed",
+                                      "value": "200"
+                                    },
+                                    {
+                                      "rule": "fixed",
+                                      "value": "0x0000000000000000000000000000000000000000"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "rule": "fixed",
+                                  "value": "true"
+                                },
+                                {
+                                  "rule": "at_most",
+                                  "max": "100000000000000000"
+                                },
+                                {
+                                  "rule": "floor",
+                                  "of": 8,
+                                  "num": "1067",
+                                  "den": "100"
+                                },
+                                {
+                                  "rule": "bytes",
+                                  "hex": "0x"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "rule": "encoded",
+                          "types": "(address,uint256)",
+                          "args": [
+                            {
+                              "rule": "fixed",
+                              "value": "0x0000000000000000000000000000000000000000"
+                            },
+                            {
+                              "rule": "same",
+                              "of": 8
+                            }
+                          ]
+                        },
+                        {
+                          "rule": "encoded",
+                          "types": "(address,uint256)",
+                          "args": [
+                            {
+                              "rule": "fixed",
+                              "value": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+                            },
+                            {
+                              "rule": "same",
+                              "of": 9
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "rule": "at_most",
+              "max": "18446744073709551615"
+            }
+          ],
+          "value": {
+            "rule": "same",
+            "of": 8
+          },
+          "spends": null
+        },
+        {
+          "name": "approve_nvda_permit2",
+          "to": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec",
+          "function": "approve(address,uint256)",
+          "args": [
+            {
+              "rule": "fixed",
+              "value": "0x000000000022d473030f116ddee9f6b43ac78ba3"
+            },
+            {
+              "rule": "at_most",
+              "max": "1000000000000000000"
+            }
+          ],
+          "spends": null
+        },
+        {
+          "name": "permit2_nvda_universal_router",
+          "to": "0x000000000022d473030f116ddee9f6b43ac78ba3",
+          "function": "approve(address,address,uint160,uint48)",
+          "args": [
+            {
+              "rule": "fixed",
+              "value": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+            },
+            {
+              "rule": "fixed",
+              "value": "0x8876789976decbfcbbbe364623c63652db8c0904"
+            },
+            {
+              "rule": "at_most",
+              "max": "1000000000000000000"
+            },
+            {
+              "rule": "at_most",
+              "max": "281474976710655"
+            }
+          ],
+          "spends": null
+        },
+        {
+          "name": "v4_swap_nvda_eth",
+          "to": "0x8876789976decbfcbbbe364623c63652db8c0904",
+          "function": "execute(bytes,bytes[],uint256)",
+          "args": [
+            {
+              "rule": "bytes",
+              "hex": "0x10"
+            },
+            {
+              "rule": "list",
+              "items": [
+                {
+                  "rule": "encoded",
+                  "types": "(bytes,bytes[])",
+                  "args": [
+                    {
+                      "rule": "bytes",
+                      "hex": "0x060c0f"
+                    },
+                    {
+                      "rule": "list",
+                      "items": [
+                        {
+                          "rule": "encoded",
+                          "types": "(((address,address,uint24,int24,address),bool,uint128,uint128,bytes))",
+                          "args": [
+                            {
+                              "rule": "tuple",
+                              "args": [
+                                {
+                                  "rule": "tuple",
+                                  "args": [
+                                    {
+                                      "rule": "fixed",
+                                      "value": "0x0000000000000000000000000000000000000000"
+                                    },
+                                    {
+                                      "rule": "fixed",
+                                      "value": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+                                    },
+                                    {
+                                      "rule": "fixed",
+                                      "value": "10000"
+                                    },
+                                    {
+                                      "rule": "fixed",
+                                      "value": "200"
+                                    },
+                                    {
+                                      "rule": "fixed",
+                                      "value": "0x0000000000000000000000000000000000000000"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "rule": "fixed",
+                                  "value": "false"
+                                },
+                                {
+                                  "rule": "at_most",
+                                  "max": "1000000000000000000"
+                                },
+                                {
+                                  "rule": "floor",
+                                  "of": 8,
+                                  "num": "738",
+                                  "den": "10000"
+                                },
+                                {
+                                  "rule": "bytes",
+                                  "hex": "0x"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "rule": "encoded",
+                          "types": "(address,uint256)",
+                          "args": [
+                            {
+                              "rule": "fixed",
+                              "value": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+                            },
+                            {
+                              "rule": "same",
+                              "of": 8
+                            }
+                          ]
+                        },
+                        {
+                          "rule": "encoded",
+                          "types": "(address,uint256)",
+                          "args": [
+                            {
+                              "rule": "fixed",
+                              "value": "0x0000000000000000000000000000000000000000"
+                            },
+                            {
+                              "rule": "same",
+                              "of": 9
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "rule": "at_most",
+              "max": "18446744073709551615"
+            }
+          ],
+          "spends": {
+            "arg": 8,
+            "token": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+          }
+        },
+        {
+          "name": "pairtoken_ethnvda_zap_eth",
+          "to": "0x0d142f0a847838f933114869f6f63bd618bedca8",
+          "function": "zapDeposit(address,uint256,uint256,address)",
+          "args": [
+            {
+              "rule": "fixed",
+              "value": "0x0000000000000000000000000000000000000000"
+            },
+            {
+              "rule": "at_most",
+              "max": "100000000000000000"
+            },
+            {
+              "rule": "floor",
+              "of": 1,
+              "num": "1536",
+              "den": "1000"
+            },
+            {
+              "rule": "vault"
+            }
+          ],
+          "value": {
+            "rule": "same",
+            "of": 1
+          },
+          "spends": null
+        },
+        {
+          "name": "pairtoken_ethnvda_redeem_eth",
+          "to": "0x0d142f0a847838f933114869f6f63bd618bedca8",
+          "function": "redeemZap(uint256,address,uint256,address)",
+          "args": [
+            {
+              "rule": "at_most",
+              "max": "340282366920938463463374607431768211455"
+            },
+            {
+              "rule": "fixed",
+              "value": "0x0000000000000000000000000000000000000000"
+            },
+            {
+              "rule": "floor",
+              "of": 0,
+              "num": "527",
+              "den": "1000"
+            },
+            {
+              "rule": "vault"
+            }
+          ],
+          "spends": null
         }
-      ]
+      ],
+      "uniswap_v4": {
+        "universal_router": "0x8876789976decbfcbbbe364623c63652db8c0904",
+        "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
+        "quoter": "0x8dc178efb8111bb0973dd9d722ebeff267c98f94",
+        "how": "Universal Router execute(commands, inputs, deadline): command 0x10 = V4_SWAP; its input = abi.encode(actions, params) with actions 0x06 SWAP_EXACT_IN_SINGLE, 0x0c SETTLE_ALL, 0x0f TAKE_ALL (TAKE_ALL pays the caller: the vault). Leaves, depth first: 0 command, 1 actions, 2-6 pool key, 7 zeroForOne, 8 amountIn, 9 minimum out, 10 hookData, 11/12 settle currency/max (= 8), 13/14 take currency/min (= 9), 15 deadline, 16 ETH value (= 8, ETH-in swaps only).",
+        "pool": "ETHNVDA's own pool: ETH/NVDA, fee 1%, tick spacing 200, no hook (read from the pair token's poolKey() on a fork, 2026-11-06)"
+      }
     }
   }
 }

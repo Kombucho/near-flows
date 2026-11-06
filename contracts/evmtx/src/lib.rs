@@ -138,52 +138,154 @@ impl Eip1559 {
     }
 }
 
-/// Function signatures a template may name: static arguments only (address,
-/// uintN, bool, and tuples of those), so every argument is exactly one 32-byte
-/// word and the vault can rule on each word on its own.
+/// Function signatures a template may name, parsed into ABI types: address,
+/// uintN, intN, bool, bytes, tuples and dynamic arrays (T[]). No fixed-size
+/// arrays or strings: nothing a DeFi call needs that these can't say.
 pub mod sig {
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Kind {
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Ty {
         Address,
         Uint(u16),
+        Int(u16),
         Bool,
+        Bytes,
+        Tuple(Vec<Ty>),
+        Array(Box<Ty>),
     }
 
-    /// The argument words of e.g. "exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))".
-    /// None if the text isn't a signature of static arguments.
-    pub fn words(sig: &str) -> Option<Vec<Kind>> {
+    impl Ty {
+        pub fn is_dynamic(&self) -> bool {
+            match self {
+                Ty::Bytes | Ty::Array(_) => true,
+                Ty::Tuple(ts) => ts.iter().any(Ty::is_dynamic),
+                _ => false,
+            }
+        }
+    }
+
+    /// The argument types of e.g. "execute(bytes,bytes[],uint256)". None if malformed.
+    pub fn args(sig: &str) -> Option<Vec<Ty>> {
         let open = sig.find('(')?;
         let name = &sig[..open];
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || !sig.ends_with(')') {
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return None;
         }
-        let inner = &sig[open + 1..sig.len() - 1];
-        let mut depth = 0i32;
-        for c in inner.chars() {
-            depth += match c { '(' => 1, ')' => -1, _ => 0 };
-            if depth < 0 {
-                return None;
-            }
-        }
-        if depth != 0 {
-            return None;
-        }
-        // A tuple of static types is encoded in place, word after word: flatten it.
-        let flat: String = inner.chars().filter(|c| *c != '(' && *c != ')').collect();
-        if flat.is_empty() {
-            return Some(vec![]);
-        }
-        flat.split(',').map(kind).collect()
+        list(&sig[open..])
     }
 
-    fn kind(t: &str) -> Option<Kind> {
-        match t {
-            "address" => Some(Kind::Address),
-            "bool" => Some(Kind::Bool),
-            _ => {
-                let bits: u16 = t.strip_prefix("uint")?.parse().ok()?;
-                (bits % 8 == 0 && (8..=256).contains(&bits)).then_some(Kind::Uint(bits))
+    /// "(t1,t2,...)" -> [t1, t2, ...]
+    pub fn list(s: &str) -> Option<Vec<Ty>> {
+        let (tys, rest) = tuple(s)?;
+        rest.is_empty().then_some(tys)
+    }
+
+    fn tuple(s: &str) -> Option<(Vec<Ty>, &str)> {
+        let mut s = s.strip_prefix('(')?;
+        let mut out = Vec::new();
+        if let Some(rest) = s.strip_prefix(')') {
+            return Some((out, rest));
+        }
+        loop {
+            let (t, rest) = one(s)?;
+            out.push(t);
+            if let Some(r) = rest.strip_prefix(',') {
+                s = r;
+            } else {
+                return Some((out, rest.strip_prefix(')')?));
             }
+        }
+    }
+
+    fn one(s: &str) -> Option<(Ty, &str)> {
+        let (mut t, mut rest) = if s.starts_with('(') {
+            let (tys, rest) = tuple(s)?;
+            (Ty::Tuple(tys), rest)
+        } else {
+            let end = s.find([',', ')', '[']).unwrap_or(s.len());
+            (base(&s[..end])?, &s[end..])
+        };
+        while let Some(r) = rest.strip_prefix("[]") {
+            t = Ty::Array(Box::new(t));
+            rest = r;
+        }
+        Some((t, rest))
+    }
+
+    fn base(t: &str) -> Option<Ty> {
+        let bits = |p: &str| -> Option<u16> {
+            let b: u16 = t.strip_prefix(p)?.parse().ok()?;
+            (b % 8 == 0 && (8..=256).contains(&b)).then_some(b)
+        };
+        match t {
+            "address" => Some(Ty::Address),
+            "bool" => Some(Ty::Bool),
+            "bytes" => Some(Ty::Bytes),
+            _ if t.starts_with("uint") => bits("uint").map(Ty::Uint),
+            _ if t.starts_with("int") => bits("int").map(Ty::Int),
+            _ => None,
+        }
+    }
+}
+
+/// Standard ABI encoding of values already shaped like their types.
+pub mod enc {
+    use super::sig::Ty;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Val {
+        Word([u8; 32]),
+        Bytes(Vec<u8>),
+        Tuple(Vec<Val>),
+        Array(Vec<Val>),
+    }
+
+    fn word_len(n: usize) -> [u8; 32] {
+        let mut w = [0u8; 32];
+        w[24..].copy_from_slice(&(n as u64).to_be_bytes());
+        w
+    }
+
+    /// abi.encode(v1, v2, ...) for types t1, t2, ... (a function's arguments, without the selector).
+    /// Panics if a value doesn't have its type's shape (the vault builds them, so that's a bug).
+    pub fn encode(tys: &[Ty], vals: &[Val]) -> Vec<u8> {
+        assert_eq!(tys.len(), vals.len(), "one value per type");
+        let head_len: usize = tys.iter().map(|t| if t.is_dynamic() { 32 } else { static_len(t) }).sum();
+        let (mut head, mut tail) = (Vec::with_capacity(head_len), Vec::new());
+        for (t, v) in tys.iter().zip(vals) {
+            if t.is_dynamic() {
+                head.extend(word_len(head_len + tail.len()));
+                tail.extend(one(t, v));
+            } else {
+                head.extend(one(t, v));
+            }
+        }
+        head.extend(tail);
+        head
+    }
+
+    fn static_len(t: &Ty) -> usize {
+        match t {
+            Ty::Tuple(ts) => ts.iter().map(static_len).sum(),
+            _ => 32,
+        }
+    }
+
+    fn one(t: &Ty, v: &Val) -> Vec<u8> {
+        match (t, v) {
+            (Ty::Address | Ty::Uint(_) | Ty::Int(_) | Ty::Bool, Val::Word(w)) => w.to_vec(),
+            (Ty::Bytes, Val::Bytes(b)) => {
+                let mut out = word_len(b.len()).to_vec();
+                out.extend(b);
+                out.resize(32 + b.len().div_ceil(32) * 32, 0);
+                out
+            }
+            (Ty::Tuple(ts), Val::Tuple(vs)) => encode(ts, vs),
+            (Ty::Array(t), Val::Array(vs)) => {
+                let mut out = word_len(vs.len()).to_vec();
+                out.extend(encode(&vec![(**t).clone(); vs.len()], vs));
+                out
+            }
+            _ => panic!("value doesn't match its type"),
         }
     }
 }

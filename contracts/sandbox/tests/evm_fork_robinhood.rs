@@ -1,5 +1,7 @@
-//! StonkBrokers on Robinhood Chain, from a NEAR vault: the node library's Smart LP
-//! templates (deposit USDG into the sdAMZN-FR vault, withdraw back to USDG),
+//! StonkBrokers on Robinhood Chain, from a NEAR vault: the node library's templates
+//! for Smart LP (deposit USDG into sdAMZN-FR, withdraw), Uniswap v4 through the
+//! Universal Router (ETH -> NVDA -> ETH, Permit2 approvals) and the ETHNVDA pair token
+//! (zap ETH in, redeem to ETH),
 //! executed on a local fork of Robinhood Chain mainnet. The vault builds and
 //! signs each call; the Smart LP shares and the USDG coming back land at the
 //! vault's own EVM address, the only address a template can name.
@@ -14,10 +16,15 @@ use serde_json::{json, Value};
 const USDG: &str = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 const SMART_LP: &str = "0x5019fca4c0193908727810209b7621a90fc9f17a"; // sdAMZN-FR
 const AMZN_POOL: &str = "0x8ac92da74ab5f3b1d024dc1943ad7e15dc4179ef"; // holds USDG: funds the vault on the fork
+const NVDA: &str = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec";
+const ETHNVDA: &str = "0x0d142f0a847838f933114869f6f63bd618bedca8"; // StonkBrokers pair token (ETH + NVDA, Uniswap v4 position)
+const V4_QUOTER: &str = "0x8dc178efb8111bb0973dd9d722ebeff267c98f94";
+const ETH: &str = "0x0000000000000000000000000000000000000000";
 const GWEI: u128 = 1_000_000_000;
+const E18: u128 = 1_000_000_000_000_000_000;
 
 #[tokio::test]
-async fn the_vault_deposits_into_and_withdraws_from_a_stonkbrokers_smart_lp_on_a_robinhood_fork() -> anyhow::Result<()> {
+async fn the_vault_runs_stonkbrokers_smart_lp_uniswap_v4_and_pair_tokens_on_a_robinhood_fork() -> anyhow::Result<()> {
     let url = std::env::var("ROBINHOOD_RPC").unwrap_or_else(|_| "https://rpc.mainnet.chain.robinhood.com".into());
     let Some(fork) = Fork::start(&url, 8550).await else { return Ok(()) };
     assert_eq!(fork.cast(&["chain-id"]), "4663", "a fork of Robinhood Chain");
@@ -83,5 +90,62 @@ async fn the_vault_deposits_into_and_withdraws_from_a_stonkbrokers_smart_lp_on_a
         back as f64 / 1e6, (1.0 - back as f64 / amount as f64) * 100.0);
     assert_eq!(fork.balance(SMART_LP, &me), 0);
     assert!(back >= shares / 1_100_000_000_000);
+
+    // ---------- Uniswap v4 (Universal Router) on ETHNVDA's own pool ----------
+    fork.cast(&["rpc", "anvil_setBalance", &me, "0xDE0B6B3A7640000"]); // 1 ETH
+    let eth = |f: &Fork| num(&f.cast(&["balance", &me]));
+    let key = format!("({ETH},{NVDA},10000,200,{ETH})");
+    let v4_quote = |zero_for_one: bool, amount: u128| num(&fork.cast(&["call", V4_QUOTER,
+        "quoteExactInputSingle(((address,address,uint24,int24,address),bool,uint128,bytes))(uint256,uint256)",
+        &format!("({key},{zero_for_one},{amount},0x)")]));
+    let now: u128 = num(&fork.cast(&["block", "latest", "--field", "timestamp"]));
+    // 17 leaves: amountIn is leaf 8, the minimum leaf 9, the deadline leaf 15, the ETH value leaf 16 (same as 8).
+    let v4 = |amount: u128, min_out: u128, value_try: u128| {
+        let mut v = vec![0u128; 17];
+        v[8] = amount;
+        v[9] = min_out;
+        v[15] = now + 600;
+        v[16] = value_try;
+        v
+    };
+    let swap_in = 10_000_000_000_000_000u128; // 0.01 ETH
+    let q = v4_quote(true, swap_in);
+    println!("v4 quote: 0.01 ETH -> {:.4} NVDA", q as f64 / 1e18);
+    // A keeper trying to attach 1 ETH instead of 0.01: the value is `same` as amountIn, so 0.01 is signed.
+    let r = keeper.call(vault.id(), "evm_call").args_json(call("v4_swap_eth_nvda", v4(swap_in, q * 99 / 100, E18))).max_gas().transact().await?;
+    let req = r.logs().iter().find(|l| l.contains("evm_call_requested")).unwrap().to_string();
+    assert!(req.contains(&format!(r#""value":"{swap_in}""#)), "{req}");
+    let before = eth(&fork);
+    assert_eq!(fork.send_raw(&signed(&r)), 1, "v4 swap ETH -> NVDA executed");
+    let nvda = fork.balance(NVDA, &me);
+    println!("v4 swap: 0.01 ETH -> {:.4} NVDA into the vault (ETH spent incl. gas {:.5})", nvda as f64 / 1e18, (before - eth(&fork)) as f64 / 1e18);
+    assert!(nvda >= q * 99 / 100);
+
+    // Back to ETH: approve Permit2, let the Universal Router pull through Permit2, swap all NVDA.
+    let r = keeper.call(vault.id(), "evm_call").args_json(call("approve_nvda_permit2", vec![0, nvda])).max_gas().transact().await?;
+    assert_eq!(fork.send_raw(&signed(&r)), 1);
+    let r = keeper.call(vault.id(), "evm_call").args_json(call("permit2_nvda_universal_router", vec![0, 0, nvda, (now + 3600) as u128])).max_gas().transact().await?;
+    assert_eq!(fork.send_raw(&signed(&r)), 1, "Permit2 allowance set");
+    let q = v4_quote(false, nvda);
+    let mut v = v4(nvda, q * 99 / 100, 0);
+    v.pop(); // no ETH value on this one: 16 leaves
+    let r = keeper.call(vault.id(), "evm_call").args_json(call("v4_swap_nvda_eth", v)).max_gas().transact().await?;
+    let before = eth(&fork);
+    assert_eq!(fork.send_raw(&signed(&r)), 1, "v4 swap NVDA -> ETH executed");
+    println!("v4 swap back: {:.4} NVDA -> {:.5} ETH (net of gas)", nvda as f64 / 1e18, (eth(&fork) as f64 - before as f64) / 1e18);
+    assert_eq!(fork.balance(NVDA, &me), 0);
+
+    // ---------- the ETHNVDA pair token: zap 0.01 ETH in, redeem all of it to ETH ----------
+    let zap = 10_000_000_000_000_000u128;
+    let r = keeper.call(vault.id(), "evm_call").args_json(call("pairtoken_ethnvda_zap_eth", vec![0, zap, 0, 0, 0])).max_gas().transact().await?;
+    assert_eq!(fork.send_raw(&signed(&r)), 1, "pair token zapDeposit executed");
+    let pt = fork.balance(ETHNVDA, &me);
+    println!("pair token: 0.01 ETH -> {:.5} ETHNVDA shares", pt as f64 / 1e18);
+    assert!(pt >= zap * 1536 / 1000, "at least the owner's floor");
+    let before = eth(&fork);
+    let r = keeper.call(vault.id(), "evm_call").args_json(call("pairtoken_ethnvda_redeem_eth", vec![pt, 0, 0, 0])).max_gas().transact().await?;
+    assert_eq!(fork.send_raw(&signed(&r)), 1, "pair token redeemZap executed");
+    println!("redeemed all shares: {:.5} ETH back (net of gas)", (eth(&fork) as f64 - before as f64) / 1e18);
+    assert_eq!(fork.balance(ETHNVDA, &me), 0);
     Ok(())
 }

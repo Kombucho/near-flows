@@ -43,8 +43,8 @@ fn approve_t() -> Value {
 /// USDC (6 dec) -> WETH (18 dec): at most 100 USDC a swap, at least 0.00025 WETH per USDC (2.5e8 wei per micro-USDC).
 fn swap_t() -> Value {
     json!({"name": "swap_usdc_weth", "to": ROUTER, "function": "exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))",
-        "args": [{"rule": "fixed", "value": USDC}, {"rule": "fixed", "value": WETH}, {"rule": "fixed", "value": "3000"}, {"rule": "vault"},
-                 {"rule": "at_most", "max": "100000000"}, {"rule": "floor", "of": 4, "num": "250000000", "den": "1"}, {"rule": "fixed", "value": "0"}],
+        "args": [{"rule": "tuple", "args": [{"rule": "fixed", "value": USDC}, {"rule": "fixed", "value": WETH}, {"rule": "fixed", "value": "3000"}, {"rule": "vault"},
+                 {"rule": "at_most", "max": "100000000"}, {"rule": "floor", "of": 4, "num": "250000000", "den": "1"}, {"rule": "fixed", "value": "0"}]}],
         "spends": {"arg": 4, "token": USDC}})
 }
 
@@ -73,10 +73,13 @@ async fn the_vault_builds_and_signs_evm_calls_only_from_its_templates() -> anyho
     let mut bad = Vec::new();
     let mut t = approve_t(); t["args"][0] = json!({"rule": "at_most", "max": "1"}); bad.push(("a number where the spender goes", t));
     let mut t = approve_t(); t["args"][1] = json!({"rule": "vault"}); bad.push(("the vault as an amount", t));
-    let mut t = approve_t(); t["function"] = json!("approve(bytes,uint256)"); bad.push(("dynamic argument", t));
+    let mut t = approve_t(); t["function"] = json!("approve(bytes,uint256)"); bad.push(("an address rule for bytes", t));
+    let mut t = approve_t(); t["function"] = json!("approve(string,uint256)"); bad.push(("a string", t));
+    let mut t = approve_t(); t["value"] = json!({"rule": "fixed", "value": "1"}); bad.push(("a fixed ETH value", t));
+    let mut t = swap_t(); t["args"][0]["args"][5] = json!({"rule": "same", "of": 6}); bad.push(("same as a fixed number", t));
     let mut t = approve_t(); t["args"].as_array_mut().unwrap().pop(); bad.push(("missing rule", t));
-    let mut t = swap_t(); t["args"][2] = json!({"rule": "fixed", "value": "16777216"}); bad.push(("fee too big for uint24", t));
-    let mut t = swap_t(); t["args"][5] = json!({"rule": "floor", "of": 2, "num": "1", "den": "1"}); bad.push(("floor relative to a fixed value", t));
+    let mut t = swap_t(); t["args"][0]["args"][2] = json!({"rule": "fixed", "value": "16777216"}); bad.push(("fee too big for uint24", t));
+    let mut t = swap_t(); t["args"][0]["args"][5] = json!({"rule": "floor", "of": 2, "num": "1", "den": "1"}); bad.push(("floor relative to a fixed value", t));
     let mut t = swap_t(); t["spends"] = json!({"arg": 0, "token": USDC}); bad.push(("spends a fixed argument", t));
     for (name, t) in bad {
         assert!(alice.call(vault.id(), "evm_template").args_json(json!({"template": t})).transact().await?.is_failure(), "{name}");
