@@ -43,7 +43,7 @@
 //! u128 vault balance (yocto, at the time of the call)
 //! u64  vault storage usage (bytes)
 //! u128 attached deposit (x/new: what the caller attached; callbacks: 0)
-//! u64  gas left in the vault's receipt (x/new; callbacks: 0)
+//! u64  gas left in the vault's receipt when it made the call (roughly what the next round gets)
 //! u8   sender length, then the sender (x/new: the real predecessor; callbacks: empty)
 //! ...  body (x: the caller's raw args; new: the init args; callbacks: the brain's own args)
 //! ```
@@ -238,25 +238,25 @@ mod contract {
         }
     }
 
-    /// Write the header into OUT. `caller`: (sender in register 0 already read
-    /// by the caller, deposit, gas left) for requests; None for callbacks.
-    /// Returns the header length; the body goes right after it.
+    /// Write the header into OUT: with the caller's name and deposit for a
+    /// request, without them for a callback. Returns the header length; the
+    /// body goes right after it.
     fn header(request: bool) -> usize {
         unsafe {
             let o = &mut *addr_of_mut!(OUT);
             o[0] = VERSION;
             account_balance(o.as_mut_ptr().add(1) as u64);
             o[17..25].copy_from_slice(&storage_usage().to_le_bytes());
+            o[41..49].copy_from_slice(&prepaid_gas().saturating_sub(used_gas()).to_le_bytes());
             if request {
                 attached_deposit(o.as_mut_ptr().add(25) as u64);
-                o[41..49].copy_from_slice(&prepaid_gas().saturating_sub(used_gas()).to_le_bytes());
                 predecessor_account_id(0);
                 let n = register_len(0) as usize;
                 o[49] = n as u8;
                 read_register(0, o.as_mut_ptr().add(50) as u64);
                 50 + n
             } else {
-                o[25..49].fill(0);
+                o[25..41].fill(0);
                 o[49] = 0;
                 50
             }
@@ -317,8 +317,9 @@ mod contract {
                 fail("too big");
             }
             out[h..h + rest.len()].copy_from_slice(rest);
-            let c = ask_brain(None, b"handle", h + rest.len(), GAS_HANDLE);
-            promise_return(c);
+            // Not returned: the account exists either way, and its creator's
+            // callback must only learn whether the account was made.
+            ask_brain(None, b"handle", h + rest.len(), GAS_HANDLE);
         }
     }
 
