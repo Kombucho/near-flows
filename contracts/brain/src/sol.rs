@@ -139,9 +139,12 @@ impl SolTemplate {
 pub const SOL_PATH: &str = "solana-1";
 pub(crate) const EDDSA_DOMAIN: u32 = 1;
 pub(crate) const GAS_SIGN: Gas = Gas::from_tgas(50);
-pub(crate) const GAS_SIGNED: Gas = Gas::from_tgas(15);
+/// on_sol_signed: burns 2.5 Tgas; 8 is a ~3x margin.
+pub(crate) const GAS_SIGNED: Gas = Gas::from_tgas(8);
 /// Reading prices, then checking the message again against the market floor.
-const GAS_CHECK: Gas = Gas::from_tgas(60);
+/// (on_read: checks the message again with the prices, answers the signature
+/// request; burns 4.0 Tgas, 12 is a 3x margin.)
+const GAS_CHECK: Gas = Gas::from_tgas(12);
 
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
@@ -222,6 +225,7 @@ impl Talk {
             None => self.sol_sign(&message, None),
             Some(m) => {
                 let views = self.feed_views(&[m.sell.clone(), m.buy.clone()]);
+                self.need_after = GAS_SIGN.as_tgas() + GAS_SIGNED.as_tgas() + crate::RELAY_TGAS;
                 self.read(views, Read::SolPrices(message), GAS_CHECK)
             }
         }
@@ -271,7 +275,7 @@ impl Talk {
             &format!(r#""hash":"{hash}","in_mint":"{}","out_mint":"{}","in_amount":"{}","min_out":"{}","max_priority_fee_lamports":"{}""#,
                 pair.in_mint, pair.out_mint, verdict.in_amount, verdict.min_out, verdict.max_priority_fee_lamports),
         );
-        sol_sign_call(&cfg.signer, &bytes).then("on_vault", near_sdk::borsh::to_vec(&Next::SolSigned(hash)).unwrap(), GAS_SIGNED).into()
+        self.charge_signature(sol_sign_call(&cfg.signer, &bytes)).then("on_vault", near_sdk::borsh::to_vec(&Next::SolSigned(hash)).unwrap(), GAS_SIGNED).into()
     }
 
     /// The vault's `sign` came back: publish the signature (`sol_signed`) and return it.
@@ -346,6 +350,6 @@ impl Talk {
         let names: Vec<String> = matched.iter().map(|m| format!(r#""{}""#, m.template)).collect();
         let hash = hex::encode(env::sha256(&bytes));
         self.emit("sol_sign_requested", &format!(r#""hash":"{hash}","templates":[{}]"#, names.join(",")));
-        sol_sign_call(&cfg.signer, &bytes).then("on_vault", near_sdk::borsh::to_vec(&Next::SolSigned(hash)).unwrap(), GAS_SIGNED).into()
+        self.charge_signature(sol_sign_call(&cfg.signer, &bytes)).then("on_vault", near_sdk::borsh::to_vec(&Next::SolSigned(hash)).unwrap(), GAS_SIGNED).into()
     }
 }

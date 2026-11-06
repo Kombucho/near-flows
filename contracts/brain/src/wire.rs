@@ -69,6 +69,14 @@ impl Answer {
         self
     }
 
+    /// The vault deletes itself, its NEAR to `beneficiary` (relay: only alone, no callback).
+    pub fn delete(mut self, beneficiary: &AccountId) -> Self {
+        self.n += 1;
+        self.acts.push(2);
+        short(&mut self.acts, beneficiary.as_bytes());
+        self
+    }
+
     /// After the actions: brain.<method>(args) sees their results.
     pub fn then(mut self, method: &str, args: Vec<u8>, gas: Gas) -> Self {
         self.cb = Some((method.to_string(), args, gas));

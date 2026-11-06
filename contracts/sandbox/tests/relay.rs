@@ -237,7 +237,7 @@ async fn a_stranger_cant_make_the_relay_do_anything() -> anyhow::Result<()> {
         hdr.extend([0u8; 48]);
         hdr.push(0);
         if method == "on_vault" {
-            hdr.extend([0u8; 10]); // a well-formed Next::Call {id: 0, i: 0}: refused for who sends it, not its shape
+            hdr.extend([0u8; 18]); // a well-formed Next::Call {id: 0, i: 0, tgas: 0}: refused for who sends it, not its shape
         }
         let r = m.call(w.brain.id(), method).args(hdr).max_gas().transact().await?;
         let why = [("handle", "a request names its sender"), ("on_vault", "not a vault"), ("on_read", "is private")].iter().find(|(m, _)| *m == method).unwrap().1;

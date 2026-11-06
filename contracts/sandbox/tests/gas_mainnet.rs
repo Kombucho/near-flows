@@ -7,7 +7,9 @@
 
 mod common;
 mod ladder;
+mod protocolsw;
 mod relayw;
+mod rhea;
 
 use common::wasm;
 use ed25519_dalek::{Signer, SigningKey};
@@ -175,47 +177,97 @@ fn get_return(m: &Market, tgas: u64) -> Value {
         "args": json!({"token_in": m.wnear.id(), "amount_in": "{amount}", "token_out": m.usdc.id()}).to_string()})
 }
 
-/// A recipe of `calls` behind a market floor, funded and stepped with 300 Tgas.
-async fn step_recipe(m: &Market, calls: Vec<Value>) -> anyhow::Result<ExecutionFinalResult> {
-    let mut action = market_swap(m, 50);
-    action["calls"] = json!(calls);
-    let f = save_and_fund(m, json!({"input": m.wnear.id(), "when": {"when": "now"}, "action": action}), 10 * ONE).await?;
+/// A recipe of `calls` (behind a market floor if `floor`), funded and stepped with 300 Tgas.
+async fn step_recipe(m: &Market, calls: Vec<Value>, floor: bool) -> anyhow::Result<ExecutionFinalResult> {
+    let f = save_and_fund(m, recipe_node(m, calls, floor), 10 * ONE).await?;
     x300(&m.w.keeper, &m.w.vault, "step", json!({"flow_id": f, "node": 0})).await
 }
 
+fn recipe_node(m: &Market, calls: Vec<Value>, floor: bool) -> Value {
+    let mut action = market_swap(m, 50);
+    action["calls"] = json!(calls);
+    if !floor {
+        action["market"] = Value::Null;
+    }
+    json!({"input": m.wnear.id(), "when": {"when": "now"}, "action": action})
+}
+
+// The budget, from the brain's constants: 300 - 5 (relay x) - 40 (first round) = 255 Tgas
+// for the rest. A recipe of k calls takes its calls' gas + 13 per call (8 callback, 5 relay)
+// + 25 more after the last (its balance read) + 5. A market floor's 4 oracle views move the
+// first read to a round of its own: +79.
+
 #[tokio::test]
-async fn two_calls_fit_when_their_gas_adds_up_to_at_most_108_tgas() -> anyhow::Result<()> {
+async fn two_calls_without_a_floor_fit_up_to_199_tgas_of_calls() -> anyhow::Result<()> {
     let m = market().await?;
-    let r = step_recipe(&m, vec![swap_call(&m, 60), get_return(&m, 48)]).await?;
-    let done = stepped(&r) && logged(&r, "market_floor");
-    row("2-call recipe (60 + 48 Tgas) + market floor", &r, done);
+    let r = step_recipe(&m, vec![swap_call(&m, 79), get_return(&m, 120)], false).await?;
+    let done = stepped(&r);
+    row("2-call recipe (79 + 120 Tgas)", &r, done);
     assert!(done, "{:?} {:?}", r.logs(), r.failures());
     Ok(())
 }
 
 #[tokio::test]
-async fn four_calls_fit_only_when_their_gas_adds_up_to_at_most_28_tgas() -> anyhow::Result<()> {
+async fn two_calls_with_a_market_floor_fit_up_to_120_tgas_of_calls() -> anyhow::Result<()> {
     let m = market().await?;
-    let r = step_recipe(&m, vec![swap_call(&m, 22), get_return(&m, 2), get_return(&m, 2), get_return(&m, 2)]).await?;
+    let r = step_recipe(&m, vec![swap_call(&m, 60), get_return(&m, 60)], true).await?;
     let done = stepped(&r) && logged(&r, "market_floor");
-    row("4-call recipe (22 + 3 x 2 Tgas) + market floor", &r, done);
+    row("2-call recipe (60 + 60 Tgas) + market floor", &r, done);
     assert!(done, "{:?} {:?}", r.logs(), r.failures());
     Ok(())
 }
 
 #[tokio::test]
-async fn a_recipe_too_heavy_for_mainnet_is_refused_before_anything_moves() -> anyhow::Result<()> {
+async fn four_calls_with_a_market_floor_fit_up_to_94_tgas_of_calls() -> anyhow::Result<()> {
     let m = market().await?;
-    // The node library's "Borrow on Rhea" gives its calls 60 + 120 Tgas: with the relay's 100 for
-    // the brain's first round and 40 per call round, that is 370 Tgas, more than mainnet allows.
-    let r = step_recipe(&m, vec![swap_call(&m, 60), get_return(&m, 120)]).await?;
-    row("2-call recipe (60 + 120 Tgas, like Borrow on Rhea)", &r, stepped(&r));
-    assert!(fails_with(&r, "attach at least 370 Tgas"), "{:?}", r.failures());
-    let r = step_recipe(&m, vec![swap_call(&m, 50), get_return(&m, 10), get_return(&m, 10), get_return(&m, 10)]).await?;
-    row("4-call recipe (50 + 3 x 10 Tgas)", &r, stepped(&r));
-    assert!(fails_with(&r, "attach at least"), "{:?}", r.failures());
-    let bal: String = m.wnear.view("ft_balance_of").args_json(json!({"account_id": m.w.vault})).await?.json()?;
-    assert_eq!(bal, (1_000 * ONE).to_string(), "nothing moved");
+    let r = step_recipe(&m, vec![swap_call(&m, 50), get_return(&m, 14), get_return(&m, 14), get_return(&m, 14)], true).await?;
+    let done = stepped(&r) && logged(&r, "market_floor");
+    row("4-call recipe (50 + 3 x 14 Tgas) + market floor", &r, done);
+    assert!(done, "{:?} {:?}", r.logs(), r.failures());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_node_too_heavy_for_mainnet_is_refused_when_saved_with_its_gas_need() -> anyhow::Result<()> {
+    let m = market().await?;
+    for (calls, floor, need) in [
+        (vec![swap_call(&m, 60), get_return(&m, 120)], true, 360),
+        (vec![swap_call(&m, 80), get_return(&m, 120)], false, 301),
+    ] {
+        let r = x(&m.w.alice, &m.w.vault, "save_flow", json!({"name": "heavy", "nodes": [recipe_node(&m, calls, floor)]})).await?;
+        assert!(fails_with(&r, &format!("node 0 needs {need} Tgas per step")), "{:?}", r.failures());
+    }
+    Ok(())
+}
+
+/// The node library's Borrow and Repay on Rhea, on the real Rhea lending code.
+#[tokio::test]
+async fn borrow_and_repay_on_rhea_from_the_node_library_fit_in_300_tgas() -> anyhow::Result<()> {
+    use protocolsw as p;
+    let w = p::setup().await?;
+    let lend = p::lending(&w).await?;
+    w.alice.transfer_near(&w.vault, NearToken::from_near(30)).await?.into_result()?;
+    let f = p::save(&w, json!([
+        {"input": "near", "action": p::wrap_near(&w), "when": {"when": "now"}, "next": [{"to": 1, "bps": 10000}]},
+        {"input": w.wrap.id(), "action": p::supply_and_borrow(&w, &lend, 3 * ONE), "when": {"when": "now"}},
+    ])).await?;
+    p::fund(&w, f, 0, 10 * p::NEAR).await?;
+    let r = p::step(&w, f, 0).await?;
+    row("Wrap NEAR (library, 10 Tgas)", &r, p::stepped(&r));
+    assert!(p::stepped(&r), "{:?}", r.failures());
+    let g = p::library_tgas("rhea_borrow");
+    let r = p::step(&w, f, 1).await?;
+    row(&format!("Borrow on Rhea (library, {} + {} Tgas)", g[0], g[1]), &r, p::stepped(&r));
+    assert!(p::stepped(&r), "{:?} {:?}", r.logs(), r.failures());
+    assert_eq!(p::balance(&w.usdc, &w.vault).await?, 30 * ONE, "borrowed 30 USDC");
+    let g = p::library_tgas("rhea_repay");
+    // Release half the collateral (1/6 wNEAR per USDC): Rhea keeps at least 1e6 supply shares
+    // of an asset, and this vault is its only wNEAR supplier here.
+    let back = p::save(&w, json!([{"input": w.usdc.id(), "action": p::repay_and_release(&w, &lend, p::NEAR / 6 * (p::SCALE / ONE)), "when": {"when": "manual"}}])).await?;
+    p::fund(&w, back, 0, 30 * ONE).await?;
+    let r = p::step_as(&w, &w.alice, back, 0).await?;
+    row(&format!("Repay on Rhea (library, {} + {} Tgas)", g[0], g[1]), &r, p::stepped(&r));
+    assert!(p::stepped(&r), "{:?} {:?}", r.logs(), r.failures());
     Ok(())
 }
 

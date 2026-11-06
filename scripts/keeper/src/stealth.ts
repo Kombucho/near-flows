@@ -20,18 +20,23 @@ import { Account, baseDecode, baseEncode } from "near-api-js";
 export type Command = { method: string; args: Record<string, unknown> | string; tgas?: number };
 export type Signed = { method: string; args: string; nonce: string; expires_ns: string; tgas: number; signature: string };
 
-/** What the relay gives the brain's first round (relay GAS_HANDLE). */
-export const HANDLE_TGAS = 100;
+/** What the relay gives the brain's first round (relay GAS_HANDLE, relay v2). */
+export const HANDLE_TGAS = 40;
+/** The relay's own `x`/`exec` work (brain X_TGAS) and its `cb` per round (brain RELAY_TGAS). */
+const X_TGAS = 5;
+const RELAY_TGAS = 5;
 /** The signed gas for a `step`: the brain reads the trigger price, the market floor and the
- *  balances in this round; the recipe's own rounds come out of what's left (gas_mainnet.rs:
- *  a 50 Tgas swap with a market floor fits in 300 with 80 signed; 60 ran out). */
+ *  balances in this round (or moves a read that doesn't fit to a round of its own); the
+ *  recipe's rounds come out of what's left (gas_mainnet.rs: a 50 Tgas swap with a market
+ *  floor fits in 300 with 80 signed). */
 export const STEP_TGAS = 80;
 
-/** Gas to attach to `exec`: the brain refuses unless its round has the signed gas + 10 left
- *  after HANDLE_TGAS; 5 more covers the relay's own work. Never over mainnet's 300 cap. */
+/** Gas to attach to `exec`: the brain refuses unless the round after its first has the signed
+ *  gas + a relay round left. Never over mainnet's 300 cap. */
 export function execTgas(tgas: number): number {
-  const need = tgas + 10 + HANDLE_TGAS + 5;
-  if (need > 300) throw new Error(`a command signed for ${tgas} Tgas needs ${need} Tgas: mainnet allows 300, sign for at most ${300 - 115}`);
+  const need = tgas + RELAY_TGAS + HANDLE_TGAS + X_TGAS;
+  const most = 300 - RELAY_TGAS - HANDLE_TGAS - X_TGAS;
+  if (need > 300) throw new Error(`a command signed for ${tgas} Tgas needs ${need} Tgas: mainnet allows 300, sign for at most ${most}`);
   return need;
 }
 

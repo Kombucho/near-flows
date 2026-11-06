@@ -21,7 +21,7 @@ export type NodeState = { inbox: string; running: string; runs: number; last_run
 /** As the brain returns it. A hidden flow has no `nodes`, only `hidden` fingerprints. */
 export type Flow = { name: string; nodes: FlowNode[]; inputs?: string[]; hidden?: string[]; ledger: { nodes: NodeState[]; busy: number | null } };
 /** A relay vault's record in the brain (get_vault): flow ids are positions, deleted flows are null. */
-export type VaultState = { owner: string; keeper: string | null; busy: unknown | null; flows: (Flow | null)[] };
+export type VaultState = { owner: string; keeper: string | null; busy: unknown | null; flows: (Flow | null)[]; keeper_fee?: string };
 
 export type Due = { flow: number; node: number; label: string; remote?: boolean; price?: { source: PriceSource; below?: bigint; above?: bigint } };
 

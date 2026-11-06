@@ -53,6 +53,8 @@
 //! from the vault for the difference (plus a small buffer). A vault that can't
 //! afford it is refused the change.
 
+mod close;
+pub mod fees;
 pub mod evm;
 mod hidden;
 pub mod intents;
@@ -90,11 +92,38 @@ const RECORD_OVERHEAD: u64 = 40;
 /// Paid on top of what's owed, so not every small change needs a payment.
 const PAY_BUFFER_BYTES: u128 = 500;
 
+// Gas. Mainnet caps a transaction at 300 Tgas prepaid, and a recipe's own calls
+// may ask for most of it (the library's Borrow on Rhea: 60 + 120), so every
+// reserve below is a measured burn (sandbox, GAS_RECEIPTS=1 in gas_mainnet.rs
+// and protocols.rs) times a stated margin, not a round guess.
+
 /// What the relay gives `handle` (relay GAS_HANDLE): the next round has the rest.
-pub(crate) const HANDLE_TGAS: u64 = 100;
+/// Enough to decide (handle burns 2.8-5.2 Tgas) AND read two balances in place
+/// (`read_tgas`: 2 x 8 + 8 + 3 = 27), so a plain step needs no extra round. A
+/// heavier first read (price trigger, oracle feeds) moves to the vault's next
+/// round instead (`read`), paid from what the caller attached.
+pub(crate) const HANDLE_TGAS: u64 = 40;
+/// A view: ft_balance_of on the real wNEAR, Rhea's get_return and the mock Pyth
+/// burn 1.2-1.3 Tgas; 5 leaves room for a bigger real contract (Pyth's) to load.
 pub(crate) const GAS_VIEW: Gas = Gas::from_tgas(5);
-/// The brain's own read callback; one that may read again gets twice this.
-pub(crate) const GAS_READ: Gas = Gas::from_tgas(20);
+/// What creating a function-call receipt costs its creator beyond the gas it
+/// attaches (the new receipt's prepaid execution fee, ~2.4 Tgas), rounded up.
+pub(crate) const RECEIPT_TGAS: u64 = 3;
+/// A brain callback's own work around the promises it makes (load and store the
+/// record, decide, encode): brain receipts burn 2.4-5.3 Tgas; 6 holds the
+/// common ones, and those that build transactions get their own constants.
+pub(crate) const OWN_TGAS: u64 = 6;
+/// The brain's own read callback when it only answers (on_read burns 2.4-3.7).
+pub(crate) const GAS_READ: Gas = Gas::from_tgas(8);
+/// The vault's `cb` per round (relay GAS_CB: cb burns 0.9-2.6 Tgas).
+pub(crate) const RELAY_TGAS: u64 = 5;
+/// What a callback still spends after making its promises: storing the record
+/// and returning (part of the 2.4-5.3 burnt above).
+pub(crate) const FINISH_TGAS: u64 = 3;
+/// The relay's `x` itself: burns 1.7-1.8 Tgas and prepays two receipts (~5).
+pub(crate) const X_TGAS: u64 = 5;
+/// Mainnet's cap on a transaction's prepaid gas.
+pub const MAINNET_TGAS: u64 = 300;
 const GAS_FT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_PAY: Gas = Gas::from_tgas(5);
 const GAS_ACT: Gas = Gas::from_tgas(100);
@@ -244,6 +273,15 @@ pub struct VaultState {
     pub paid: U128,
     /// Next step id: a callback must carry the id of the step in flight.
     pub next_step: u64,
+    /// Auto-close on: anyone may `close` the empty vault, its NEAR going here (close.rs).
+    pub auto_close: Option<AccountId>,
+    /// The vault ever set up another chain (EVM, Solana, Intents, a remote node):
+    /// its balances there can't be seen from here, so only its owner may close it.
+    pub crosschain: bool,
+    /// NEAR paid to the keeper per run it did successfully (set by the owner, fees.rs).
+    pub keeper_fee: U128,
+    /// Protocol fees in tokens, set aside out of the free balance until settled (fees.rs).
+    pub owed_fees: Vec<(String, U128)>,
 }
 
 /// Requests a vault forwards: `{"<method>": {<args>}}`, the vault's own method
@@ -255,7 +293,8 @@ pub enum Req {
     Init { owner: AccountId, keeper: Option<AccountId> },
     InitStealth { owner_key: PublicKey, keeper: Option<AccountId> },
     // Owner.
-    SetKeeper { keeper: Option<AccountId> },
+    /// The keeper and its price per successful run (0 for your own keeper).
+    SetKeeper { keeper: Option<AccountId>, #[serde(default)] keeper_fee: U128 },
     Trust { add: Vec<Trust>, remove: Vec<AccountId> },
     SaveFlow { name: String, nodes: Vec<Node<Recipe>> },
     DeleteFlow { flow_id: u32 },
@@ -270,6 +309,8 @@ pub enum Req {
     HideFlow { flow_id: u32, fingerprints: Vec<String> },
     RevealFlow { flow_id: u32, nodes: Vec<Node<Recipe>>, salts: Vec<String> },
     SetOwnerKey { owner_key: PublicKey },
+    /// Auto-close: `to` is where the NEAR goes (a named vault: its owner; a stealth vault: required).
+    SetAutoClose { on: bool, #[serde(default)] to: Option<AccountId> },
     WithdrawTo { token: String, amount: U128, to: AccountId, via_intents: bool },
     IntentsSetup { verifier: AccountId, signer: AccountId },
     IntentsAllow { pair: IntentsPair },
@@ -294,6 +335,10 @@ pub enum Req {
     RemoteReport { flow_id: u32, node: u16, out: Option<U128> },
     // Anyone.
     ApplyLimit { token: String },
+    /// Send a token's owed protocol fees to the treasury (fees.rs).
+    SettleFees { token: AccountId },
+    /// Delete the empty vault (close.rs): anyone with auto-close on, else the owner.
+    Close { #[serde(default)] confirm_remote: bool, #[serde(default)] to: Option<AccountId> },
     /// A stealth owner's signed command (see stealth.rs).
     Exec { method: String, args: String, nonce: U64, expires_ns: U64, tgas: u64, signature: String },
     // Receiver hooks (relay named doors): answered, never acted on.
@@ -301,12 +346,18 @@ pub enum Req {
     MtOnTransfer { sender_id: AccountId, previous_owner_ids: Vec<AccountId>, token_ids: Vec<String>, amounts: Vec<U128>, msg: String },
 }
 
+/// Tgas a read takes from the receipt that makes it: each view's gas and receipt
+/// fee, the callback's gas and its receipt fee.
+pub(crate) fn read_tgas(views: usize, callback_tgas: u64) -> u64 {
+    views as u64 * (GAS_VIEW.as_tgas() + RECEIPT_TGAS) + callback_tgas + RECEIPT_TGAS
+}
+
 /// A brain callback routed through the vault: it needs a result only the vault has.
 #[derive(BorshSerialize, BorshDeserialize)]
 #[borsh(crate = "near_sdk::borsh")]
 pub(crate) enum Next {
-    /// A recipe call of the step `id` returned.
-    Call { id: u64, i: u8 },
+    /// A recipe call of the step `id` returned (`tgas`: what this callback was given).
+    Call { id: u64, i: u8, tgas: u64 },
     /// The MPC signer answered the vault's `sign` for an intent.
     IntentsSigned { message: String, nonce: [u8; 32] },
     /// A stealth command whose nonce is already burned: run it as the owner.
@@ -315,6 +366,10 @@ pub(crate) enum Next {
     SolSigned(String),
     RemoteEvmSigned { flow_id: u32, node: u16, tx: evm::TxJson },
     RemoteSolSigned { flow_id: u32, node: u16, hash: String },
+    /// A read that didn't fit where it was asked for: the vault's next round makes it.
+    Read { views: Vec<(AccountId, String, String)>, read: Read, gas: u64 },
+    /// The owed fees' ft_transfer to the treasury returned.
+    FeeSettled { token: String, amount: u128 },
 }
 
 /// The brain's own reads, and what to do with their results.
@@ -334,6 +389,10 @@ pub(crate) enum Read {
     SolAddress,
     SolPrices(String),
     RemotePrices(remote::Begin),
+    /// Closing: the vault's token balances (then its Intents balances) came back.
+    Close { to: AccountId, tokens: Vec<AccountId>, intents: Vec<String> },
+    /// Settling fees: the vault's balance of the token.
+    Settle { token: AccountId },
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
@@ -349,6 +408,8 @@ pub struct ReadArgs {
 pub(crate) enum Reply {
     Answer(Answer),
     Read(Promise),
+    /// The vault's last answer: its record is already gone, nothing to store (close.rs).
+    Final(Answer),
 }
 
 impl From<Answer> for Reply {
@@ -362,6 +423,8 @@ impl From<Answer> for Reply {
 pub struct Brain {
     /// Only sub-accounts of this factory are vaults, and only it can make them.
     pub factory: AccountId,
+    /// Protocol fees and their caps (fees.rs).
+    pub fees: fees::Fees,
 }
 
 /// A vault talking to the brain: who it is, what it reported, its record.
@@ -369,13 +432,37 @@ pub(crate) struct Talk {
     pub vault: AccountId,
     pub ctx: Ctx,
     pub vs: VaultState,
+    /// Tgas the vault's rounds need after the pending read's answer (a step's
+    /// recipe rounds, a signature's): a read moved to the next round must leave it.
+    pub need_after: u64,
 }
 
 #[near]
 impl Brain {
     #[init]
-    pub fn new(factory: AccountId) -> Self {
-        Self { factory }
+    /// `fees`: the treasury, the fee admin, the protocol fee and the signature fee
+    /// with their caps (fixed here for good). None: no fees, ever.
+    pub fn new(factory: AccountId, fees: Option<fees::Fees>) -> Self {
+        let fees = fees.unwrap_or_else(|| fees::Fees::none(factory.clone()));
+        fees.check();
+        Self { factory, fees }
+    }
+
+    /// The fee admin moves the fees, within the caps fixed at deployment.
+    pub fn set_fee(&mut self, bps: u16, per_signature: U128) {
+        require!(env::predecessor_account_id() == self.fees.admin, "fee admin only");
+        let mut f = self.fees.clone();
+        f.bps = bps;
+        f.per_signature = per_signature;
+        f.check();
+        self.fees = f;
+        env::log_str(&format!(r#"EVENT_JSON:{{"standard":"flows","version":"1.0.0","event":"fees_set","data":[{{"bps":{bps},"per_signature":"{}"}}]}}"#, per_signature.0));
+    }
+
+    pub fn get_fees(&self) -> near_sdk::serde_json::Value {
+        let f = &self.fees;
+        near_sdk::serde_json::json!({"treasury": f.treasury, "admin": f.admin, "bps": f.bps, "cap_bps": f.cap_bps,
+            "per_signature": f.per_signature, "per_signature_cap": f.per_signature_cap})
     }
 
     /// A request forwarded by a vault (relay `x`, a named door, or `new`).
@@ -420,7 +507,9 @@ impl Brain {
         require!(ctx.sender.is_none(), "callbacks come from the vault itself");
         let next = Next::try_from_slice(body).unwrap_or_else(|_| env::panic_str("bad callback"));
         let spent = match &next {
-            Next::Call { .. } => step::GAS_ON_CALL.as_tgas(),
+            Next::Call { tgas, .. } => *tgas,
+            Next::Read { views, gas, .. } => read_tgas(views.len(), *gas) + OWN_TGAS,
+            Next::FeeSettled { .. } => fees::GAS_SETTLED.as_tgas(),
             Next::IntentsSigned { .. } => intents::GAS_SIGNED.as_tgas(),
             Next::Exec { tgas, .. } => *tgas,
             Next::EvmSigned(_) | Next::RemoteEvmSigned { .. } => evm::GAS_SIGNED.as_tgas(),
@@ -428,7 +517,9 @@ impl Brain {
         };
         let mut t = Talk::open(env::predecessor_account_id(), ctx, spent);
         let r = match next {
-            Next::Call { id, i } => t.on_call(id, i),
+            Next::Call { id, i, .. } => t.on_call(id, i),
+            Next::Read { views, read, gas } => t.read_now(views, read, Gas::from_tgas(gas)),
+            Next::FeeSettled { token, amount } => t.on_fee_settled(token, amount),
             Next::IntentsSigned { message, nonce } => t.on_intents_signed(message, nonce),
             Next::Exec { method, args, .. } => t.run_command(method, args),
             Next::EvmSigned(tx) => t.on_evm_signed(tx),
@@ -443,7 +534,7 @@ impl Brain {
     #[private]
     pub fn on_read(&self, #[serializer(borsh)] a: ReadArgs) {
         let vs = load(&a.vault).unwrap_or_else(|| env::panic_str("not a vault"));
-        let mut t = Talk { vault: a.vault, ctx: a.ctx, vs };
+        let mut t = Talk { vault: a.vault, ctx: a.ctx, vs, need_after: 0 };
         let r = match a.read {
             Read::Measured { id, before } => t.on_measured(id, before),
             Read::Price { flow_id, node, by_owner, per, revealed } => t.on_price(flow_id, node, by_owner, per, revealed),
@@ -457,6 +548,8 @@ impl Brain {
             Read::SolAddress => t.on_sol_address(),
             Read::SolPrices(m) => t.on_sol_prices(m),
             Read::RemotePrices(b) => t.on_remote_prices(b),
+            Read::Close { to, tokens, intents } => t.on_close(to, tokens, intents, &self.factory),
+            Read::Settle { token } => t.on_settle(token),
         };
         t.finish(r);
     }
@@ -550,8 +643,12 @@ impl Brain {
             stealth: key.map(|key| stealth::Stealth { key, nonce: 0 }),
             paid: U128(0),
             next_step: 0,
+            auto_close: None,
+            crosschain: false,
+            keeper_fee: U128(0),
+            owed_fees: Vec::new(),
         };
-        Talk { vault, ctx, vs }.save(Answer::default()).send();
+        Talk { vault, ctx, vs, need_after: 0 }.save(Answer::default()).send();
     }
 }
 
@@ -561,7 +658,7 @@ impl Talk {
     fn open(vault: AccountId, mut ctx: Ctx, spent_tgas: u64) -> Self {
         let vs = load(&vault).unwrap_or_else(|| env::panic_str("not a vault"));
         ctx.gas_left = ctx.gas_left.saturating_sub(spent_tgas * 1_000_000_000_000);
-        Talk { vault, ctx, vs }
+        Talk { vault, ctx, vs, need_after: 0 }
     }
 
     pub(crate) fn finish(self, r: Reply) {
@@ -572,11 +669,29 @@ impl Talk {
                 store(&self.vault, &self.vs);
                 let _ = p.as_return();
             }
+            Reply::Final(a) => a.send(),
         }
     }
 
-    /// The brain reads `views` itself (in parallel), then `on_read` decides with `read`.
+    /// The brain reads `views` itself (in parallel), then `on_read` decides with `read`
+    /// (given `gas`). Right here if this receipt has the gas for it; otherwise the
+    /// answer asks the vault for one more round (`on_vault` Read) sized for exactly
+    /// this read, paid from what the vault's caller attached. That is what lets the
+    /// relay's first round stay small: only reads that fit it run in it.
     pub(crate) fn read(&self, views: Vec<(AccountId, String, String)>, read: Read, gas: Gas) -> Reply {
+        let need = read_tgas(views.len(), gas.as_tgas());
+        let here = (env::prepaid_gas().as_gas() - env::used_gas().as_gas()) / 1_000_000_000_000;
+        if here >= need + FINISH_TGAS {
+            return self.read_now(views, read, gas);
+        }
+        let round = need + OWN_TGAS;
+        let total = round + RELAY_TGAS + self.need_after;
+        require!(self.ctx.gas_left / 1_000_000_000_000 >= total, format!("attach at least {} Tgas", total + HANDLE_TGAS + X_TGAS));
+        let next = near_sdk::borsh::to_vec(&Next::Read { views, read, gas: gas.as_tgas() }).unwrap();
+        Reply::Answer(Answer::default().then("on_vault", next, Gas::from_tgas(round)))
+    }
+
+    pub(crate) fn read_now(&self, views: Vec<(AccountId, String, String)>, read: Read, gas: Gas) -> Reply {
         let mut joint: Option<Promise> = None;
         for (to, method, args) in views {
             let p = Promise::new(to).function_call(method, args.into_bytes(), NearToken::from_yoctonear(0), GAS_VIEW);
@@ -601,7 +716,18 @@ impl Talk {
         let keeper = Some(&sender) == self.vs.keeper.as_ref();
         let owner_only = || require!(owner, "owner only");
         let crew_only = || require!(owner || keeper, "owner or keeper only");
+        // Anything that touches another chain marks the vault for good (close.rs).
+        let remote_node = |n: &Node<Recipe>| n.action.remote.is_some() || remote::is_remote(&n.input);
+        if match &req {
+            Req::EvmSetup { .. } | Req::SolSetup { .. } | Req::IntentsSetup { .. } | Req::StepRemote { .. } => true,
+            Req::SaveFlow { nodes, .. } | Req::RevealFlow { nodes, .. } => nodes.iter().any(remote_node),
+            Req::SaveHiddenFlow { inputs, .. } => inputs.iter().any(|t| remote::is_remote(t)),
+            _ => false,
+        } {
+            self.vs.crosschain = true;
+        }
         match req {
+            Req::Close { confirm_remote, to } => return self.close(owner, confirm_remote, to),
             Req::Init { .. } | Req::InitStealth { .. } | Req::NftOnTransfer { .. } | Req::MtOnTransfer { .. } => env::panic_str("not here"),
             Req::Step { flow_id, node } => {
                 require!(!self.flow(flow_id).is_hidden(), "a hidden flow runs with step_hidden");
@@ -630,8 +756,9 @@ impl Talk {
                 return self.sol_sign_tx(message);
             }
             Req::StepRemote { flow_id, node, args, reveal, salt } => return self.step_remote(&sender, flow_id, node, args, reveal, salt),
-            Req::RemoteReport { flow_id, node, out } => self.remote_report(&sender, flow_id, node, out),
+            Req::RemoteReport { flow_id, node, out } => return self.remote_report(&sender, flow_id, node, out).into(),
             Req::ApplyLimit { token } => self.apply_limit(token),
+            Req::SettleFees { token } => return self.settle_fees(token),
             Req::Exec { method, args, nonce, expires_ns, tgas, signature } => return self.exec(method, args, nonce.0, expires_ns.0, tgas, signature).into(),
             other => {
                 owner_only();
@@ -644,7 +771,7 @@ impl Talk {
     /// Everything only the owner may ask.
     fn owner_request(&mut self, req: Req) -> Reply {
         match req {
-            Req::SetKeeper { keeper } => self.vs.keeper = keeper,
+            Req::SetKeeper { keeper, keeper_fee } => self.set_keeper(keeper, keeper_fee),
             Req::Trust { add, remove } => self.trust(add, remove),
             Req::SaveFlow { name, nodes } => {
                 let id = self.save_flow(name, nodes);
@@ -703,6 +830,7 @@ impl Talk {
             Req::HideFlow { flow_id, fingerprints } => self.hide_flow(flow_id, fingerprints),
             Req::RevealFlow { flow_id, nodes, salts } => self.reveal_flow(flow_id, nodes, salts),
             Req::SetOwnerKey { owner_key } => self.set_owner_key(owner_key),
+            Req::SetAutoClose { on, to } => self.set_auto_close(on, to),
             Req::IntentsSetup { verifier, signer } => return self.intents_setup(verifier, signer),
             Req::IntentsAllow { pair } => self.intents_allow(pair),
             Req::OracleSetup { config } => self.oracle_setup(config),
@@ -777,8 +905,9 @@ impl Talk {
         if let Err(e) = flow::validate(&nodes) {
             env::panic_str(&format!("bad flow: {e:?}"));
         }
-        for n in &nodes {
+        for (i, n) in nodes.iter().enumerate() {
             self.check_node(n);
+            self.check_gas(i, n);
         }
         self.add_flow(FlowRec { name, ledger: Ledger::new(nodes.len()), inputs: flow::inputs(&nodes), hidden: Vec::new(), nodes })
     }
@@ -899,7 +1028,7 @@ pub(crate) fn amount_result(i: u64) -> Option<u128> {
     result(i, 1024).and_then(|v| near_sdk::serde_json::from_slice::<U128>(&v).ok()).map(|a| a.0)
 }
 
-fn key(vault: &AccountId) -> Vec<u8> {
+pub(crate) fn key(vault: &AccountId) -> Vec<u8> {
     [b"v:".as_slice(), vault.as_bytes()].concat()
 }
 
@@ -920,8 +1049,10 @@ fn record_cost(vault: &AccountId, vs: &VaultState) -> u128 {
     bytes as u128 * env::storage_byte_cost().as_yoctonear()
 }
 
-fn allocated(vs: &VaultState, token: &str) -> u128 {
-    vs.flows.iter().flatten().map(|f| f.ledger.holdings_inputs(&f.inputs).get(token).copied().unwrap_or(0)).sum()
+/// What isn't free: what the flows hold, and protocol fees set aside (fees.rs).
+pub(crate) fn allocated(vs: &VaultState, token: &str) -> u128 {
+    let owed = vs.owed_fees.iter().find(|(t, _)| t == token).map_or(0, |(_, a)| a.0);
+    vs.flows.iter().flatten().map(|f| f.ledger.holdings_inputs(&f.inputs).get(token).copied().unwrap_or(0)).sum::<u128>() + owed
 }
 
 /// floor(a * b / d) in 256 bits; saturates.

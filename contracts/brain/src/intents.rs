@@ -17,7 +17,8 @@ use crate::{mul_div, result, Next, Read, Reply, Talk, GAS_READ};
 pub const INTENTS_PATH: &str = "intents-1";
 const EDDSA_DOMAIN: u32 = 1;
 const GAS_SIGN: Gas = Gas::from_tgas(50);
-pub(crate) const GAS_SIGNED: Gas = Gas::from_tgas(15);
+/// on_intents_signed: burns 2.8 Tgas; 8 is a ~3x margin.
+pub(crate) const GAS_SIGNED: Gas = Gas::from_tgas(8);
 const MAX_VALID_SECS: u64 = 3_600;
 
 #[near(serializers = [borsh, json])]
@@ -87,7 +88,8 @@ impl Talk {
             .unwrap_or_else(|| env::panic_str("refused: pair not allowed"));
         require!(amount_in > 0 && amount_in <= pair.max_in.0, "refused: amount over the pair's limit");
         require!((60..=MAX_VALID_SECS).contains(&valid_secs), "valid for 1 to 60 minutes");
-        let need = GAS_SIGN.as_tgas() + GAS_SIGNED.as_tgas() + 10;
+        let need = GAS_SIGN.as_tgas() + GAS_SIGNED.as_tgas() + crate::RELAY_TGAS;
+        self.need_after = need;
         require!(self.ctx.gas_left >= Gas::from_tgas(need).as_gas(), "attach more gas to sign an intent");
         let floor = mul_div(amount_in, pair.floor_out.0, pair.floor_per_in.0);
         let out_min = min_out.max(floor).max(1);
@@ -120,7 +122,7 @@ impl Talk {
         self.emit("intents_sign_requested", &format!(r#""token_in":"{}","amount_in":"{}","token_out":"{}","min_out":"{}""#, p.token_in, p.amount_in, p.token_out, p.min_out));
         let args = near_sdk::serde_json::json!({"request": {"path": INTENTS_PATH, "payload_v2": {"Eddsa": hex::encode(hash)}, "domain_id": EDDSA_DOMAIN}}).to_string();
         let next = near_sdk::borsh::to_vec(&Next::IntentsSigned { message, nonce }).unwrap();
-        Answer::default().call(&cfg.signer, "sign", args.as_bytes(), 1, GAS_SIGN).then("on_vault", next, GAS_SIGNED).into()
+        self.charge_signature(Answer::default().call(&cfg.signer, "sign", args.as_bytes(), 1, GAS_SIGN)).then("on_vault", next, GAS_SIGNED).into()
     }
 
     /// The vault's `sign` came back: the signed intent goes out as an event and
