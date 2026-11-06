@@ -139,7 +139,7 @@ impl Board {
 
     /// The exact bytes an attester signs (hex), for signers to check themselves against.
     pub fn attestation(&self, feed: String, price: I64, expo: i32, publish_time: i64) -> String {
-        hex::encode(attestation(&feed_id(&feed), price.0, expo, publish_time))
+        hex::encode(attestation_bytes(&feed_id(&feed), price.0, expo, publish_time))
     }
 
     // ---------- Attested ----------
@@ -157,7 +157,7 @@ impl Board {
             seen.push(&r.attester);
             let sig: [u8; 64] = hex::decode(&r.signature).ok().and_then(|s| s.try_into().ok()).unwrap_or_else(|| env::panic_str("signature: 64 bytes, hex"));
             let pk: &[u8; 32] = r.attester.as_bytes()[1..].try_into().unwrap();
-            require!(env::ed25519_verify(&sig, attestation(&id, r.price.0, r.expo, r.publish_time), pk), "refused: bad attester signature");
+            require!(env::ed25519_verify(&sig, attestation_bytes(&id, r.price.0, r.expo, r.publish_time), pk), "refused: bad attester signature");
         }
         require!(reports.len() >= *k as usize, format!("refused: {} of {} attesters signed, {} needed", reports.len(), attesters.len(), k));
         let expo = reports[0].expo;
@@ -312,7 +312,7 @@ impl Board {
     }
 }
 
-pub fn attestation(feed: &[u8; 32], price: i64, expo: i32, publish_time: i64) -> Vec<u8> {
+pub fn attestation_bytes(feed: &[u8; 32], price: i64, expo: i32, publish_time: i64) -> Vec<u8> {
     let mut m = DOMAIN.to_vec();
     m.extend_from_slice(feed);
     m.extend_from_slice(&price.to_be_bytes());
