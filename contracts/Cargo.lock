@@ -228,12 +228,14 @@ dependencies = [
 name = "brain"
 version = "0.1.0"
 dependencies = [
+ "evmtx",
  "flow",
  "hex",
  "intentsig",
  "math",
  "near-sdk",
  "relay",
+ "solguard",
 ]
 
 [[package]]

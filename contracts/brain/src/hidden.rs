@@ -29,7 +29,7 @@ impl Talk {
         require!(inputs.len() == fingerprints.len(), "one fingerprint per node");
         check_fingerprints(&fingerprints);
         for t in &inputs {
-            let ok = t == NEAR || t == flow::NO_INPUT || t.parse::<AccountId>().ok().is_some_and(|a| self.trusted(&a).is_some());
+            let ok = t == NEAR || t == flow::NO_INPUT || crate::remote::is_remote(t) || t.parse::<AccountId>().ok().is_some_and(|a| self.trusted(&a).is_some());
             require!(ok, format!("untrusted: contract {t}"));
         }
         self.add_flow(FlowRec { name, ledger: Ledger::new(inputs.len()), nodes: Vec::new(), inputs, hidden: fingerprints })
@@ -89,6 +89,9 @@ mod tests {
     fn the_fingerprint_matches_the_vaults_pinned_vector() {
         let node: Node<Recipe> = near_sdk::serde_json::from_str(include_str!("../../vault/tests-data/fingerprint-node.json")).unwrap();
         let p = fingerprint(&node, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
-        assert_eq!(p, "996e6f838080503aa9b3851e34d65d50c9aea0a4f0d21f941e68f9fc9f6008f2");
+        assert_eq!(p, "ad13adedfaed79107498ceb3bb79901e8dff115529609033291981e71bd0d36b");
+        let remote: Node<Recipe> = near_sdk::serde_json::from_str(include_str!("../../vault/tests-data/fingerprint-remote-node.json")).unwrap();
+        let p = fingerprint(&remote, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+        assert_eq!(p, "cfb851d722d274c36161359966c9a849ee9b7a5a947156f6acd0f7aa2acfe35c");
     }
 }

@@ -12,6 +12,8 @@ near-sdk = "5.30.0"
 flow = { path = "../flow", features = ["borsh", "serde"] }
 math = { path = "../math" }
 intentsig = { path = "../intentsig" }
+evmtx = { path = "../evmtx" }
+solguard = { path = "../solguard" }
 hex = "0.4"
 
 [dev-dependencies]

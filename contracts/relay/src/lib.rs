@@ -131,7 +131,7 @@ pub const TGAS: u64 = 1_000_000_000_000;
 /// What `brain.handle` gets for deciding a request. Unused gas is refunded.
 /// Enough for the brain to also issue its own reads (balances, prices, keys)
 /// and decide in its private callback, whose answer then reaches `cb`.
-pub const GAS_HANDLE: u64 = 60 * TGAS;
+pub const GAS_HANDLE: u64 = 100 * TGAS;
 /// Receiver hooks run on the gas their caller left them: the brain only answers a value.
 pub const GAS_HOOK: u64 = 8 * TGAS;
 /// The least `cb` gets; it also gets ALL the unused gas (weight 1), because it

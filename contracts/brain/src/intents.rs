@@ -28,7 +28,7 @@ pub struct IntentsPair {
     pub max_in: U128,
     pub floor_out: U128,
     pub floor_per_in: U128,
-    /// A market floor (oracle.rs): not ported yet, so refused rather than ignored.
+    /// A floor that follows the market, on top of the hard floor (oracle.rs).
     #[serde(default)]
     pub market: Option<crate::Market>,
 }
@@ -72,7 +72,6 @@ impl Talk {
 
     pub(crate) fn intents_allow(&mut self, pair: IntentsPair) {
         require!(pair.floor_per_in.0 > 0 && pair.floor_out.0 > 0, "set a floor");
-        require!(pair.market.is_none(), "market floors aren't ported to the brain yet");
         let cfg = self.vs.intents.as_mut().unwrap_or_else(|| env::panic_str("run intents_setup first"));
         cfg.pairs.retain(|p| !(p.token_in == pair.token_in && p.token_out == pair.token_out));
         if pair.max_in.0 > 0 {
@@ -94,15 +93,25 @@ impl Talk {
         let out_min = min_out.max(floor).max(1);
         self.charge(&format!("intents:{token_in}"), amount_in);
         let pending = Pending { token_in, amount_in, token_out, min_out: out_min, deadline_ns: env::block_timestamp() + valid_secs * 1_000_000_000 };
-        // The salt comes from the verifier itself, read by the brain.
-        self.read(vec![(cfg.verifier, "current_salt".into(), "{}".into())], Read::IntentsSalt(pending), GAS_READ)
+        // The salt comes from the verifier itself, and a market floor's prices from
+        // the oracle: all read by the brain, in one round.
+        let mut views = vec![(cfg.verifier, "current_salt".into(), "{}".into())];
+        if let Some(m) = &pair.market {
+            views.extend(self.feed_views(&[m.sell.clone(), m.buy.clone()]));
+        }
+        self.read(views, Read::IntentsSalt(pending), GAS_READ)
     }
 
-    pub(crate) fn on_intents_salt(&mut self, p: Pending) -> Reply {
+    pub(crate) fn on_intents_salt(&mut self, mut p: Pending) -> Reply {
         let raw = result(0, 256).unwrap_or_else(|| env::panic_str("the verifier didn't answer"));
         let salt: String = near_sdk::serde_json::from_slice(&raw).unwrap_or_else(|_| env::panic_str("bad salt"));
         let salt: [u8; 4] = hex::decode(&salt).ok().and_then(|v| v.try_into().ok()).unwrap_or_else(|| env::panic_str("bad salt"));
         let cfg = self.vs.intents.clone().unwrap();
+        let market = cfg.pairs.iter().find(|x| x.token_in == p.token_in && x.token_out == p.token_out).and_then(|x| x.market.clone());
+        if let Some(m) = market {
+            let pr = self.prices(&[m.sell.clone(), m.buy.clone()], 1);
+            p.min_out = p.min_out.max(crate::oracle::market_min(&m, p.amount_in, pr[0], pr[1]));
+        }
         let random: [u8; 15] = env::random_seed_array()[..15].try_into().unwrap();
         let nonce = intentsig::versioned_nonce(salt, p.deadline_ns as i64, random);
         // The signer of the intent is the VAULT: its own Intents account, its own key.
@@ -136,7 +145,7 @@ impl Talk {
 }
 
 /// The 64-byte Ed25519 signature inside the signer's answer, whichever JSON shape it uses.
-fn signature_from(raw: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn signature_from(raw: &[u8]) -> Option<Vec<u8>> {
     use near_sdk::serde_json::Value;
     fn find(v: &Value) -> Option<Vec<u8>> {
         match v {
