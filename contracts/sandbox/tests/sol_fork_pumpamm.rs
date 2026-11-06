@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::{sol_template, wasm, SolFork};
+use common::{sol_sig, sol_template, wasm, SolFork};
 use serde_json::{json, Value};
 
 fn units(v: &Value, k: &str) -> u128 {
@@ -54,18 +54,15 @@ async fn the_vault_trades_a_graduated_coin_on_the_pump_amm_on_a_solana_fork() ->
         let (k, v) = (keeper.clone(), vault.id().clone());
         async move { k.call(&v, "sol_sign_tx").args_json(json!({"message": msg})).max_gas().transact().await }
     };
-    let sig_of = |r: &near_workspaces::result::ExecutionFinalResult| -> Option<String> {
-        r.logs().iter().find(|l| l.contains("sol_signed")).map(|l| l.split(r#""signature":""#).nth(1).unwrap().split('"').next().unwrap().to_string())
-    };
     let refused = |r: &near_workspaces::result::ExecutionFinalResult, why: &str| {
-        assert!(sig_of(r).is_none(), "signed, expected a refusal ({why})");
+        assert!(sol_sig(r).is_none(), "signed, expected a refusal ({why})");
         assert!(format!("{:?}", r.failures()).contains(why), "expected '{why}': {:?}", r.failures());
     };
 
     // 1. Buy with 0.05 SOL: wrap into the vault's wSOL account, swap, unwrap what's left.
     let b = fork.helper(&["amm-buy", &me, &mint, "50000000", "5"]);
     let r = sign(b["message"].as_str().unwrap().to_string()).await?;
-    let sig = sig_of(&r).unwrap_or_else(|| panic!("buy not signed: {:?} {:?}", r.logs(), r.failures()));
+    let sig = sol_sig(&r).unwrap_or_else(|| panic!("buy not signed: {:?} {:?}", r.logs(), r.failures()));
     let sent = fork.helper(&["send", b["message"].as_str().unwrap(), &sig]);
     assert!(sent["signature"].is_string() && sent["err"].is_null(), "buy not executed: {sent}");
     let held = fork.helper(&["balance", &me, &mint]);
@@ -81,7 +78,7 @@ async fn the_vault_trades_a_graduated_coin_on_the_pump_amm_on_a_solana_fork() ->
     let cheap = fork.helper(&["amm-buy", &me, &mint, "30000000", "150"]);
     refused(&sign(cheap["message"].as_str().unwrap().to_string()).await?, "under the floor");
     let other = fork.helper(&["amm-buy", "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", &mint, "10000000", "5"]);
-    assert!(sig_of(&sign(other["message"].as_str().unwrap().to_string()).await?).is_none(), "another wallet's buy was signed");
+    assert!(sol_sig(&sign(other["message"].as_str().unwrap().to_string()).await?).is_none(), "another wallet's buy was signed");
     let more = fork.helper(&["amm-buy", &me, &mint, "90000000", "5"]);
     refused(&sign(more["message"].as_str().unwrap().to_string()).await?, "spending limit");
 
@@ -95,7 +92,7 @@ async fn the_vault_trades_a_graduated_coin_on_the_pump_amm_on_a_solana_fork() ->
     refused(&sign(dump["message"].as_str().unwrap().to_string()).await?, "under the floor");
     let s = fork.helper(&["amm-sell", &me, &mint, &all, "5"]);
     let r = sign(s["message"].as_str().unwrap().to_string()).await?;
-    let sig = sig_of(&r).unwrap_or_else(|| panic!("sell not signed: {:?} {:?}", r.logs(), r.failures()));
+    let sig = sol_sig(&r).unwrap_or_else(|| panic!("sell not signed: {:?} {:?}", r.logs(), r.failures()));
     let sent = fork.helper(&["send", s["message"].as_str().unwrap(), &sig]);
     assert!(sent["signature"].is_string() && sent["err"].is_null(), "sell not executed: {sent}");
     let after = fork.helper(&["balance", &me, &mint]);

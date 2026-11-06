@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{sol_template, wasm, SolFork};
+use common::{sol_sig, sol_template, wasm, SolFork};
 use serde_json::{json, Value};
 
 const POOL: &str = "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6";
@@ -54,11 +54,8 @@ async fn the_vault_runs_a_meteora_position_on_a_solana_fork() -> anyhow::Result<
         let (k, v) = (keeper.clone(), vault.id().clone());
         async move { k.call(&v, "sol_sign_tx").args_json(json!({"message": msg})).max_gas().transact().await }
     };
-    let sig_of = |r: &near_workspaces::result::ExecutionFinalResult| -> Option<String> {
-        r.logs().iter().find(|l| l.contains("sol_signed")).map(|l| l.split(r#""signature":""#).nth(1).unwrap().split('"').next().unwrap().to_string())
-    };
     let refused = |r: &near_workspaces::result::ExecutionFinalResult, why: &str| {
-        assert!(sig_of(r).is_none(), "signed, expected a refusal ({why})");
+        assert!(sol_sig(r).is_none(), "signed, expected a refusal ({why})");
         assert!(format!("{:?}", r.failures()).contains(why), "expected '{why}': {:?}", r.failures());
     };
     let usdc = |who: &str| units(&fork.helper(&["balance", who, USDC]), "amount");
@@ -80,7 +77,7 @@ async fn the_vault_runs_a_meteora_position_on_a_solana_fork() -> anyhow::Result<
     refused(&sign(fake["message"].as_str().unwrap().to_string()).await?, "Signers");
 
     let r = sign(msg.to_string()).await?;
-    let sig = sig_of(&r).unwrap_or_else(|| panic!("open not signed: {:?} {:?}", r.logs(), r.failures()));
+    let sig = sol_sig(&r).unwrap_or_else(|| panic!("open not signed: {:?} {:?}", r.logs(), r.failures()));
     // The vault's signature alone doesn't land it: the chain wants the owner's too.
     let half = fork.helper(&["send", msg, &sig, pos_secret]);
     assert!(half["signature"].is_null(), "landed without the owner's signature: {half}");
@@ -113,7 +110,7 @@ async fn the_vault_runs_a_meteora_position_on_a_solana_fork() -> anyhow::Result<
     let stolen = fork.helper(&["swap-key", claim["message"].as_str().unwrap(), mine_ata["ata"].as_str().unwrap(), thief_ata["ata"].as_str().unwrap()]);
     refused(&sign(stolen["message"].as_str().unwrap().to_string()).await?, "dlmm_claim: account 5");
     let r = sign(claim["message"].as_str().unwrap().to_string()).await?;
-    let sig = sig_of(&r).unwrap_or_else(|| panic!("claim not signed: {:?} {:?}", r.logs(), r.failures()));
+    let sig = sol_sig(&r).unwrap_or_else(|| panic!("claim not signed: {:?} {:?}", r.logs(), r.failures()));
     let sent = fork.helper(&["send", claim["message"].as_str().unwrap(), &sig]);
     assert!(sent["err"].is_null() && sent["signature"].is_string(), "claim not executed: {sent}");
     let fees = units(&fork.helper(&["balance", &me, WSOL]), "amount");
@@ -127,7 +124,7 @@ async fn the_vault_runs_a_meteora_position_on_a_solana_fork() -> anyhow::Result<
     let stolen = fork.helper(&["swap-key", close["message"].as_str().unwrap(), mine_usdc["ata"].as_str().unwrap(), thief_ata["ata"].as_str().unwrap()]);
     refused(&sign(stolen["message"].as_str().unwrap().to_string()).await?, "dlmm_remove: account 4");
     let r = sign(close["message"].as_str().unwrap().to_string()).await?;
-    let sig = sig_of(&r).unwrap_or_else(|| panic!("close not signed: {:?} {:?}", r.logs(), r.failures()));
+    let sig = sol_sig(&r).unwrap_or_else(|| panic!("close not signed: {:?} {:?}", r.logs(), r.failures()));
     let sent = fork.helper(&["send", close["message"].as_str().unwrap(), &sig]);
     assert!(sent["err"].is_null() && sent["signature"].is_string(), "close not executed: {sent}");
     let after = fork.helper(&["balance", &me, USDC]);

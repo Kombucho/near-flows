@@ -7,7 +7,7 @@
 mod common;
 mod relayw;
 
-use common::{num, sol_template, signed, Fork, SolFork, ANVIL_KEY};
+use common::{num, sol_sig, sol_template, signed, Fork, SolFork, ANVIL_KEY};
 use relayw::*;
 use serde_json::{json, Value};
 
@@ -97,14 +97,11 @@ async fn a_relay_vault_buys_a_pump_fun_coin_on_a_solana_fork() -> anyhow::Result
     x(&w.alice, &w.vault, "sol_template", json!({"template": buy})).await?.into_result()?;
     x(&w.alice, &w.vault, "set_limit", json!({"token": "sol:SOL", "max": "150000000", "window_ns": 86_400_000_000_000u64})).await?.into_result()?;
     fork.rpc_call("surfnet_setAccount", json!([me, {"lamports": 1_000_000_000u64}]));
-    let sig_of = |r: &near_workspaces::result::ExecutionFinalResult| -> Option<String> {
-        r.logs().iter().find(|l| l.contains("sol_signed")).map(|l| l.split(r#""signature":""#).nth(1).unwrap().split('"').next().unwrap().to_string())
-    };
 
     let b = fork.helper(&["pump-buy", &me, &mint, "50000000", "5"]);
     let r = x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": b["message"]})).await?;
     println!("GAS relay sol_sign_tx: {:.1} Tgas", tgas(&r));
-    let sig = sig_of(&r).unwrap_or_else(|| panic!("not signed: {:?} {:?}", r.logs(), r.failures()));
+    let sig = sol_sig(&r).unwrap_or_else(|| panic!("not signed: {:?} {:?}", r.logs(), r.failures()));
     let sent = fork.helper(&["send", b["message"].as_str().unwrap(), &sig]);
     assert!(sent["signature"].is_string() && sent["err"].is_null(), "not executed: {sent}");
     let held = fork.helper(&["balance", &me, &mint]);
@@ -113,9 +110,9 @@ async fn a_relay_vault_buys_a_pump_fun_coin_on_a_solana_fork() -> anyhow::Result
     // Refused, nothing signed: over the 0.1 SOL cap; someone else's wallet; past the spending limit.
     let big = fork.helper(&["pump-buy", &me, &mint, "120000000", "5"]);
     let r = x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": big["message"]})).await?;
-    assert!(sig_of(&r).is_none() && fails_with(&r, "over the cap"), "{:?}", r.failures());
+    assert!(sol_sig(&r).is_none() && fails_with(&r, "over the cap"), "{:?}", r.failures());
     let other = fork.helper(&["pump-buy", "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", &mint, "10000000", "5"]);
-    assert!(sig_of(&x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": other["message"]})).await?).is_none());
+    assert!(sol_sig(&x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": other["message"]})).await?).is_none());
     let more = fork.helper(&["pump-buy", &me, &mint, "95000000", "5"]);
     assert!(fails_with(&x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": more["message"]})).await?, "spending limit"));
 
@@ -129,6 +126,6 @@ async fn a_relay_vault_buys_a_pump_fun_coin_on_a_solana_fork() -> anyhow::Result
     let fb = fork.helper(&["pump-buy", &fme, &mint, "50000000", "5"]);
     let r = w.keeper.call(full.id(), "sol_sign_tx").args_json(json!({"message": fb["message"]})).max_gas().transact().await?;
     println!("GAS full vault sol_sign_tx: {:.1} Tgas", tgas(&r));
-    assert!(sig_of(&r).is_some(), "{:?}", r.failures());
+    assert!(sol_sig(&r).is_some(), "{:?}", r.failures());
     Ok(())
 }

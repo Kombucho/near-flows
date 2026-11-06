@@ -2,7 +2,7 @@
 //! Robinhood Chain fork run (ladder_fork_robinhood.rs): one vault, one flow definition.
 #![allow(dead_code)]
 
-use crate::common::wasm;
+use crate::common::{num, wasm, Fork};
 use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::{Account, Contract, Worker};
@@ -15,6 +15,8 @@ pub const NVDA: &str = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec";
 pub const ETHNVDA: &str = "0x0d142f0a847838f933114869f6f63bd618bedca8";
 /// Pyth's 24/7 NVDA/USD feed.
 pub const NVDA_FEED: &str = "a470c4ac46f44b547b2cba52338f311fb642b79375ce5f0cfd5cb5b99227b852";
+pub const V4_QUOTER: &str = "0x8dc178efb8111bb0973dd9d722ebeff267c98f94";
+pub const ETH: &str = "0x0000000000000000000000000000000000000000";
 
 pub struct World {
     pub worker: Worker<Sandbox>,
@@ -113,3 +115,17 @@ pub fn event(r: &ExecutionFinalResult, ev: &str) -> Value {
     serde_json::from_str::<Value>(log.trim_start_matches("EVENT_JSON:")).unwrap()["data"][0].clone()
 }
 
+
+/// Broadcast on a fork; returns (status, gas paid in wei).
+pub fn send(fork: &Fork, raw: &str) -> (u64, u128) {
+    let hash: String = serde_json::from_str(&fork.cast(&["rpc", "eth_sendRawTransaction", raw])).unwrap();
+    let r: Value = serde_json::from_str(&fork.cast(&["receipt", &hash, "--json"])).unwrap();
+    let hex = |k: &str| u128::from_str_radix(r[k].as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
+    (hex("status") as u64, hex("gasUsed") * hex("effectiveGasPrice"))
+}
+
+/// What the ETH/NVDA Uniswap v4 pool on the fork pays for `amount` (ETH in if `zero_for_one`).
+pub fn v4_quote(fork: &Fork, zero_for_one: bool, amount: u128) -> u128 {
+    num(&fork.cast(&["call", V4_QUOTER, "quoteExactInputSingle(((address,address,uint24,int24,address),bool,uint128,bytes))(uint256,uint256)",
+        &format!("(({ETH},{NVDA},10000,200,{ETH}),{zero_for_one},{amount},0x)")]))
+}
