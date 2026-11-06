@@ -109,7 +109,10 @@ if (cmd === "pump-info") {
   const mintInfo = await conn.getTokenSupply(coin);
   const sol = getSellSolAmountFromTokenAmount({ global, feeConfig, mintSupply: new BN(mintInfo.value.amount), bondingCurve: state.bondingCurve, amount: new BN(amount) } as any);
   const ixs = await PUMP_SDK.sellInstructions({ global, bondingCurveAccountInfo: state.bondingCurveAccountInfo, bondingCurve: state.bondingCurve,
-    mint: coin, user, amount: new BN(amount), solAmount: sol, slippage: Number(slippage), tokenProgram });
+    mint: coin, user, amount: new BN(amount), solAmount: sol, slippage: Number(slippage), tokenProgram,
+    // The SDK's buy reads this from the curve, its sell defaults to false: a "mayhem mode" coin's
+    // fees go to other recipients, and the program refuses the wrong one (NotAuthorized).
+    mayhemMode: state.bondingCurve.isMayhemMode });
   out({ message: await message(user, ixs), lamports: sol.toString(), tokenProgram: tokenProgram.toBase58(), ixs: describe(ixs) });
 } else if (cmd === "dlmm-info") {
   const res = [];

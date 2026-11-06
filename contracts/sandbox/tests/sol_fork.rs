@@ -10,30 +10,10 @@
 
 mod common;
 
-use common::{wasm, SolFork};
+use common::{sol_template, wasm, SolFork};
 use serde_json::{json, Value};
 
-const PUMP: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-
-/// pump.fun `buy` (classic): tokens out >= max_sol_cost x floor, max_sol_cost <= cap; the coin
-/// lands in the vault's own token account; trailing accounts from the 2026-09 upgrade allowed.
-fn pump_buy(mint: &str, max_lamports: u64, floor_per_lamport: u64) -> Value {
-    let mut accounts = vec![json!({"acc": "any"}); 16];
-    accounts[2] = json!({"acc": "fixed", "key": mint});
-    accounts[5] = json!({"acc": "vault_ata", "mint_at": 2, "program_at": 8});
-    accounts[6] = json!({"acc": "vault"});
-    accounts[7] = json!({"acc": "fixed", "key": "11111111111111111111111111111111"});
-    accounts[11] = json!({"acc": "fixed", "key": PUMP});
-    json!({"name": "pump_buy", "program": PUMP, "prefix": "66063d1201daebea",
-        "fields": [
-            {"ty": "u64", "rule": "at_least", "of": 1, "num": floor_per_lamport.to_string(), "den": "1"},
-            {"ty": "u64", "rule": "at_most", "max": max_lamports.to_string()},
-            {"ty": "bool", "rule": "any"},
-            {"ty": "bool", "rule": "fixed", "hex": "00"}],
-        "accounts": accounts, "extra_accounts": 2, "needs_owner": false,
-        "spends": [{"field": 1, "key": "sol:SOL"}]})
-}
 
 #[tokio::test]
 async fn the_vault_buys_a_pump_fun_coin_on_a_solana_fork() -> anyhow::Result<()> {
@@ -54,7 +34,9 @@ async fn the_vault_buys_a_pump_fun_coin_on_a_solana_fork() -> anyhow::Result<()>
     let probe = fork.helper(&["pump-buy", &me, &mint, "50000000", "5"]);
     let per_lamport = probe["tokens"].as_str().unwrap().parse::<u64>()? / 52_500_000;
     println!("today: {per_lamport} coin units per lamport; the owner's floor: {}", per_lamport / 2);
-    alice.call(vault.id(), "sol_template").args_json(json!({"template": pump_buy(&mint, 100_000_000, per_lamport / 2)})).transact().await?.into_result()?;
+    // The node library's pump.fun buy (nodes/sol-templates.json), with this coin and the owner's numbers.
+    let buy = sol_template("pump_buy", &[("mint", &mint), ("max_lamports", "100000000"), ("floor_per_lamport", &(per_lamport / 2).to_string())]);
+    alice.call(vault.id(), "sol_template").args_json(json!({"template": buy})).transact().await?.into_result()?;
     alice.call(vault.id(), "set_limit").args_json(json!({"token": "sol:SOL", "max": "150000000", "window_ns": 86_400_000_000_000u64})).transact().await?.into_result()?;
 
     // 1 SOL for the vault on the fork.
@@ -91,5 +73,34 @@ async fn the_vault_buys_a_pump_fun_coin_on_a_solana_fork() -> anyhow::Result<()>
     let more = fork.helper(&["pump-buy", &me, &mint, "95000000", "5"]);
     let r = sign(more["message"].as_str().unwrap().to_string()).await?;
     assert!(format!("{:?}", r.failures()).contains("spending limit"), "{:?}", r.failures());
+
+    // 4. Sell it all back. The owner's floor: half the SOL per coin unit the curve pays now.
+    let units = held["amount"].as_str().unwrap().to_string();
+    let probe = fork.helper(&["pump-sell", &me, &mint, &units, "5"]);
+    let quote = probe["lamports"].as_str().unwrap().parse::<u128>()?;
+    println!("today: {units} coin units -> {quote} lamports; the owner's floor: half of that");
+    let sell = sol_template("pump_sell", &[("mint", &mint), ("max_units", &units), ("floor_num", &(quote / 2).to_string()), ("floor_den", &units)]);
+    alice.call(vault.id(), "sol_template").args_json(json!({"template": sell})).transact().await?.into_result()?;
+    let failures = |r: &near_workspaces::result::ExecutionFinalResult| format!("{:?}", r.failures());
+    // Refused: a minimum out under the owner's floor (60% slippage); more coin than the cap.
+    let cheap = fork.helper(&["pump-sell", &me, &mint, &units, "60"]);
+    let r = sign(cheap["message"].as_str().unwrap().to_string()).await?;
+    assert!(sig_of(&r).is_none() && failures(&r).contains("under the floor"), "{}", failures(&r));
+    let more = (units.parse::<u128>()? + 1).to_string();
+    let over = fork.helper(&["pump-sell", &me, &mint, &more, "5"]);
+    let r = sign(over["message"].as_str().unwrap().to_string()).await?;
+    assert!(sig_of(&r).is_none() && failures(&r).contains("over the cap"), "{}", failures(&r));
+
+    let s = fork.helper(&["pump-sell", &me, &mint, &units, "5"]);
+    let r = sign(s["message"].as_str().unwrap().to_string()).await?;
+    let sig = sig_of(&r).unwrap_or_else(|| panic!("sell not signed: {:?} {:?}", r.logs(), r.failures()));
+    let sent = fork.helper(&["send", s["message"].as_str().unwrap(), &sig]);
+    assert!(sent["signature"].is_string() && sent["err"].is_null(), "sell not executed: {sent}");
+    let after = fork.helper(&["balance", &me, &mint]);
+    let got = after["lamports"].as_u64().unwrap() as i128 - held["lamports"].as_u64().unwrap() as i128;
+    println!("sold on the fork: {units} coin units -> the vault holds {} coin units and {} lamports (+{got} after fees; quote {quote}) (tx {})",
+        after["amount"], after["lamports"], sent["signature"]);
+    assert_eq!(after["amount"], "0");
+    assert!(got > 0 && got as u128 >= quote * 90 / 100, "the SOL came back to the vault itself");
     Ok(())
 }
