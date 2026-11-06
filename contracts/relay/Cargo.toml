@@ -1,0 +1,10 @@
+[package]
+name = "relay"
+version = "0.1.0"
+edition = "2021"
+description = "NEAR contract: a user's vault BODY. Holds the money, executes only what the shared brain answers. No near-sdk, a few KB."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
