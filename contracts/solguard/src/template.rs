@@ -22,7 +22,8 @@
 //! A transaction passes (`check_tx`) when the vault is the only fee payer,
 //! every other signer is the owner's wallet or a fresh key a template asks
 //! for, and every instruction is Compute Budget (capped), the creation of one
-//! of the vault's own token accounts, or matches an allowed template.
+//! of the vault's own token accounts that a template here uses (a few at
+//! most), or matches an allowed template.
 
 use crate::message::{Instruction, Message};
 use crate::{pda, pubkey, Pubkey, Refusal, ATA_PROGRAM, COMPUTE_BUDGET};
@@ -223,6 +224,16 @@ impl Template {
         Ok(values)
     }
 
+    /// The vault's token accounts this template names in `ix` (checked by `check`).
+    fn vault_atas(&self, m: &Message, ix: &Instruction) -> Vec<Pubkey> {
+        self.accounts
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| matches!(a, Acc::VaultAta { .. } | Acc::VaultAtaOf { .. }))
+            .filter_map(|(i, _)| ix.accounts.get(i).and_then(|&k| m.key(k)).copied())
+            .collect()
+    }
+
     /// The keys this template needs as co-signers in `ix` (owner, new signers).
     fn cosigners(&self, m: &Message, ix: &Instruction) -> Vec<Pubkey> {
         self.accounts
@@ -233,6 +244,9 @@ impl Template {
             .collect()
     }
 }
+
+/// Most token-account creations one template transaction may carry.
+const MAX_ATA_CREATES: usize = 4;
 
 /// Check a whole transaction message against the allowed templates.
 pub fn check_tx(message_bytes: &[u8], templates: &[Template], p: &TxPolicy) -> Result<Vec<Matched>, Refusal> {
@@ -249,13 +263,14 @@ pub fn check_tx(message_bytes: &[u8], templates: &[Template], p: &TxPolicy) -> R
     let (cu_price, cu_limit) = crate::compute_budget(&m)?;
     let mut matched = Vec::new();
     let mut wanted: Vec<Pubkey> = vec![p.authority];
+    let (mut created, mut used): (Vec<Pubkey>, Vec<Pubkey>) = (vec![], vec![]);
     for ix in &m.instructions {
         let prog = *m.key(ix.program_index).ok_or(Refusal::Program("bad index".into()))?;
         if prog == cb {
             continue;
         }
         if prog == ata_prog {
-            crate::check_ata_create_for(&m, ix, &p.authority)?;
+            created.push(crate::check_ata_create_for(&m, ix, &p.authority)?);
             continue;
         }
         let mut why = format!("no template for program {}", bs58::encode(prog).into_string());
@@ -279,10 +294,18 @@ pub fn check_tx(message_bytes: &[u8], templates: &[Template], p: &TxPolicy) -> R
             wanted.extend(p.owner);
         }
         wanted.extend(t.cosigners(&m, ix));
+        used.extend(t.vault_atas(&m, ix));
         matched.push(Matched { template: t.name.clone(), values });
     }
     if matched.is_empty() {
         return Err(Refusal::NoSwap);
+    }
+    // Each create locks ~0.002 SOL of the vault's in rent: only accounts the templates use, a few per transaction.
+    if created.len() > MAX_ATA_CREATES {
+        return Err(Refusal::AtaCreate(format!("at most {MAX_ATA_CREATES} token accounts per transaction")));
+    }
+    if created.iter().any(|a| !used.contains(a)) {
+        return Err(Refusal::AtaCreate("a token account no instruction here uses".into()));
     }
     // Every signer must be one the templates asked for: the vault, the owner, fresh position keys.
     if signers.iter().any(|s| !wanted.contains(s)) {

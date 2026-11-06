@@ -190,9 +190,10 @@ fn check_ata_create(m: &Message, ix: &Instruction, p: &SwapPolicy) -> Result<(),
     Ok(())
 }
 
-/// Creating one of the vault's own token accounts (any mint), paid by the vault:
-/// templates may need one for a coin the vault never held (e.g. a fresh memecoin).
-pub(crate) fn check_ata_create_for(m: &Message, ix: &Instruction, authority: &Pubkey) -> Result<(), Refusal> {
+/// Creating one of the vault's own token accounts, paid by the vault: templates may need one for
+/// a coin the vault never held (e.g. a fresh memecoin). The account created, which `check_tx`
+/// then requires to be one a template in the same transaction uses.
+pub(crate) fn check_ata_create_for(m: &Message, ix: &Instruction, authority: &Pubkey) -> Result<Pubkey, Refusal> {
     if !(ix.data.is_empty() || ix.data == [0] || ix.data == [1]) {
         return Err(Refusal::AtaCreate("only create".into()));
     }
@@ -201,7 +202,7 @@ pub(crate) fn check_ata_create_for(m: &Message, ix: &Instruction, authority: &Pu
     if payer != *authority || owner != *authority || !owns_ata(authority, &token_prog, &mint, &account) {
         return Err(Refusal::AtaCreate("only the vault's own token account, paid by the vault".into()));
     }
-    Ok(())
+    Ok(account)
 }
 
 fn check_jupiter(m: &Message, ix: &Instruction, p: &SwapPolicy) -> Result<Verdict, Refusal> {

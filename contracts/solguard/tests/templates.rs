@@ -210,6 +210,32 @@ fn without_a_unit_limit_each_instruction_counts_200k_units() {
 }
 
 #[test]
+fn only_token_accounts_the_templates_use_can_be_created() {
+    // Each create locks ~0.002 SOL of the vault's in rent: a helper could add a dozen for random
+    // mints to any template transaction. Only the vault's accounts the matched templates name pass.
+    let v = vault();
+    let (wsol, junk) = (pubkey(WSOL), key(99));
+    let create = |mint: [u8; 32]| (pubkey(solguard::ATA_PROGRAM), vec![v, ata_of(&v, &mint), v, mint, pubkey(SYSTEM), pubkey(TOKEN_PROGRAM)], vec![1u8]);
+    let wrap = |t: Tx| { let mut d = vec![2, 0, 0, 0]; d.extend(1_000u64.to_le_bytes()); t.ix(pubkey(SYSTEM), vec![v, ata_of(&v, &wsol)], d).bytes() };
+    let (p, a, d) = create(wsol);
+    check_tx(&wrap(Tx::new(v).ix(p, a, d)), &wsol_templates(), &policy()).expect("the wSOL account the wrap pays into");
+    let (p, a, d) = create(junk);
+    let r = check_tx(&wrap(Tx::new(v).ix(p, a, d)), &wsol_templates(), &policy());
+    assert!(matches!(r, Err(Refusal::AtaCreate(_))), "an account for a mint no template uses: {r:?}");
+    let mut five = Tx::new(v);
+    for _ in 0..5 {
+        let (p, a, d) = create(wsol);
+        five = five.ix(p, a, d);
+    }
+    assert!(matches!(check_tx(&wrap(five), &wsol_templates(), &policy()), Err(Refusal::AtaCreate(_))), "five creates");
+    // A pump buy may create the vault's account for the coin it buys (a VaultAta position).
+    let mint = key(40);
+    let (p, a, d) = create(mint);
+    let buy = Tx::new(v).ix(p, a, d).ix(pubkey(PUMP), pump_accounts(ata_of(&v, &mint), v), pump_data(1, 1)).bytes();
+    check_tx(&buy, &[pump_buy()], &policy()).expect("the coin's account");
+}
+
+#[test]
 fn templates_are_checked_when_saved() {
     let mut t = pump_buy();
     t.fields[1].rule = FieldRule::AtLeast { of: 2, num: 1, den: 1 };
