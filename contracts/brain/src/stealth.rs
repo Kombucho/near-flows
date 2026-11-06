@@ -52,7 +52,7 @@ impl Talk {
         require!(!method.is_empty() && method.len() <= 64 && !method.contains('\n'), "bad method");
         require!(!NOT_COMMANDS.contains(&method.as_str()), "not a command");
         // The relayer can't starve the command: its round must get the signed gas.
-        require!(self.ctx.gas_left >= Gas::from_tgas(tgas + 10).as_gas(), format!("attach at least {} Tgas", tgas + 10 + crate::HANDLE_TGAS));
+        require!(self.ctx.gas_left >= Gas::from_tgas(tgas + crate::RELAY_TGAS).as_gas(), format!("attach at least {} Tgas", tgas + crate::RELAY_TGAS + crate::HANDLE_TGAS + crate::X_TGAS));
         self.vs.stealth = Some(Stealth { key: s.key, nonce });
         let next = near_sdk::borsh::to_vec(&Next::Exec { method, args, tgas }).unwrap();
         Answer::default().then("on_vault", next, Gas::from_tgas(tgas))

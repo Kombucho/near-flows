@@ -23,10 +23,13 @@ use crate::{Next, Read, Recipe, Reply, Talk, PRICE_SCALE};
 
 pub const EVM_TTL_S: u64 = 300;
 pub const SOL_TTL_S: u64 = 180;
-const GAS_BUILD: Gas = Gas::from_tgas(80);
-const GAS_SIGNED_CB: Gas = Gas::from_tgas(20);
+/// on_read after the oracle: checks the trigger, builds the node's transaction and
+/// answers the signature request; burns 5.3 Tgas, 14 is a ~2.5x margin.
+const GAS_BUILD: Gas = Gas::from_tgas(14);
+/// The callback with the signature: burns 4.9 Tgas; 12 is a ~2.5x margin.
+const GAS_SIGNED_CB: Gas = Gas::from_tgas(12);
 /// The vault's rounds after the brain's answer: its `sign`, the brain's callback, its own.
-const NEED_TGAS: u64 = 50 + 20 + 10;
+const NEED_TGAS: u64 = 50 + 12 + crate::RELAY_TGAS;
 
 #[near(serializers = [borsh, json])]
 #[serde(tag = "chain", rename_all = "snake_case")]
@@ -144,7 +147,8 @@ impl Talk {
     pub(crate) fn step_remote(&mut self, sender: &AccountId, flow_id: u32, node: u16, args: RemoteArgs, reveal: Option<Node<Recipe>>, salt: Option<String>) -> Reply {
         let by_owner = *sender == self.vs.owner;
         require!(by_owner || Some(sender) == self.vs.keeper.as_ref(), "owner or keeper only");
-        require!(self.ctx.gas_left / 1_000_000_000_000 >= NEED_TGAS, format!("attach at least {} Tgas for this step", NEED_TGAS + crate::HANDLE_TGAS));
+        require!(self.ctx.gas_left / 1_000_000_000_000 >= NEED_TGAS, format!("attach at least {} Tgas for this step", NEED_TGAS + crate::HANDLE_TGAS + crate::X_TGAS));
+        self.need_after = NEED_TGAS;
         let f = self.flow(flow_id);
         let n = match (f.is_hidden(), reveal) {
             (false, None) => f.nodes.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).clone(),
@@ -178,7 +182,7 @@ impl Talk {
     }
 
     /// The keeper (or owner) says how remote step `node` ended. Bounded, not measured.
-    pub(crate) fn remote_report(&mut self, sender: &AccountId, flow_id: u32, node: u16, out: Option<U128>) {
+    pub(crate) fn remote_report(&mut self, sender: &AccountId, flow_id: u32, node: u16, out: Option<U128>) -> Answer {
         let by_owner = *sender == self.vs.owner;
         require!(by_owner || Some(sender) == self.vs.keeper.as_ref(), "owner or keeper only");
         let p = self.pending(flow_id, node).unwrap_or_else(|| env::panic_str("no remote step pending"));
@@ -203,6 +207,8 @@ impl Talk {
             Err(l) => ("step_failed", "returned", l),
         };
         self.emit(ev, &format!(r#""flow":{flow_id},"node":{node},"amount":"{}","{k}":"{v}","remote":true,"reported_by":"{}""#, p.amount.0, if by_owner { "owner" } else { "keeper" }));
+        // The keeper ran it and it worked: its price.
+        if result.is_ok() && !by_owner { self.pay_keeper(Answer::default()) } else { Answer::default() }
     }
 
     pub(crate) fn pending(&self, flow_id: u32, node: u16) -> Option<Pending> {
@@ -279,7 +285,7 @@ impl Talk {
                 self.remote_pending_start(flow_id, node, &r, amount, min, expires, hash, revealed);
                 let (ans, carry) = crate::evm::evm_sign_call(&cfg.signer, &tx);
                 let next = Next::RemoteEvmSigned { flow_id, node, tx: carry };
-                ans.then("on_vault", near_sdk::borsh::to_vec(&next).unwrap(), GAS_SIGNED_CB).into()
+                self.charge_signature(ans).then("on_vault", near_sdk::borsh::to_vec(&next).unwrap(), GAS_SIGNED_CB).into()
             }
             (RemoteCall::Sol { template, amount_field, min_field }, RemoteArgs::Sol { message }) => {
                 let (bytes, values) = self.sol_check_node(&message, template, &n.input);
@@ -291,7 +297,7 @@ impl Talk {
                 self.remote_pending_start(flow_id, node, &r, amount, min, Some(now + SOL_TTL_S * 1_000_000_000), hash.clone(), revealed);
                 let cfg = self.sol_cfg();
                 let next = Next::RemoteSolSigned { flow_id, node, hash };
-                crate::sol::sol_sign_call(&cfg.signer, &bytes).then("on_vault", near_sdk::borsh::to_vec(&next).unwrap(), GAS_SIGNED_CB).into()
+                self.charge_signature(crate::sol::sol_sign_call(&cfg.signer, &bytes)).then("on_vault", near_sdk::borsh::to_vec(&next).unwrap(), GAS_SIGNED_CB).into()
             }
             _ => env::panic_str("refused: args for another chain"),
         }

@@ -12,8 +12,15 @@
 //! Two kinds, as in factory/src/lib.rs: named (`create_vault`, owner -> vault
 //! remembered) and stealth (`create_stealth_vault`, owned by a key; the caller,
 //! typically a relayer, is neither kept nor logged).
+//!
+//! Closed names are tombstoned forever. A vault's addresses on other chains are
+//! derived from its account name (Chain Signatures path + predecessor), so a new
+//! vault under a closed name would control whatever was stranded at the old
+//! one's addresses. The brain tells this factory when it closes a vault
+//! (`on_vault_closed`, accepted only from the brain); after that the name can
+//! never be created here again, and only this factory can create it at all.
 
-use near_sdk::store::{LookupMap, Vector};
+use near_sdk::store::{LookupMap, LookupSet, Vector};
 use near_sdk::{env, near, require, AccountId, CryptoHash, CurveType, Gas, NearToken, PanicOnDefault, Promise, PromiseError, PublicKey};
 
 /// A new vault's funding: its own few bytes, the 0.05 NEAR reserve, its record in the brain, headroom.
@@ -32,13 +39,32 @@ pub struct Factory {
     pub code_hash: Option<CryptoHash>,
     pub vaults: LookupMap<AccountId, AccountId>,
     pub list: Vector<AccountId>,
+    /// Names of closed vaults: never made again.
+    pub closed: LookupSet<AccountId>,
 }
 
 #[near]
 impl Factory {
     #[init]
     pub fn new(owner: AccountId, brain: AccountId) -> Self {
-        Self { owner, brain, code_hash: None, vaults: LookupMap::new(b"v"), list: Vector::new(b"l") }
+        Self { owner, brain, code_hash: None, vaults: LookupMap::new(b"v"), list: Vector::new(b"l"), closed: LookupSet::new(b"c") }
+    }
+
+    /// The brain closed `vault` (it deleted itself): tombstone the name; its owner
+    /// may make a new vault under another name. Only the brain can say so.
+    pub fn on_vault_closed(&mut self, vault: AccountId, owner: Option<AccountId>) {
+        require!(env::predecessor_account_id() == self.brain, "only the brain closes vaults");
+        self.closed.insert(vault.clone());
+        if let Some(o) = owner {
+            if self.vaults.get(&o) == Some(&vault) {
+                self.vaults.remove(&o);
+            }
+        }
+        env::log_str(&format!(r#"EVENT_JSON:{{"standard":"flows","version":"1.0.0","event":"vault_closed","data":[{{"vault":"{vault}"}}]}}"#));
+    }
+
+    pub fn is_closed(&self, vault: AccountId) -> bool {
+        self.closed.contains(&vault)
     }
 
     /// Publish relay code (the raw wasm is the call's input, not JSON).
@@ -133,7 +159,9 @@ impl Factory {
             (2..=32).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'),
             "name: 2-32 of a-z 0-9 - _"
         );
-        format!("{name}.{}", env::current_account_id()).parse().unwrap_or_else(|_| env::panic_str("bad name"))
+        let id: AccountId = format!("{name}.{}", env::current_account_id()).parse().unwrap_or_else(|_| env::panic_str("bad name"));
+        require!(!self.closed.contains(&id), "that name belonged to a closed vault: it is never reused");
+        id
     }
 
     /// Make the keyless account on the published relay; its `new` gets the brain's

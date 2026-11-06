@@ -15,19 +15,31 @@ use near_sdk::{env, near, require, AccountId, Gas};
 use flow::Node;
 
 use crate::wire::Answer;
-use crate::{amount_result, mul_div, result, Call, Deposit, Next, Read, Recipe, Reply, Talk, GAS_READ, NEAR, PRICE_SCALE};
+use crate::{amount_result, mul_div, read_tgas, result, Call, Deposit, Next, Read, Recipe, Reply, Talk, NEAR, OWN_TGAS, PRICE_SCALE, RELAY_TGAS};
 
-/// The callback deciding on the balances read after a step: it only answers
-/// (burns ~2.5 Tgas in the sandbox), so 10 is plenty. Kept apart from GAS_READ
-/// because every recipe call pays for it, and mainnet caps a transaction at 300 Tgas.
-const GAS_MEASURE: Gas = Gas::from_tgas(10);
-/// The brain's callback after a recipe call: it may read two balances (5 each)
-/// and decide in GAS_MEASURE: 20 passed on, plus ~10 for its own work and the
-/// three receipts it creates (25 ran out of prepaid gas in the sandbox). Was 45:
-/// a 120 Tgas swap then needed 285 of the 300 Tgas a mainnet transaction may carry.
-pub(crate) const GAS_ON_CALL: Gas = Gas::from_tgas(30);
-/// The vault's `cb` (relay GAS_CB) and receipt costs, per round.
-const RELAY_TGAS: u64 = 10;
+/// The callback deciding on the balances a step read (on_measured): it only
+/// answers, burning 2.5-3.1 Tgas; 8 is a 2.5x margin.
+const GAS_MEASURE: Gas = Gas::from_tgas(8);
+/// The brain's callback after a recipe call that has another call after it: it
+/// only answers the next call (burns 3.0-4.0 Tgas, as on_call after the last).
+/// If the call failed, its balance read doesn't fit here and moves to the
+/// vault's next round (`read`), which the rest of the recipe's gas pays for.
+const ON_CALL_MID_TGAS: u64 = 8;
+
+/// Tgas to read the step's two balances and decide (2 views, on_measured).
+pub fn measure_tgas() -> u64 {
+    read_tgas(2, GAS_MEASURE.as_tgas())
+}
+
+/// The brain's callback after the recipe's last call: reads the balances in place
+/// (27) plus its own work (6). Was 45 (then 30) with 20 Tgas reads.
+pub fn on_last_call_tgas() -> u64 {
+    measure_tgas() + OWN_TGAS
+}
+
+fn on_call_tgas(last: bool) -> u64 {
+    if last { on_last_call_tgas() } else { ON_CALL_MID_TGAS }
+}
 
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
@@ -45,11 +57,40 @@ pub struct StepCtx {
     pub revealed: Option<Node<Recipe>>,
     /// The market floor read from the oracle for this step (per unit of input, 1e24).
     pub market_per_in: Option<U128>,
+    /// The keeper (not the owner) runs this step: it is paid its fee if the step works.
+    pub by_keeper: bool,
 }
 
-/// Gas the vault's rounds need after the brain's first answer.
+/// Gas the vault's rounds need after the balances are read: each call, the
+/// brain's callback after it and the vault's `cb`, then the last `cb`.
 pub fn need_tgas(n: &Node<Recipe>) -> u64 {
-    n.action.calls.iter().map(|c| c.tgas() + GAS_ON_CALL.as_tgas() + RELAY_TGAS).sum::<u64>() + RELAY_TGAS
+    let k = n.action.calls.len();
+    n.action.calls.iter().enumerate().map(|(i, c)| c.tgas() + on_call_tgas(i + 1 == k) + RELAY_TGAS).sum::<u64>() + RELAY_TGAS
+}
+
+/// Gas a step of `n` needs after the relay's first round: its first read (the
+/// trigger's price, else the oracle feeds (`feed_views` of them), else the
+/// balances) runs inside the first round when it fits beside the brain's own
+/// work, or in a round of its own; then the recipe. `save_flow` checks this.
+pub fn worst_tgas(n: &Node<Recipe>, feed_views: usize) -> u64 {
+    let (price_cb, _) = price_gas(n, feed_views);
+    let first = if price_cb > 0 { read_tgas(1, price_cb) } else if feed_views > 0 { read_tgas(feed_views, feeds_cb()) } else { measure_tgas() };
+    let moved = if first + OWN_TGAS + crate::FINISH_TGAS <= crate::HANDLE_TGAS { 0 } else { first + OWN_TGAS + RELAY_TGAS };
+    moved + need_tgas(n)
+}
+
+/// on_step_prices: checks the floor, then reads the balances in place.
+fn feeds_cb() -> u64 {
+    OWN_TGAS + measure_tgas()
+}
+
+/// The price trigger's callback gas (0: no trigger), and the feeds' read after it.
+fn price_gas(n: &Node<Recipe>, feed_views: usize) -> (u64, u64) {
+    if !matches!(n.when, flow::Trigger::PriceBelow { .. } | flow::Trigger::PriceAbove { .. }) {
+        return (0, 0);
+    }
+    let after = if n.action.market.is_some() { read_tgas(feed_views, feeds_cb()) } else { measure_tgas() };
+    (OWN_TGAS + after, after)
 }
 
 impl Talk {
@@ -60,18 +101,43 @@ impl Talk {
         self.idle();
         require!(n.action.remote.is_none(), "a remote node runs with step_remote");
         // A step that runs out of gas halfway leaves the vault busy: refuse up front.
+        // (A read moved to its own round checks its share too: `read`.)
         let need = need_tgas(&n);
-        require!(self.ctx.gas_left / 1_000_000_000_000 >= need, format!("attach at least {} Tgas for this step", need + crate::HANDLE_TGAS));
+        require!(self.ctx.gas_left / 1_000_000_000_000 >= need, format!("attach at least {} Tgas for this step", need + crate::HANDLE_TGAS + crate::X_TGAS));
+        self.need_after = need;
         // Trust can be withdrawn after a flow was saved: check again before every step.
         self.check_node(&n);
         let revealed = hidden.then(|| n.clone());
         if matches!(n.when, flow::Trigger::PriceBelow { .. } | flow::Trigger::PriceAbove { .. }) {
             let src = n.action.price.clone().unwrap_or_else(|| env::panic_str("price trigger without a price source"));
-            // Its callback may read the market and then the balances: three reads' worth.
+            // Its callback may read the market, then the balances, in place.
+            let (cb, _) = price_gas(&n, self.feed_count(&n));
             let read = Read::Price { flow_id, node, by_owner, per: src.per.0, revealed };
-            return self.read(vec![(src.contract, src.method, src.args)], read, Gas::from_tgas(3 * GAS_READ.as_tgas()));
+            return self.read(vec![(src.contract, src.method, src.args)], read, Gas::from_tgas(cb));
         }
         self.start(flow_id, node, None, by_owner, revealed)
+    }
+
+    /// How many oracle views a step of `n` makes: per feed its price and maybe a
+    /// backup. A feed not set up yet counts as two (the most it can be).
+    pub(crate) fn feed_count(&self, n: &Node<Recipe>) -> usize {
+        let Some(m) = n.action.market.as_ref() else { return 0 };
+        let feeds = self.vs.oracle.as_ref().map(|c| c.feeds.clone()).unwrap_or_default();
+        [&m.sell, &m.buy].iter().map(|name| feeds.iter().find(|f| f.name == **name).map_or(2, |f| 1 + f.backup.is_some() as usize)).sum()
+    }
+
+    /// Refuse a node whose step can never fit in a mainnet transaction (300 Tgas):
+    /// the relay's `x`, the brain's first round, then `worst_tgas`.
+    pub(crate) fn check_gas(&self, i: usize, n: &Node<Recipe>) {
+        if n.action.remote.is_some() {
+            return; // a fixed path: step_remote checks its own need
+        }
+        let total = crate::X_TGAS + crate::HANDLE_TGAS + worst_tgas(n, self.feed_count(n));
+        require!(total <= crate::MAINNET_TGAS, format!("node {i} needs {total} Tgas per step, more than the {} a mainnet transaction may carry: give its calls less gas", crate::MAINNET_TGAS));
+    }
+
+    fn node_of(&self, flow_id: u32, node: u16, revealed: &Option<Node<Recipe>>) -> Node<Recipe> {
+        revealed.clone().unwrap_or_else(|| self.flow(flow_id).nodes[node as usize].clone())
     }
 
     pub(crate) fn on_price(&mut self, flow_id: u32, node: u16, by_owner: bool, per: u128, revealed: Option<Node<Recipe>>) -> Reply {
@@ -82,13 +148,14 @@ impl Talk {
 
     /// Start the step; a recipe with a market floor has the brain read the oracle first.
     fn start(&mut self, flow_id: u32, node: u16, price: Option<u128>, by_owner: bool, revealed: Option<Node<Recipe>>) -> Reply {
-        let market = revealed.as_ref().unwrap_or_else(|| &self.flow(flow_id).nodes[node as usize]).action.market.clone();
-        match market {
+        let n = self.node_of(flow_id, node, &revealed);
+        self.need_after = need_tgas(&n);
+        match n.action.market {
             None => self.start_now(flow_id, node, price, by_owner, revealed, None),
             Some(m) => {
                 let views = self.feed_views(&[m.sell.clone(), m.buy.clone()]);
                 let read = Read::StepPrices { flow_id, node, price, by_owner, revealed };
-                self.read(views, read, Gas::from_tgas(2 * GAS_READ.as_tgas()))
+                self.read(views, read, Gas::from_tgas(feeds_cb()))
             }
         }
     }
@@ -108,6 +175,7 @@ impl Talk {
         let f = self.flow_mut(flow_id);
         let n = revealed.clone().unwrap_or_else(|| f.nodes[node as usize].clone());
         let amount = f.ledger.begin_node(&n, node, now, price, by_owner).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
+        self.need_after = need_tgas(&n);
         self.charge(&n.input, amount);
         let id = self.vs.next_step;
         self.vs.next_step += 1;
@@ -123,6 +191,7 @@ impl Talk {
             failed: false,
             revealed,
             market_per_in: market_per_in.map(U128),
+            by_keeper: !by_owner,
         });
         self.measure(true)
     }
@@ -245,7 +314,8 @@ impl Talk {
         let call = &node.action.calls[i as usize];
         // Not enough gas left in the vault's next round to launch this call and
         // come back: close the step as failed rather than leave the vault stuck.
-        if self.ctx.gas_left / 1_000_000_000_000 < call.tgas() + GAS_ON_CALL.as_tgas() + 2 * RELAY_TGAS {
+        let on_call = on_call_tgas(i as usize + 1 == node.action.calls.len());
+        if self.ctx.gas_left / 1_000_000_000_000 < call.tgas() + on_call + 2 * RELAY_TGAS {
             ctx.failed = true;
             self.vs.busy = Some(ctx);
             return self.measure(false);
@@ -260,7 +330,7 @@ impl Talk {
                 .replace("{owner}", self.vs.owner.as_str())
                 .replace("{vault}", self.vault.as_str())
         };
-        let next = near_sdk::borsh::to_vec(&Next::Call { id: ctx.id, i }).unwrap();
+        let next = near_sdk::borsh::to_vec(&Next::Call { id: ctx.id, i, tgas: on_call }).unwrap();
         let a = match call {
             Call::Ft { receiver, msg, tgas } => {
                 let token: AccountId = node.input.parse().unwrap();
@@ -277,7 +347,7 @@ impl Talk {
                 Answer::default().call(contract, method, fill(args).as_bytes(), attach, Gas::from_tgas(*tgas))
             }
         };
-        a.then("on_vault", next, GAS_ON_CALL).into()
+        a.then("on_vault", next, Gas::from_tgas(on_call)).into()
     }
 
     /// Close the step. `result`: Ok(output) or Err(input that came back).
@@ -307,7 +377,9 @@ impl Talk {
             if ok { "used" } else { "stray_out" }
         );
         self.emit(if ok { "step" } else { "step_failed" }, &data);
-        Answer::default().ret(&format!("{{{data}}}")).into()
+        let ans = Answer::default().ret(&format!("{{{data}}}"));
+        // Fees only for a step that did its job: the protocol's share of what it used, the keeper's price.
+        if ok { self.step_fees(ans, &node.input, extra, ctx.by_keeper).into() } else { ans.into() }
     }
 }
 

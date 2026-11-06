@@ -24,9 +24,12 @@ use crate::{Next, Read, Reply, Talk, GAS_READ};
 pub const EVM_PATH: &str = "evm-1";
 const ECDSA_DOMAIN: u32 = 0;
 const GAS_SIGN: Gas = Gas::from_tgas(50);
-pub(crate) const GAS_SIGNED: Gas = Gas::from_tgas(20);
+/// on_evm_signed: burns 4.9 Tgas (it encodes the signed transaction); 12 is a ~2.5x margin.
+pub(crate) const GAS_SIGNED: Gas = Gas::from_tgas(12);
 /// Reading prices, then building and checking the transaction.
-pub(crate) const GAS_BUILD: Gas = Gas::from_tgas(60);
+/// on_read after the oracle: builds and checks the transaction, then answers the
+/// signature request (no promises of its own); burns ~5.3 Tgas, 14 is a ~2.5x margin.
+pub(crate) const GAS_BUILD: Gas = Gas::from_tgas(14);
 const MAX_TEMPLATES: usize = 32;
 const N: [u8; 32] = [
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e,
@@ -155,6 +158,7 @@ impl Talk {
         }
         // Market minimums: the brain reads the prices, then builds in `on_read`.
         let views = self.feed_views(&feeds);
+        self.need_after = GAS_SIGN.as_tgas() + GAS_SIGNED.as_tgas() + crate::RELAY_TGAS;
         self.read(views, Read::EvmPrices(a), GAS_BUILD)
     }
 
@@ -169,7 +173,7 @@ impl Talk {
         let t = self.evm_template_named(&a.name);
         let (tx, _) = self.evm_prepare(&cfg, &t, a.values, a.nonce, a.max_fee, a.max_tip, a.gas, prices);
         let (ans, carry) = evm_sign_call(&cfg.signer, &tx);
-        ans.then("on_vault", near_sdk::borsh::to_vec(&Next::EvmSigned(carry)).unwrap(), GAS_SIGNED).into()
+        self.charge_signature(ans).then("on_vault", near_sdk::borsh::to_vec(&Next::EvmSigned(carry)).unwrap(), GAS_SIGNED).into()
     }
 
     /// Build template `t` with `values`: caps, floors and market minimums applied,

@@ -51,9 +51,15 @@
 //!   stranger's real name as sender; the brain refuses, `cb` sees the failure
 //!   and does nothing. A stranger spends only their own gas (and any NEAR they
 //!   attach becomes a gift to the vault).
-//! - There is no code path that deploys code, adds a key, deletes the account
-//!   or changes the brain: the wire format can only express function calls and
-//!   transfers. Born keyless (factory), it can never be redeployed.
+//! - There is no code path that deploys code, adds a key or changes the brain:
+//!   the wire format can only express function calls, transfers and deleting
+//!   the vault itself. Born keyless (factory), it can never be redeployed.
+//! - DELETE (vault auto-close) is the one action aimed at the vault itself. It
+//!   can't fake a `cb`: its batch holds nothing but DeleteAccount (no function
+//!   call), and it must be the answer's ONLY action, with no callback, so nothing
+//!   runs after it and no other action of ours races it. Like every action it
+//!   comes only from a brain answer; the brain sends it only after checking the
+//!   vault holds nothing but NEAR (brain `close`), with the owner as beneficiary.
 //! - The brain is trusted completely for this vault's money: it is one
 //!   immutable contract (no keys), and its rules are the vault's rules.
 //!
@@ -75,6 +81,8 @@
 //! u8   number of actions, then each action:
 //!        u8 kind = 0 CALL:     u8 len + receiver, u8 len + method, u32 len + args, u128 deposit, u64 gas
 //!        u8 kind = 1 TRANSFER: u8 len + receiver, u128 amount
+//!        u8 kind = 2 DELETE:   u8 len + beneficiary (the vault deletes itself, its NEAR
+//!                              to the beneficiary; only as the sole action, no callback)
 //! u8   has callback (0/1); if 1:
 //!        u8 len + brain method, u32 len + args, u64 gas
 //!        -> the actions run in parallel, then brain.<method>(header + args)
@@ -115,6 +123,7 @@ mod host {
             weight: u64,
         );
         pub fn promise_batch_action_transfer(promise_index: u64, amount_ptr: u64);
+        pub fn promise_batch_action_delete_account(promise_index: u64, beneficiary_id_len: u64, beneficiary_id_ptr: u64);
         pub fn promise_results_count() -> u64;
         pub fn promise_result(result_idx: u64, register_id: u64) -> u64;
         pub fn promise_return(promise_id: u64);
@@ -126,17 +135,23 @@ mod host {
 pub const VERSION: u8 = 1;
 pub const KIND_CALL: u8 = 0;
 pub const KIND_TRANSFER: u8 = 1;
+pub const KIND_DELETE: u8 = 2;
 pub const HEADER_FIXED: usize = 1 + 16 + 8 + 16 + 8;
 pub const TGAS: u64 = 1_000_000_000_000;
-/// What `brain.handle` gets for deciding a request. Unused gas is refunded.
-/// Enough for the brain to also issue its own reads (balances, prices, keys)
-/// and decide in its private callback, whose answer then reaches `cb`.
-pub const GAS_HANDLE: u64 = 100 * TGAS;
+/// What `brain.handle` gets for deciding a request. Unused gas is refunded TO
+/// THE SIGNER, never to later rounds, so every Tgas here is lost to the recipe
+/// under mainnet's 300 Tgas cap. Measured: handle burns 2.8-5.2 Tgas; 40 also
+/// lets it read two balances in place (27 Tgas with their callback), so a plain
+/// step needs no extra round. Heavier first reads (prices, oracle feeds) are
+/// asked for in the answer as a round of their own, paid from `cb`'s share.
+/// Was 100: the node library's Borrow on Rhea (60 + 120 Tgas of calls) couldn't fit.
+pub const GAS_HANDLE: u64 = 40 * TGAS;
 /// Receiver hooks run on the gas their caller left them: the brain only answers a value.
 pub const GAS_HOOK: u64 = 8 * TGAS;
 /// The least `cb` gets; it also gets ALL the unused gas (weight 1), because it
 /// launches the next round of the brain's actions and they carry their own gas.
-pub const GAS_CB: u64 = 10 * TGAS;
+/// `cb` burns 0.9-2.6 Tgas (more with more actions): 5 is a 2x margin. Was 10.
+pub const GAS_CB: u64 = 5 * TGAS;
 pub const MAX_ACTIONS: usize = 16;
 
 /// A parsed action, borrowing from the answer bytes.
@@ -144,6 +159,7 @@ pub const MAX_ACTIONS: usize = 16;
 pub enum Act<'a> {
     Call { to: &'a [u8], method: &'a [u8], args: &'a [u8], deposit: u128, gas: u64 },
     Transfer { to: &'a [u8], amount: u128 },
+    Delete { beneficiary: &'a [u8] },
 }
 
 #[derive(Debug, PartialEq)]
@@ -193,6 +209,7 @@ impl<'a> Reader<'a> {
         match self.u8()? {
             KIND_CALL => Some(Act::Call { to: self.short()?, method: self.short()?, args: self.long()?, deposit: self.u128()?, gas: self.u64()? }),
             KIND_TRANSFER => Some(Act::Transfer { to: self.short()?, amount: self.u128()? }),
+            KIND_DELETE => Some(Act::Delete { beneficiary: self.short()? }),
             _ => None,
         }
     }
@@ -435,10 +452,23 @@ mod contract {
             fail("too many actions");
         }
         let mut ids = [0u64; MAX_ACTIONS];
+        let mut deleting = false;
         for i in 0..count {
             let act = r.act().unwrap_or_else(|| fail("bad action"));
             let to = match act {
                 Act::Call { to, .. } | Act::Transfer { to, .. } => to,
+                Act::Delete { beneficiary } => {
+                    if count != 1 || beneficiary == m || beneficiary.is_empty() {
+                        fail("a delete is the only action, to another account");
+                    }
+                    deleting = true;
+                    unsafe {
+                        let p = promise_batch_create(m.len() as u64, m.as_ptr() as u64);
+                        promise_batch_action_delete_account(p, beneficiary.len() as u64, beneficiary.as_ptr() as u64);
+                        ids[i] = p;
+                    }
+                    continue;
+                }
             };
             // Never ourselves: no faked `cb`, no calls that skip the brain.
             if to == m || to.is_empty() {
@@ -455,11 +485,15 @@ mod contract {
                         let d = amount.to_le_bytes();
                         promise_batch_action_transfer(p, d.as_ptr() as u64)
                     }
+                    Act::Delete { .. } => fail("bad action"),
                 }
                 ids[i] = p;
             }
         }
         let cbk = r.callback().unwrap_or_else(|| fail("bad answer"));
+        if deleting && cbk.is_some() {
+            fail("nothing runs after a delete");
+        }
         let ret = r.long().unwrap_or_else(|| fail("bad answer"));
         if !r.done() {
             fail("bad answer");
@@ -548,6 +582,8 @@ mod tests {
         let a = call("usdc.near", "m", b"{}", 0, 1);
         assert!(Reader::new(&a[..a.len() - 1]).act().is_none());
         assert!(Reader::new(&[7u8, 0]).act().is_none(), "kind 7 doesn't exist (no deploy, no keys)");
+        assert_eq!(Reader::new(&[KIND_DELETE, 5, b'o', b'w', b'n', b'e', b'r']).act(), Some(Act::Delete { beneficiary: b"owner" }));
+        assert!(Reader::new(&[KIND_DELETE, 5, b'o']).act().is_none(), "a truncated beneficiary");
         assert!(Reader::new(&[2u8]).callback().is_none());
     }
 }
