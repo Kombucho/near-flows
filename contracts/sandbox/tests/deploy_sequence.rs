@@ -206,6 +206,9 @@ async fn the_testnet_deploy_script_runs_as_written() -> anyhow::Result<()> {
         async move { anyhow::Ok(w.view(&c, m).args_json(a).await?.json::<Value>()?) }
     };
     assert_eq!(view(id("brain"), "get_factory", json!({})).await?, json!(id("relay")));
+    let fees = view(id("brain"), "get_fees", json!({})).await?;
+    assert_eq!((fees["bps"].clone(), fees["cap_bps"].clone(), fees["treasury"].clone()), (json!(10), json!(30), json!(id("owner"))), "{fees}");
+    assert_eq!((fees["per_signature"].clone(), fees["per_signature_cap"].clone()), (json!("10000000000000000000000"), json!("50000000000000000000000")));
     assert_eq!(view(id("relay"), "get_brain", json!({})).await?, json!(id("brain")));
     assert!(view(id("relay"), "get_code_hash", json!({})).await?.is_string(), "relay published");
     assert_eq!(view(id("relay"), "get_vault", json!({"owner": id("owner")})).await?, json!(vault));

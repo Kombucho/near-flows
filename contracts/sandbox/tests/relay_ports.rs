@@ -277,7 +277,8 @@ async fn a_stealth_relay_vault_obeys_only_its_owners_signed_commands() -> anyhow
     assert!(fails_with(&exec(&w.keeper, &sv, &owner.sign(&sv, "exec", inner)).await?, "not a command"));
     // The relayer attaches too little for the gas the owner signed: refused before the nonce burns.
     let starved = owner.sign_with(&sv, "set_keeper", json!({"keeper": null}), 100, now_ns() + HOUR_NS);
-    let r = w.keeper.call(&sv, "exec").args_json(&starved).gas(near_workspaces::types::Gas::from_tgas(150)).transact().await?;
+    // (Relay v2: 100 signed needs 150 = 100 + 5 (a relay round) + 40 (first round) + 5 (exec).)
+    let r = w.keeper.call(&sv, "exec").args_json(&starved).gas(near_workspaces::types::Gas::from_tgas(140)).transact().await?;
     assert!(fails_with(&r, "attach at least"), "{:?}", r.failures());
     // A signed command is bound to its vault.
     let other = owner.sign(&w.vault, "set_keeper", json!({"keeper": null}));

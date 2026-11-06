@@ -20,12 +20,18 @@ pub struct RelayWorld {
 }
 
 pub async fn relay_world() -> anyhow::Result<RelayWorld> {
+    relay_world_fees(|_| Value::Null).await
+}
+
+/// The same world, with the brain's `fees` built from the treasury account (fees.rs).
+pub async fn relay_world_fees(fees: impl Fn(&AccountId) -> Value) -> anyhow::Result<RelayWorld> {
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;
     let factory = root.create_subaccount("flows").initial_balance(NearToken::from_near(30)).transact().await?.into_result()?;
     let brain_acc = root.create_subaccount("brain").initial_balance(NearToken::from_near(15)).transact().await?.into_result()?;
     let brain = brain_acc.deploy(&wasm("brain")).await?.into_result()?;
-    brain.call("new").args_json(json!({"factory": factory.id()})).transact().await?.into_result()?;
+    let treasury: AccountId = format!("treasury.{}", root.id()).parse()?;
+    brain.call("new").args_json(json!({"factory": factory.id(), "fees": fees(&treasury)})).transact().await?.into_result()?;
     factory.deploy(&wasm("factory_relay")).await?.into_result()?;
     factory.call(factory.id(), "new").args_json(json!({"owner": factory.id(), "brain": brain.id()})).transact().await?.into_result()?;
     factory.call(factory.id(), "publish").args(wasm("relay")).deposit(NearToken::from_near(2)).max_gas().transact().await?.into_result()?;
