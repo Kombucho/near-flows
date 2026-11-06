@@ -1,14 +1,22 @@
 // Solana transactions for the vault's templates, built with the protocols' own
 // SDKs against a Solana mainnet fork (surfpool), then sent once signed.
-// Used by the sandbox test contracts/sandbox/tests/sol_fork.rs (it prints JSON).
+// Used by the sandbox tests contracts/sandbox/tests/sol_fork*.rs (it prints JSON).
 //
 //   tsx src/fork-sol.ts pump-info <mint>...                 which coins are still on their bonding curve
 //   tsx src/fork-sol.ts pump-buy <vault> <mint> <lamports> <slippage%>
-//   tsx src/fork-sol.ts dlmm-open <vault> <owner-secret-b58> <pool> <amountX> <amountY> <bins>
+//   tsx src/fork-sol.ts pump-sell <vault> <mint> <units> <slippage%>
+//   tsx src/fork-sol.ts amm-info <mint>...                  a graduated coin's canonical pump AMM pool
+//   tsx src/fork-sol.ts amm-buy <vault> <mint> <lamports> <slippage%>
+//   tsx src/fork-sol.ts amm-sell <vault> <mint> <units> <slippage%>
+//   tsx src/fork-sol.ts dlmm-info <pool>...
+//   tsx src/fork-sol.ts dlmm-open <vault> <owner-pubkey|-> <pool> <amountY> <bins>
+//   tsx src/fork-sol.ts dlmm-swap <trader-secret-b58> <pool> <lamports>   a trader sells SOL (signed and sent here)
+//   tsx src/fork-sol.ts dlmm-position <pool> <position>
 //   tsx src/fork-sol.ts dlmm-claim <vault> <pool> <position>
 //   tsx src/fork-sol.ts dlmm-close <vault> <pool> <position>
 //   tsx src/fork-sol.ts send <message-b64> <vault-sig-hex> [signer-secret-b58 ...]
-//   tsx src/fork-sol.ts balance <owner> <mint>
+//   tsx src/fork-sol.ts swap-key <message-b64> <from> <to>   a tampered copy (refusal tests)
+//   tsx src/fork-sol.ts balance <owner> <mint> | ata <owner> <mint> [program] | keypair | sign <message-b64> <secret> | decode <message-b64>
 //
 // SOLANA_RPC: the fork (default http://127.0.0.1:8899).
 
@@ -20,7 +28,10 @@ import { createRequire } from "node:module";
 // pump.fun's SDK through its CommonJS build: its ESM build imports `BN` from Anchor's ESM, which doesn't export it.
 const require = createRequire(import.meta.url);
 const pump = require("@pump-fun/pump-sdk");
-const { OnlinePumpSdk, PUMP_SDK, getBuyTokenAmountFromSolAmount, getSellSolAmountFromTokenAmount, OnlinePumpAmmSdk, PUMP_AMM_SDK } = pump;
+const { OnlinePumpSdk, PUMP_SDK, getBuyTokenAmountFromSolAmount, getSellSolAmountFromTokenAmount } = pump;
+// The pump AMM (graduated coins): its own SDK (pump-sdk bundles it but does not export it).
+const pumpAmm = require("@pump-fun/pump-swap-sdk");
+const { OnlinePumpAmmSdk, PUMP_AMM_SDK } = pumpAmm;
 
 const rpc = process.env.SOLANA_RPC ?? "http://127.0.0.1:8899";
 const conn = new Connection(rpc, "confirmed");
@@ -114,6 +125,39 @@ if (cmd === "pump-info") {
     // fees go to other recipients, and the program refuses the wrong one (NotAuthorized).
     mayhemMode: state.bondingCurve.isMayhemMode });
   out({ message: await message(user, ixs), lamports: sol.toString(), tokenProgram: tokenProgram.toBase58(), ixs: describe(ixs) });
+} else if (cmd === "amm-info") {
+  // A graduated coin's canonical pump AMM pool: its quote token and reserves.
+  const amm = new OnlinePumpAmmSdk(conn);
+  const res = [];
+  for (const m of args) {
+    try {
+      const key = pumpAmm.canonicalPumpPoolPda(new PublicKey(m));
+      const p = await amm.fetchPool(key);
+      const [b, q] = await Promise.all([conn.getTokenAccountBalance(p.poolBaseTokenAccount), conn.getTokenAccountBalance(p.poolQuoteTokenAccount)]);
+      res.push({ mint: m, pool: key.toBase58(), quote: p.quoteMint.toBase58(), base: b.value.amount, quoteReserve: q.value.amount });
+    } catch (e) {
+      res.push({ mint: m, error: (e as Error).message.slice(0, 80) });
+    }
+  }
+  out(res);
+} else if (cmd === "amm-buy" || cmd === "amm-sell") {
+  // A graduated coin on the pump AMM, against wSOL: buy with `amount` lamports, or sell `amount`
+  // coin units. The SDK wraps SOL into the vault's own wSOL account around the swap and closes
+  // it after (the SOL back to the vault).
+  const [vault, mint, amount, slippage] = args;
+  const user = new PublicKey(vault);
+  const amm = new OnlinePumpAmmSdk(conn);
+  const state = await amm.swapSolanaState(pumpAmm.canonicalPumpPoolPda(new PublicKey(mint)), user);
+  const ixs: TransactionInstruction[] = cmd === "amm-buy"
+    ? await PUMP_AMM_SDK.buyQuoteInput(state, new BN(amount), Number(slippage))
+    : await PUMP_AMM_SDK.sellBaseInput(state, new BN(amount), Number(slippage));
+  // The same inputs the SDK quotes with inside buyQuoteInput / sellBaseInput.
+  const q = { slippage: Number(slippage), baseReserve: state.poolBaseAmount, quoteReserve: state.poolQuoteAmount, virtualQuoteReserves: state.pool.virtualQuoteReserves,
+    globalConfig: state.globalConfig, baseMintAccount: state.baseMintAccount, baseMint: state.baseMint, coinCreator: state.pool.coinCreator, creator: state.pool.creator,
+    feeConfig: state.feeConfig, quoteMint: state.pool.quoteMint, isMayhemMode: state.pool.isMayhemMode, creatorFeeBps: state.pool.creatorFeeBps, quoteTransferFee: state.quoteTransferFee };
+  const quote = cmd === "amm-buy" ? pumpAmm.buyQuoteInput({ ...q, quote: new BN(amount) }).base : pumpAmm.sellBaseInput({ ...q, base: new BN(amount) }).uiQuote;
+  const trimmed = await trim(ixs);
+  out({ message: await message(user, trimmed), out: quote.toString(), tokenProgram: state.baseTokenProgram.toBase58(), ixs: describe(trimmed) });
 } else if (cmd === "dlmm-info") {
   const res = [];
   for (const p of args) {

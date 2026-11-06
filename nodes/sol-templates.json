@@ -1,5 +1,5 @@
 {
-  "about": "Solana nodes as templates the vault enforces (solguard::template, contracts/vault/src/soltemplates.rs): every instruction is checked byte by byte before the vault signs. Accounts: 'vault' is the vault itself, 'vault_ata' its own token account for the mint at position mint_at (re-derived, so proceeds can't go anywhere else), 'new_signer' a fresh key (a new LP position), 'fixed' a pinned address, 'any' an account the program itself checks against the others (pool PDAs, bin arrays). Trailing extra accounts are never signers. needs_owner: the owner's own Solana wallet must co-sign (set with sol_owner_wallet). Values in {braces} are set per coin by the owner and filled in when the template is saved. Tested on a Solana mainnet fork (surfpool): contracts/sandbox/tests/sol_fork.rs, sol_fork_meteora.rs.",
+  "about": "Solana nodes as templates the vault enforces (solguard::template, contracts/vault/src/soltemplates.rs): every instruction is checked byte by byte before the vault signs. Accounts: 'vault' is the vault itself, 'vault_ata' its own token account for the mint at position mint_at (re-derived, so proceeds can't go anywhere else), 'new_signer' a fresh key (a new LP position), 'fixed' a pinned address, 'any' an account the program itself checks against the others (pool PDAs, bin arrays). Trailing extra accounts are never signers. needs_owner: the owner's own Solana wallet must co-sign (set with sol_owner_wallet). Values in {braces} are set per coin by the owner and filled in when the template is saved. vault_ata_of is the vault's own token account for a fixed mint the instruction doesn't name (wrapping SOL). Tested on a Solana mainnet fork (surfpool) on 2026-11-06: contracts/sandbox/tests/sol_fork.rs (pump.fun buy + sell), sol_fork_meteora.rs (DLMM open/add/claim/remove/close), sol_fork_pumpamm.rs (pump AMM buy + sell of a graduated coin, with wSOL wrap/unwrap).",
   "programs": {
     "meteora_dlmm": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
     "meteora_dlmm_event_authority": "D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6",
@@ -216,6 +216,100 @@
       ],
       "extra_accounts": 2,
       "spends": [{"field": 0, "key": "sol:{mint}"}]
+    },
+    {
+      "name": "pump_amm_buy",
+      "about": "pump AMM buy (a graduated coin's canonical pool {pool}, against wSOL): coin units out >= max_quote_in x {floor_num} / {floor_den}, max_quote_in <= {max_lamports} lamports from the vault's own wSOL account; the coin lands in the vault's own token account. The pool, the vault as user and both mints are pinned; fee and volume accounts are the program's to check.",
+      "program": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+      "prefix": "66063d1201daebea",
+      "fields": [
+        {"ty": "u64", "rule": "at_least", "of": 1, "num": "{floor_num}", "den": "{floor_den}"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_lamports}"},
+        {"ty": "u8", "rule": "any"}
+      ],
+      "accounts": [
+        {"acc": "fixed", "key": "{pool}"},
+        {"acc": "vault"},
+        {"acc": "any"},
+        {"acc": "fixed", "key": "{mint}"},
+        {"acc": "fixed", "key": "So11111111111111111111111111111111111111112"},
+        {"acc": "vault_ata", "mint_at": 3, "program_at": 11},
+        {"acc": "vault_ata", "mint_at": 4, "program_at": 12},
+        {"acc": "any"}, {"acc": "any"}, {"acc": "any"}, {"acc": "any"},
+        {"acc": "any"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "11111111111111111111111111111111"},
+        {"acc": "fixed", "key": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"},
+        {"acc": "any"},
+        {"acc": "fixed", "key": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"},
+        {"acc": "any"}, {"acc": "any"}, {"acc": "any"}, {"acc": "any"}, {"acc": "any"},
+        {"acc": "any"}, {"acc": "any"}, {"acc": "any"}, {"acc": "any"}
+      ],
+      "extra_accounts": 2,
+      "spends": [{"field": 1, "key": "sol:SOL"}]
+    },
+    {
+      "name": "pump_amm_sell",
+      "about": "pump AMM sell (canonical pool {pool}): at most {max_units} coin units from the vault's own token account, wSOL out >= amount x {floor_num} / {floor_den} into the vault's own wSOL account.",
+      "program": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+      "prefix": "33e685a4017f83ad",
+      "fields": [
+        {"ty": "u64", "rule": "at_most", "max": "{max_units}"},
+        {"ty": "u64", "rule": "at_least", "of": 0, "num": "{floor_num}", "den": "{floor_den}"}
+      ],
+      "accounts": [
+        {"acc": "fixed", "key": "{pool}"},
+        {"acc": "vault"},
+        {"acc": "any"},
+        {"acc": "fixed", "key": "{mint}"},
+        {"acc": "fixed", "key": "So11111111111111111111111111111111111111112"},
+        {"acc": "vault_ata", "mint_at": 3, "program_at": 11},
+        {"acc": "vault_ata", "mint_at": 4, "program_at": 12},
+        {"acc": "any"}, {"acc": "any"}, {"acc": "any"}, {"acc": "any"},
+        {"acc": "any"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "11111111111111111111111111111111"},
+        {"acc": "fixed", "key": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"},
+        {"acc": "any"},
+        {"acc": "fixed", "key": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"},
+        {"acc": "any"}, {"acc": "any"}, {"acc": "any"}, {"acc": "any"}, {"acc": "any"},
+        {"acc": "any"}, {"acc": "any"}
+      ],
+      "extra_accounts": 2,
+      "spends": [{"field": 0, "key": "sol:{mint}"}]
+    },
+    {
+      "name": "wsol_wrap",
+      "about": "System transfer of at most 1 SOL from the vault into the vault's OWN wSOL account (wrapping SOL before a swap). Not spending: the SOL stays the vault's; the swap that uses it counts.",
+      "program": "11111111111111111111111111111111",
+      "prefix": "02000000",
+      "fields": [{"ty": "u64", "rule": "at_most", "max": "1000000000"}],
+      "accounts": [
+        {"acc": "vault"},
+        {"acc": "vault_ata_of", "mint": "So11111111111111111111111111111111111111112", "program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}
+      ]
+    },
+    {
+      "name": "wsol_sync",
+      "about": "SPL Token sync_native on the vault's own wSOL account (after wrapping).",
+      "program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "prefix": "11",
+      "fields": [],
+      "accounts": [
+        {"acc": "vault_ata_of", "mint": "So11111111111111111111111111111111111111112", "program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}
+      ]
+    },
+    {
+      "name": "wsol_unwrap",
+      "about": "SPL Token close_account on the vault's own wSOL account: the SOL (and the account's rent) back to the vault itself.",
+      "program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "prefix": "09",
+      "fields": [],
+      "accounts": [
+        {"acc": "vault_ata_of", "mint": "So11111111111111111111111111111111111111112", "program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "vault"},
+        {"acc": "vault"}
+      ]
     }
   ]
 }

@@ -16,6 +16,7 @@
   "dependencies": {
     "@meteora-ag/dlmm": "1.9.14",
     "@pump-fun/pump-sdk": "4.3.1",
+    "@pump-fun/pump-swap-sdk": "2.2.0",
     "near-api-js": "^7.4.0"
   },
   "devDependencies": {
