@@ -1,0 +1,26 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fingerprint, newSalt, unlock, type Node } from "./hidden.ts";
+
+const node: Node = JSON.parse(readFileSync(new URL("../../../contracts/vault/tests-data/fingerprint-node.json", import.meta.url), "utf8"));
+const salt = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+test("the keeper's fingerprint matches the vault's, byte for byte", () => {
+  // Same value pinned in contracts/vault/src/tests.rs, computed there by the vault's own code.
+  assert.equal(fingerprint(node, salt), "dc1b9b766ada17527508e3c4b9ba99fde2d75a9bf5c0d56a28180d4648416eeb");
+});
+
+test("any change to a node, or another salt, changes its fingerprint", () => {
+  const greedy = structuredClone(node);
+  greedy.action.min_out_per_in = "1";
+  assert.notEqual(fingerprint(greedy, salt), fingerprint(node, salt));
+  assert.notEqual(fingerprint(node, newSalt()), fingerprint(node, salt));
+});
+
+test("a stored plan unlocks only if every node matches the chain", () => {
+  const prints = [fingerprint(node, salt)];
+  assert.deepEqual(unlock({ nodes: [node], salts: [salt] }, prints), [node]);
+  assert.equal(unlock({ nodes: [node], salts: [newSalt()] }, prints), null);
+  assert.equal(unlock(undefined, prints), null);
+});

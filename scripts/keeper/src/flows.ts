@@ -17,7 +17,8 @@ export type Trigger =
 export type PriceSource = { contract: string; method: string; args: string; per: string };
 export type FlowNode = { input: string; when: Trigger; action: { label: string; price: PriceSource | null } };
 export type NodeState = { inbox: string; running: string; runs: number; last_run_ns: number; failures: number };
-export type Flow = { name: string; nodes: FlowNode[]; ledger: { nodes: NodeState[]; busy: number | null } };
+/** As the vault returns it. A hidden flow has no `nodes`, only `hidden` fingerprints. */
+export type Flow = { name: string; nodes: FlowNode[]; inputs?: string[]; hidden?: string[]; ledger: { nodes: NodeState[]; busy: number | null } };
 
 export type Due = { flow: number; node: number; label: string; price?: { source: PriceSource; below?: bigint; above?: bigint } };
 

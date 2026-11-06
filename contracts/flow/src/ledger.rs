@@ -10,7 +10,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::{entries, Action, Error, Node, Token, Trigger, BPS, MAX_FAILURES, NO_INPUT};
+use crate::{entries, inputs, Action, Error, Node, Token, Trigger, BPS, MAX_FAILURES, NO_INPUT};
 
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize), serde(crate = "serde"))]
@@ -53,7 +53,13 @@ impl Ledger {
         if !entries(flow).contains(&i) {
             return Err(Error::NotEntry(i));
         }
-        if flow[i as usize].input == NO_INPUT {
+        self.fund_node(&flow[i as usize].input, i, amount)
+    }
+
+    /// Fund node `i`, whose input token is `input`, without the entry check (a
+    /// hidden flow's routes aren't known, so its owner may fund any node).
+    pub fn fund_node(&mut self, input: &Token, i: u16, amount: u128) -> Result<(), Error> {
+        if input == NO_INPUT {
             return Err(Error::NoInput(i)); // collectors take no money
         }
         let s = self.state(i)?;
@@ -64,10 +70,15 @@ impl Ledger {
     /// Start node `i`'s step if its trigger allows. Returns the input amount to use.
     /// `price` is the current price for price triggers (the contract fetches it first).
     pub fn begin<A>(&mut self, flow: &[Node<A>], i: u16, now_ns: u64, price: Option<u128>, by_owner: bool) -> Result<u128, Error> {
+        let node = flow.get(i as usize).ok_or(Error::NoSuchNode(i))?;
+        self.begin_node(node, i, now_ns, price, by_owner)
+    }
+
+    /// `begin` for one node given on its own (a hidden flow's revealed node).
+    pub fn begin_node<A>(&mut self, node: &Node<A>, i: u16, now_ns: u64, price: Option<u128>, by_owner: bool) -> Result<u128, Error> {
         if self.busy.is_some() {
             return Err(Error::Busy);
         }
-        let node = flow.get(i as usize).ok_or(Error::NoSuchNode(i))?;
         let s = self.state(i)?;
         if s.failures >= MAX_FAILURES {
             return Err(Error::Paused(i));
@@ -126,10 +137,16 @@ impl Ledger {
     /// (0 if it hands nothing out); `Err(left)` = it failed and `left` of the input
     /// came back. Returns what goes back to the vault's free balance.
     pub fn finish<A: Action>(&mut self, flow: &[Node<A>], i: u16, result: Result<u128, u128>) -> Result<Vec<(Token, u128)>, Error> {
+        let node = flow.get(i as usize).ok_or(Error::NoSuchNode(i))?;
+        self.finish_node(node, i, result)
+    }
+
+    /// `finish` for one node given on its own. Its routes must already have been
+    /// checked against the flow (`validate_node`).
+    pub fn finish_node<A: Action>(&mut self, node: &Node<A>, i: u16, result: Result<u128, u128>) -> Result<Vec<(Token, u128)>, Error> {
         if self.busy != Some(i) {
             return Err(Error::NotRunning(i));
         }
-        let node = &flow[i as usize];
         self.busy = None;
         let s = self.state(i)?;
         let ran = std::mem::take(&mut s.running);
@@ -153,6 +170,9 @@ impl Ledger {
                     let token = node.action.output(&node.input).expect("validated: routed nodes have output");
                     let mut routed = 0u128;
                     for r in &node.next {
+                        if r.to as usize >= self.nodes.len() {
+                            continue; // never happens after validate_node; the part stays free
+                        }
                         let part = out * r.bps as u128 / BPS as u128;
                         routed += part;
                         self.nodes[r.to as usize].inbox += part;
@@ -180,14 +200,19 @@ impl Ledger {
 
     /// Stop the flow: every inbox goes back to the free balance.
     pub fn drain<A>(&mut self, flow: &[Node<A>]) -> Result<Vec<(Token, u128)>, Error> {
+        self.drain_inputs(&inputs(flow))
+    }
+
+    /// `drain`, knowing only each node's input token.
+    pub fn drain_inputs(&mut self, inputs: &[Token]) -> Result<Vec<(Token, u128)>, Error> {
         if self.busy.is_some() {
             return Err(Error::Busy);
         }
         let mut back = Vec::new();
-        for (s, n) in self.nodes.iter_mut().zip(flow) {
+        for (s, t) in self.nodes.iter_mut().zip(inputs) {
             let a = std::mem::take(&mut s.inbox);
             if a > 0 {
-                back.push((n.input.clone(), a));
+                back.push((t.clone(), a));
             }
         }
         Ok(back)
@@ -195,11 +220,16 @@ impl Ledger {
 
     /// What this flow is holding, by token (inboxes + the step in flight).
     pub fn holdings<A>(&self, flow: &[Node<A>]) -> BTreeMap<Token, u128> {
+        self.holdings_inputs(&inputs(flow))
+    }
+
+    /// `holdings`, knowing only each node's input token.
+    pub fn holdings_inputs(&self, inputs: &[Token]) -> BTreeMap<Token, u128> {
         let mut m = BTreeMap::new();
-        for (s, n) in self.nodes.iter().zip(flow) {
+        for (s, t) in self.nodes.iter().zip(inputs) {
             let a = s.inbox + s.running;
             if a > 0 {
-                *m.entry(n.input.clone()).or_default() += a;
+                *m.entry(t.clone()).or_default() += a;
             }
         }
         m

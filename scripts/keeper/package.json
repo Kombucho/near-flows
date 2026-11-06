@@ -7,7 +7,8 @@
     "keeper": "tsx src/main.ts",
     "flows": "tsx src/flows-main.ts",
     "jupiter": "tsx src/jupiter.ts",
-    "intents": "tsx src/intents-solver.ts"
+    "intents": "tsx src/intents-solver.ts",
+    "hidden": "tsx src/hidden-main.ts"
   },
   "author": "",
   "license": "MIT",

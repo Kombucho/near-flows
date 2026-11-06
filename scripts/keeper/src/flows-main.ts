@@ -5,7 +5,9 @@
 //   npm run flows -- --send --once
 //
 // It finds vaults through the factory, keeps the ones that named this keeper,
-// and for each due step calls the vault's `step`. Price triggers are checked
+// and for each due step calls the vault's `step`. A hidden flow's steps are run
+// with `step_hidden`, from the plan its owner shared in ~/.flows/hidden/<vault>.json
+// (flows it has no plan for are skipped: the keeper can't see them). Price triggers are checked
 // first with a free view, so the keeper doesn't pay for steps that would fail.
 // The keeper can't do anything else to a vault: no withdrawing, no editing.
 // Best practice: give it a key that may only call `step`.
@@ -15,7 +17,8 @@
 
 import { parseArgs } from "node:util";
 import { Chain, loadKey } from "./chain.ts";
-import { due, fired, priceOf, type Flow } from "./flows.ts";
+import { due, fired, priceOf, type Flow, type FlowNode } from "./flows.ts";
+import { loadStore, unlock, type Node } from "./hidden.ts";
 
 const TGAS = 10n ** 12n;
 const { values: opt } = parseArgs({
@@ -51,7 +54,18 @@ async function round() {
     if (await chain.view(vault, "get_busy")) continue; // one step at a time per vault
     const ids = await chain.view<[number, string][]>(vault, "get_flows");
     const flows: [number, Flow][] = [];
-    for (const [id] of ids) flows.push([id, await chain.view<Flow>(vault, "get_flow", { flow_id: id })]);
+    const plans = loadStore(vault);
+    const hidden = new Map<number, { nodes: Node[]; salts: string[] }>();
+    for (const [id] of ids) {
+      const f = await chain.view<Flow>(vault, "get_flow", { flow_id: id });
+      if (f.hidden?.length) {
+        const nodes = unlock(plans[id], f.hidden);
+        if (!nodes) continue; // not ours to see, or the plan is stale
+        hidden.set(id, plans[id]);
+        f.nodes = nodes as unknown as FlowNode[];
+      }
+      flows.push([id, f]);
+    }
     for (const d of due(flows, now)) {
       if (d.price) {
         const s = d.price.source;
@@ -61,7 +75,9 @@ async function round() {
       log(`${vault} flow ${d.flow} node ${d.node} "${d.label}" is due`);
       if (!opt.send) continue;
       try {
-        await chain.call(vault, "step", { flow_id: d.flow, node: d.node }, 300n * TGAS);
+        const h = hidden.get(d.flow);
+        if (h) await chain.call(vault, "step_hidden", { flow_id: d.flow, node: d.node, reveal: h.nodes[d.node], salt: h.salts[d.node] }, 300n * TGAS);
+        else await chain.call(vault, "step", { flow_id: d.flow, node: d.node }, 300n * TGAS);
         ran++;
         break; // the vault is busy until this step finishes: next vault
       } catch (e) {

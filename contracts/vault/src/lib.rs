@@ -21,6 +21,7 @@
 //! (one step at a time per vault, so the difference is that step's).
 
 pub mod evm;
+pub mod hidden;
 pub mod intents;
 mod limits;
 pub mod sol;
@@ -174,8 +175,19 @@ pub const NEVER_CALL: &[&str] = &[
 #[derive(Clone, Debug)]
 pub struct FlowRec {
     pub name: String,
+    /// The nodes, readable by anyone. Empty while the flow is hidden.
     pub nodes: Vec<Node<Recipe>>,
+    /// Each node's input token: what the vault holds for it, even when hidden.
+    pub inputs: Vec<Token>,
+    /// A hidden flow's fingerprints, one per node (see hidden.rs). Empty when open.
+    pub hidden: Vec<String>,
     pub ledger: Ledger,
+}
+
+impl FlowRec {
+    pub fn is_hidden(&self) -> bool {
+        !self.hidden.is_empty()
+    }
 }
 
 #[near(contract_state)]
@@ -244,14 +256,8 @@ impl Vault {
                 env::panic_str(&format!("untrusted: {why}"));
             }
         }
-        let rec = FlowRec { name, ledger: Ledger::new(nodes.len()), nodes };
-        if let Some(i) = self.flows.iter().position(Option::is_none) {
-            self.flows[i] = Some(rec);
-            return i as u32;
-        }
-        require!(self.flows.len() < MAX_FLOWS, "too many flows");
-        self.flows.push(Some(rec));
-        (self.flows.len() - 1) as u32
+        let rec = FlowRec { name, ledger: Ledger::new(nodes.len()), inputs: flow::inputs(&nodes), hidden: Vec::new(), nodes };
+        self.add_flow(rec)
     }
 
     /// Delete an empty flow.
@@ -259,7 +265,7 @@ impl Vault {
         self.assert_owner();
         self.assert_idle();
         let f = self.flow(flow_id);
-        require!(f.ledger.holdings(&f.nodes).is_empty(), "drain the flow first");
+        require!(f.ledger.holdings_inputs(&f.inputs).is_empty(), "drain the flow first");
         self.flows[flow_id as usize] = None;
     }
 
@@ -269,7 +275,7 @@ impl Vault {
         self.assert_owner();
         self.assert_idle();
         require!(amount.0 > 0, "nothing to fund");
-        let input = self.flow(flow_id).nodes.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).input.clone();
+        let input = self.flow(flow_id).inputs.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).clone();
         if input == NEAR {
             require!(amount.0 <= self.free_near(), "not enough free NEAR");
             self.credit(flow_id, node, amount.0);
@@ -287,7 +293,7 @@ impl Vault {
     #[private]
     pub fn on_fund_balance(&mut self, flow_id: u32, node: u16, amount: U128, #[callback_unwrap] balance: U128) {
         self.assert_idle();
-        let token = self.flow(flow_id).nodes[node as usize].input.clone();
+        let token = self.flow(flow_id).inputs[node as usize].clone();
         let free = balance.0.saturating_sub(self.allocated(&token));
         require!(amount.0 <= free, "not enough free balance");
         self.credit(flow_id, node, amount.0);
@@ -297,8 +303,7 @@ impl Vault {
     pub fn drain(&mut self, flow_id: u32) {
         self.assert_owner();
         let f = self.flow_mut(flow_id);
-        let rec = f;
-        if let Err(e) = rec.ledger.drain(&rec.nodes) {
+        if let Err(e) = f.ledger.drain_inputs(&f.inputs) {
             env::panic_str(&format!("{e:?}"));
         }
     }
@@ -319,8 +324,9 @@ impl Vault {
         let ctx = self.busy.clone().unwrap_or_else(|| env::panic_str("nothing running"));
         require!(env::block_timestamp() >= ctx.started_ns + STUCK_NS, "the step may still finish");
         self.busy = None;
+        let node = self.step_node(&ctx);
         let f = self.flow_mut(ctx.flow);
-        let _ = f.ledger.finish(&f.nodes, ctx.node, Err(0));
+        let _ = f.ledger.finish_node(&node, ctx.node, Err(0));
         f.ledger.pause(ctx.node).ok();
     }
 
@@ -427,15 +433,15 @@ impl Vault {
         require!(env::predecessor_account_id() == self.owner, "owner only");
     }
 
-    fn assert_idle(&self) {
+    pub(crate) fn assert_idle(&self) {
         require!(self.busy.is_none(), "a step is running");
     }
 
-    fn flow(&self, id: u32) -> &FlowRec {
+    pub(crate) fn flow(&self, id: u32) -> &FlowRec {
         self.flows.get(id as usize).and_then(Option::as_ref).unwrap_or_else(|| env::panic_str("no such flow"))
     }
 
-    fn flow_mut(&mut self, id: u32) -> &mut FlowRec {
+    pub(crate) fn flow_mut(&mut self, id: u32) -> &mut FlowRec {
         self.flows.get_mut(id as usize).and_then(Option::as_mut).unwrap_or_else(|| env::panic_str("no such flow"))
     }
 
@@ -473,16 +479,28 @@ impl Vault {
         n.action.price.as_ref().and_then(|p| method_ok(&p.contract, &p.method))
     }
 
+    pub(crate) fn add_flow(&mut self, rec: FlowRec) -> u32 {
+        if let Some(i) = self.flows.iter().position(Option::is_none) {
+            self.flows[i] = Some(rec);
+            return i as u32;
+        }
+        require!(self.flows.len() < MAX_FLOWS, "too many flows");
+        self.flows.push(Some(rec));
+        (self.flows.len() - 1) as u32
+    }
+
     fn credit(&mut self, flow_id: u32, node: u16, amount: u128) {
         let f = self.flow_mut(flow_id);
-        if let Err(e) = f.ledger.fund(&f.nodes, node, amount) {
+        // A hidden flow's routes aren't known, so its owner may fund any node.
+        let r = if f.is_hidden() { f.ledger.fund_node(&f.inputs[node as usize], node, amount) } else { f.ledger.fund(&f.nodes, node, amount) };
+        if let Err(e) = r {
             env::panic_str(&format!("{e:?}"));
         }
     }
 
     /// What all flows hold of `token`.
     pub(crate) fn allocated(&self, token: &str) -> u128 {
-        self.flows.iter().flatten().map(|f| f.ledger.holdings(&f.nodes).get(token).copied().unwrap_or(0)).sum()
+        self.flows.iter().flatten().map(|f| f.ledger.holdings_inputs(&f.inputs).get(token).copied().unwrap_or(0)).sum()
     }
 
     /// NEAR not held by flows, not needed for storage, minus a small reserve.

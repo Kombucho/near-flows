@@ -132,42 +132,59 @@ pub fn validate<A: Action>(nodes: &[Node<A>]) -> Result<(), Error> {
     if nodes.len() > MAX_NODES {
         return Err(Error::TooManyNodes);
     }
+    let inputs = inputs(nodes);
     for (i, n) in nodes.iter().enumerate() {
-        let i = i as u16;
-        if !n.action.accepts(&n.input) {
-            return Err(Error::BadInput(i));
-        }
-        if n.input == NO_INPUT && !matches!(n.when, Trigger::Every { .. } | Trigger::Manual) {
-            return Err(Error::BadTrigger(i)); // a collector runs on a schedule or by hand, never in a loop
-        }
-        match n.when {
-            Trigger::Every { every_ns, chunk } if every_ns < MIN_EVERY_NS || chunk == 0 => return Err(Error::BadTrigger(i)),
-            Trigger::PriceBelow { price } | Trigger::PriceAbove { price } if price == 0 => return Err(Error::BadTrigger(i)),
-            _ => {}
-        }
-        if n.next.len() > MAX_ROUTES {
-            return Err(Error::TooManyRoutes(i));
-        }
-        let out = n.action.output(&n.input);
-        if !n.next.is_empty() && out.is_none() {
-            return Err(Error::NothingToRoute(i));
-        }
-        let mut total = 0u32;
-        for r in &n.next {
-            if r.to <= i {
-                return Err(Error::RouteBackwards { from: i, to: r.to });
-            }
-            let target = nodes.get(r.to as usize).ok_or(Error::NoSuchNode(r.to))?;
-            if Some(&target.input) != out.as_ref() || target.input == NO_INPUT {
-                return Err(Error::RouteTokenMismatch { from: i, to: r.to });
-            }
-            total += r.bps as u32;
-        }
-        if total > BPS {
-            return Err(Error::RoutesOverfull(i));
-        }
+        validate_node(i as u16, n, &inputs)?;
     }
     Ok(())
+}
+
+/// Check one node against the flow's input tokens. A hidden flow's nodes are
+/// only known one at a time, when each is revealed to run, so this is all the
+/// shape checking a hidden node gets, and it's enough: routes go forward, to a
+/// node that takes exactly the token this one hands out.
+pub fn validate_node<A: Action>(i: u16, n: &Node<A>, inputs: &[Token]) -> Result<(), Error> {
+    if inputs.get(i as usize) != Some(&n.input) {
+        return Err(Error::BadInput(i));
+    }
+    if !n.action.accepts(&n.input) {
+        return Err(Error::BadInput(i));
+    }
+    if n.input == NO_INPUT && !matches!(n.when, Trigger::Every { .. } | Trigger::Manual) {
+        return Err(Error::BadTrigger(i)); // a collector runs on a schedule or by hand, never in a loop
+    }
+    match n.when {
+        Trigger::Every { every_ns, chunk } if every_ns < MIN_EVERY_NS || chunk == 0 => return Err(Error::BadTrigger(i)),
+        Trigger::PriceBelow { price } | Trigger::PriceAbove { price } if price == 0 => return Err(Error::BadTrigger(i)),
+        _ => {}
+    }
+    if n.next.len() > MAX_ROUTES {
+        return Err(Error::TooManyRoutes(i));
+    }
+    let out = n.action.output(&n.input);
+    if !n.next.is_empty() && out.is_none() {
+        return Err(Error::NothingToRoute(i));
+    }
+    let mut total = 0u32;
+    for r in &n.next {
+        if r.to <= i {
+            return Err(Error::RouteBackwards { from: i, to: r.to });
+        }
+        let target = inputs.get(r.to as usize).ok_or(Error::NoSuchNode(r.to))?;
+        if Some(target) != out.as_ref() || target == NO_INPUT {
+            return Err(Error::RouteTokenMismatch { from: i, to: r.to });
+        }
+        total += r.bps as u32;
+    }
+    if total > BPS {
+        return Err(Error::RoutesOverfull(i));
+    }
+    Ok(())
+}
+
+/// Each node's input token.
+pub fn inputs<A>(nodes: &[Node<A>]) -> Vec<Token> {
+    nodes.iter().map(|n| n.input.clone()).collect()
 }
 
 /// Nodes nothing routes into: where the owner puts money in.

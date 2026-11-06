@@ -354,3 +354,83 @@ async fn a_step_with_too_little_gas_is_refused_up_front_and_never_leaves_the_vau
     assert!(busy.is_none(), "the step finished (or closed itself) either way");
     Ok(())
 }
+
+const SALT0: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+const SALT1: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+async fn print(w: &World, node: &Value, salt: &str) -> anyhow::Result<String> {
+    Ok(w.vault.view("fingerprint_of").args_json(json!({"node": node, "salt": salt})).await?.json()?)
+}
+
+async fn step_hidden(w: &World, who: &Account, flow: u32, node: u16, reveal: &Value, salt: &str) -> anyhow::Result<ExecutionFinalResult> {
+    Ok(who.call(w.vault.id(), "step_hidden").args_json(json!({"flow_id": flow, "node": node, "reveal": reveal, "salt": salt})).max_gas().transact().await?)
+}
+
+#[tokio::test]
+async fn a_hidden_flow_shows_nothing_until_a_node_runs_and_can_switch_both_ways() -> anyhow::Result<()> {
+    let w = setup().await?;
+    // The plan: swap 100 wNEAR to USDC (at least 1.9 each), send it all on, swap back.
+    let n0 = json!({"input": w.wnear.id(), "action": swap(&w, &w.usdc, Some(19 * SCALE / 10)), "when": {"when": "now"}, "next": [{"to": 1, "bps": 10000}]});
+    let n1 = json!({"input": w.usdc.id(), "action": swap(&w, &w.wnear, None), "when": {"when": "now"}, "next": []});
+    let (p0, p1) = (print(&w, &n0, SALT0).await?, print(&w, &n1, SALT1).await?);
+    let f: u32 = w.alice.call(w.vault.id(), "save_hidden_flow")
+        .args_json(json!({"name": "", "inputs": [w.wnear.id(), w.usdc.id()], "fingerprints": [p0, p1]}))
+        .max_gas().transact().await?.into_result()?.json()?;
+    // A snooper reading the vault sees the tokens and fingerprints, not where they go or when.
+    let seen = flow_state(&w, f).await?.to_string();
+    assert!(!seen.contains(w.dex.id().as_str()) && !seen.contains("min_out") && !seen.contains("now"), "{seen}");
+    fund(&w, f, 0, 100 * ONE).await?.into_result()?;
+    // Wrong ways to run it: as an open flow, with the wrong salt, with a changed node, as a stranger.
+    assert!(step(&w, &w.keeper, f, 0).await?.is_failure());
+    assert!(step_hidden(&w, &w.keeper, f, 0, &n0, SALT1).await?.is_failure());
+    let mut greedy = n0.clone();
+    greedy["action"]["min_out_per_in"] = json!("1");
+    assert!(step_hidden(&w, &w.keeper, f, 0, &greedy, SALT0).await?.is_failure(), "a changed node doesn't match");
+    assert!(step_hidden(&w, &w.mallory, f, 0, &n0, SALT0).await?.is_failure());
+    // The keeper reveals node 0: it runs and routes its 200 USDC to node 1, still hidden.
+    let r = step_hidden(&w, &w.keeper, f, 0, &n0, SALT0).await?;
+    assert!(logs(&r).contains(r#""out":"200000000000000000000""#), "{}", logs(&r));
+    let s = flow_state(&w, f).await?;
+    assert_eq!(s["ledger"]["nodes"][1]["inbox"], (200 * ONE).to_string());
+    assert_eq!(s["nodes"], json!([]));
+    let alloc: String = w.vault.view("get_allocated").args_json(json!({"token": w.usdc.id()})).await?.json()?;
+    assert_eq!(alloc, (200 * ONE).to_string(), "a hidden flow's money is held, not free");
+    // Showing it: wrong salts refused; right ones show the real flow, which then runs openly.
+    let bad = w.alice.call(w.vault.id(), "reveal_flow").args_json(json!({"flow_id": f, "nodes": [n0, n1], "salts": [SALT1, SALT0]})).max_gas().transact().await?;
+    assert!(bad.is_failure());
+    w.alice.call(w.vault.id(), "reveal_flow").args_json(json!({"flow_id": f, "nodes": [n0, n1], "salts": [SALT0, SALT1]})).max_gas().transact().await?.into_result()?;
+    assert_eq!(flow_state(&w, f).await?["nodes"][1]["input"], json!(w.usdc.id()));
+    // Hiding it again (only the keeper's step_hidden runs it from now on).
+    w.alice.call(w.vault.id(), "hide_flow").args_json(json!({"flow_id": f, "fingerprints": [p0, p1]})).max_gas().transact().await?.into_result()?;
+    assert_eq!(flow_state(&w, f).await?["nodes"], json!([]));
+    assert!(step(&w, &w.keeper, f, 1).await?.is_failure());
+    assert!(logs(&step_hidden(&w, &w.keeper, f, 1, &n1, SALT1).await?).contains(r#""event":"step""#));
+    assert_eq!(balance(&w.wnear, w.vault.id()).await?, 1_000 * ONE, "100 wNEAR -> 200 USDC -> 100 wNEAR");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_hidden_node_is_checked_like_a_saved_one_when_it_runs() -> anyhow::Result<()> {
+    let w = setup().await?;
+    // The owner committed to nodes that would never pass save_flow: they're refused when revealed.
+    let wrong_route = json!({"input": w.wnear.id(), "action": swap(&w, &w.usdc, None), "when": {"when": "now"}, "next": [{"to": 1, "bps": 10000}]});
+    let steal = json!({"input": w.wnear.id(), "action": {"label": "steal", "calls": [{"call": "ft", "receiver": w.mallory.id(), "msg": "", "tgas": 20}],
+        "out": null, "min_out_per_in": null, "price": null}, "when": {"when": "now"}, "next": []});
+    let filler = json!({"input": w.wnear.id(), "action": swap(&w, &w.usdc, None), "when": {"when": "now"}, "next": []});
+    let prints = vec![print(&w, &wrong_route, SALT0).await?, print(&w, &steal, SALT1).await?];
+    let f: u32 = w.alice.call(w.vault.id(), "save_hidden_flow")
+        .args_json(json!({"name": "", "inputs": [w.wnear.id(), w.wnear.id()], "fingerprints": prints}))
+        .max_gas().transact().await?.into_result()?.json()?;
+    fund(&w, f, 0, 10 * ONE).await?.into_result()?;
+    fund(&w, f, 1, 10 * ONE).await?.into_result()?;
+    let r = step_hidden(&w, &w.keeper, f, 0, &wrong_route, SALT0).await?;
+    assert!(r.is_failure() && format!("{:?}", r.failures()).contains("RouteTokenMismatch"), "USDC can't flow into a wNEAR node");
+    let r = step_hidden(&w, &w.alice, f, 1, &steal, SALT1).await?;
+    assert!(r.is_failure() && format!("{:?}", r.failures()).contains("untrusted"), "tokens only go to trusted contracts");
+    // Untrusted input tokens are refused at save time, like any flow.
+    let r = w.alice.call(w.vault.id(), "save_hidden_flow")
+        .args_json(json!({"name": "", "inputs": [w.mallory.id()], "fingerprints": [print(&w, &filler, SALT0).await?]})).max_gas().transact().await?;
+    assert!(r.is_failure());
+    assert_eq!(balance(&w.wnear, w.vault.id()).await?, 1_000 * ONE, "nothing moved");
+    Ok(())
+}

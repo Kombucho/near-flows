@@ -12,7 +12,9 @@ use near_contract_standards::fungible_token::core::ext_ft_core;
 use near_sdk::json_types::U128;
 use near_sdk::{env, near, require, AccountId, Gas, GasWeight, NearToken, Promise};
 
-use crate::{Call, Deposit, Vault, VaultExt, NEAR, PRICE_SCALE};
+use flow::Node;
+
+use crate::{Call, Deposit, Recipe, Vault, VaultExt, NEAR, PRICE_SCALE};
 
 const GAS_VIEW: Gas = Gas::from_tgas(5);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
@@ -32,16 +34,35 @@ pub struct StepCtx {
     /// NEAR attached as the input by calls that succeeded.
     pub native_used: U128,
     pub failed: bool,
+    /// A hidden flow's node, as revealed to run this step.
+    pub revealed: Option<Node<Recipe>>,
 }
 
 #[near]
 impl Vault {
     /// Run node `node` of flow `flow_id`, if its trigger has fired. Owner or keeper.
     pub fn step(&mut self, flow_id: u32, node: u16) -> Promise {
+        require!(!self.flow(flow_id).is_hidden(), "a hidden flow runs with step_hidden");
+        let n = self.flow(flow_id).nodes.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).clone();
+        self.begin_step(flow_id, node, n, false)
+    }
+
+    #[private]
+    pub fn on_price(&mut self, flow_id: u32, node: u16, by_owner: bool, per: U128, revealed: Option<Node<Recipe>>) -> Promise {
+        let raw = result(0).unwrap_or_else(|| env::panic_str("price source failed"));
+        let amount: U128 = near_sdk::serde_json::from_slice(&raw).unwrap_or_else(|_| env::panic_str("price source returned no amount"));
+        require!(per.0 > 0, "bad price source");
+        let price = crate::mul_div(amount.0, PRICE_SCALE, per.0);
+        self.start(flow_id, node, Some(price), by_owner, revealed)
+    }
+}
+
+impl Vault {
+    /// Run node `n` (stored, or `hidden`: revealed by the caller and already checked).
+    pub(crate) fn begin_step(&mut self, flow_id: u32, node: u16, n: Node<Recipe>, hidden: bool) -> Promise {
         let by_owner = env::predecessor_account_id() == self.owner;
         require!(by_owner || Some(env::predecessor_account_id()) == self.keeper, "owner or keeper only");
         require!(self.busy.is_none(), "a step is running");
-        let n = self.flow(flow_id).nodes.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).clone();
         // Refuse up front if the caller attached too little gas: a step that runs out
         // halfway would leave the vault busy (found on testnet).
         let need: u64 = n.action.calls.iter().map(|c| match c { Call::Ft { tgas, .. } | Call::Fn { tgas, .. } => *tgas + PER_CALL_OVERHEAD_TGAS }).sum::<u64>() + STEP_OVERHEAD_TGAS;
@@ -54,20 +75,14 @@ impl Vault {
             let src = n.action.price.clone().unwrap_or_else(|| env::panic_str("price trigger without a price source"));
             return Promise::new(src.contract)
                 .function_call_weight(src.method, src.args.into_bytes(), NearToken::from_yoctonear(0), GAS_VIEW, GasWeight(0))
-                .then(self.cb().on_price(flow_id, node, by_owner, src.per));
+                .then(self.cb().on_price(flow_id, node, by_owner, src.per, hidden.then_some(n)));
         }
-        self.start(flow_id, node, None, by_owner)
+        self.start(flow_id, node, None, by_owner, hidden.then_some(n))
     }
+}
 
-    #[private]
-    pub fn on_price(&mut self, flow_id: u32, node: u16, by_owner: bool, per: U128) -> Promise {
-        let raw = result(0).unwrap_or_else(|| env::panic_str("price source failed"));
-        let amount: U128 = near_sdk::serde_json::from_slice(&raw).unwrap_or_else(|_| env::panic_str("price source returned no amount"));
-        require!(per.0 > 0, "bad price source");
-        let price = crate::mul_div(amount.0, PRICE_SCALE, per.0);
-        self.start(flow_id, node, Some(price), by_owner)
-    }
-
+#[near]
+impl Vault {
     #[private]
     pub fn on_measured(&mut self, before: bool) -> Promise {
         let mut ctx = self.busy.clone().unwrap_or_else(|| env::panic_str("no step"));
@@ -97,7 +112,7 @@ impl Vault {
         let left = ctx.amount.0 - in_used;
         // A call can "succeed" without doing anything: a token transfer whose receiver
         // refused it (e.g. a swap below its minimum) just refunds. Nothing spent = failed.
-        let collector = self.flow(ctx.flow).nodes[ctx.node as usize].input == flow::NO_INPUT;
+        let collector = self.step_node(&ctx).input == flow::NO_INPUT;
         if ctx.failed || (in_used == 0 && !collector) {
             self.end(Err(left), out_amount, false)
         } else {
@@ -144,12 +159,13 @@ impl Vault {
         Self::ext(env::current_account_id()).with_static_gas(GAS_CALLBACK).with_unused_gas_weight(1)
     }
 
-    fn start(&mut self, flow_id: u32, node: u16, price: Option<u128>, by_owner: bool) -> Promise {
+    fn start(&mut self, flow_id: u32, node: u16, price: Option<u128>, by_owner: bool, revealed: Option<Node<Recipe>>) -> Promise {
         require!(self.busy.is_none(), "a step is running");
         let now = env::block_timestamp();
         let f = self.flow_mut(flow_id);
-        let amount = f.ledger.begin(&f.nodes, node, now, price, by_owner).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
-        let input = f.nodes[node as usize].input.clone();
+        let n = revealed.as_ref().unwrap_or_else(|| &f.nodes[node as usize]);
+        let amount = f.ledger.begin_node(n, node, now, price, by_owner).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
+        let input = n.input.clone();
         self.charge(&input, amount);
         self.busy = Some(StepCtx {
             flow: flow_id,
@@ -160,19 +176,25 @@ impl Vault {
             out_before: None,
             native_used: U128(0),
             failed: false,
+            revealed,
         });
         self.measure(true)
     }
 
+    /// The node a step is running: revealed for it (hidden flow) or stored.
+    pub(crate) fn step_node(&self, ctx: &StepCtx) -> Node<Recipe> {
+        ctx.revealed.clone().unwrap_or_else(|| self.flow(ctx.flow).nodes[ctx.node as usize].clone())
+    }
+
     /// (input token if it's a token, output token if any)
     fn tokens(&self, ctx: &StepCtx) -> (Option<AccountId>, Option<AccountId>) {
-        let n = &self.flow(ctx.flow).nodes[ctx.node as usize];
+        let n = &self.step_node(ctx);
         let input = if n.input == NEAR || n.input == flow::NO_INPUT { None } else { n.input.parse().ok() };
         (input, n.action.out.clone())
     }
 
     fn recipe_calls(&self, ctx: &StepCtx) -> Vec<Call> {
-        self.flow(ctx.flow).nodes[ctx.node as usize].action.calls.clone()
+        self.step_node(ctx).action.calls
     }
 
     /// Read the vault's balances of the step's tokens, then continue in `on_measured`.
@@ -195,7 +217,7 @@ impl Vault {
 
     fn run_call(&mut self, i: u8) -> Promise {
         let mut ctx = self.busy.clone().unwrap();
-        let node = self.flow(ctx.flow).nodes[ctx.node as usize].clone();
+        let node = self.step_node(&ctx);
         // Not enough gas left to launch this call and come back: close the step as
         // failed (measuring what moved) rather than leave the vault stuck.
         let tgas = match &node.action.calls[i as usize] { Call::Ft { tgas, .. } | Call::Fn { tgas, .. } => *tgas };
@@ -244,13 +266,14 @@ impl Vault {
     /// `extra` is the input used (success) or stray output (failure), for the event.
     fn end(&mut self, result: Result<u128, u128>, extra: u128, ok: bool) -> Promise {
         let ctx = self.busy.take().unwrap();
+        let node = self.step_node(&ctx);
         let (min, promises_output) = {
-            let n = &self.flow(ctx.flow).nodes[ctx.node as usize];
+            let n = &node;
             // A collector finding nothing yet is normal; only spenders must get something back.
             (n.action.min_out_per_in.map_or(0, |m| crate::mul_div(extra, m.0, PRICE_SCALE)), n.action.out.is_some() && n.input != flow::NO_INPUT)
         };
         let f = self.flow_mut(ctx.flow);
-        f.ledger.finish(&f.nodes, ctx.node, result).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
+        f.ledger.finish_node(&node, ctx.node, result).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
         let mut paused = false;
         if let Ok(out) = result {
             // Less than its minimum, or nothing at all when it promised an output
