@@ -1,16 +1,17 @@
 // Stealth vaults, off chain: the owner signs commands with a key, the keeper relays them.
 //
-// A stealth vault (contracts/vault/src/stealth.rs) is owned by an Ed25519 key, not
-// an account. The owner signs a command here, any account sends it to the vault's
-// `exec` and pays the gas, and the vault checks the signature itself. The owner's
-// wallet never touches the vault.
+// A stealth vault is owned by an Ed25519 key, not an account. The owner signs a
+// command here, any account sends it to the vault's `exec` door and pays the gas,
+// and the brain checks the signature (contracts/brain/src/stealth.rs). The owner's
+// wallet never touches the vault. The relay vault's `exec` takes the same args the
+// full vault did, so only the gas changed (see execTgas).
 //
 // The key lives in a keypair file in near-cli's format
 // ({"public_key": "ed25519:...", "private_key": "ed25519:..."}). Keep it apart from
 // your wallet: a key that ever signed for your wallet links you.
 //
 // The signed bytes are spelled out in `message` and pinned by stealth.test.ts to the
-// same vector the vault's own test pins (contracts/vault/src/stealth.rs).
+// same vector the brain's own test pins (contracts/brain/src/stealth.rs).
 
 import { createPrivateKey, createPublicKey, sign as edSign, randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -18,6 +19,21 @@ import { Account, baseDecode, baseEncode } from "near-api-js";
 
 export type Command = { method: string; args: Record<string, unknown> | string; tgas?: number };
 export type Signed = { method: string; args: string; nonce: string; expires_ns: string; tgas: number; signature: string };
+
+/** What the relay gives the brain's first round (relay GAS_HANDLE). */
+export const HANDLE_TGAS = 100;
+/** The signed gas for a `step`: the brain reads the trigger price, the market floor and the
+ *  balances in this round; the recipe's own rounds come out of what's left (gas_mainnet.rs:
+ *  a 50 Tgas swap with a market floor fits in 300 with 80 signed; 60 ran out). */
+export const STEP_TGAS = 80;
+
+/** Gas to attach to `exec`: the brain refuses unless its round has the signed gas + 10 left
+ *  after HANDLE_TGAS; 5 more covers the relay's own work. Never over mainnet's 300 cap. */
+export function execTgas(tgas: number): number {
+  const need = tgas + 10 + HANDLE_TGAS + 5;
+  if (need > 300) throw new Error(`a command signed for ${tgas} Tgas needs ${need} Tgas: mainnet allows 300, sign for at most ${300 - 115}`);
+  return need;
+}
 
 /** The exact text the owner signs. Must match stealth::message in the vault, byte for byte. */
 export function message(vault: string, nonce: bigint, expiresNs: bigint, tgas: number, method: string, args: string): string {
@@ -67,5 +83,8 @@ export class OwnerKey {
 
 /** Send a signed command from `relayer` (it pays the gas). Returns what the command returned. */
 export async function relay<T>(relayer: Account, vault: string, s: Signed): Promise<T> {
-  return relayer.callFunction<any>({ contractId: vault, methodName: "exec", args: s, gas: BigInt(s.tgas + 15) * 10n ** 12n }) as Promise<T>;
+  execTgas(s.tgas); // refuse up front what can never fit
+  // Always the full 300: a signed `step` runs its recipe's rounds on what's left after
+  // the signed gas, and unused gas is refunded to the relayer anyway.
+  return relayer.callFunction<any>({ contractId: vault, methodName: "exec", args: s, gas: 300n * 10n ** 12n }) as Promise<T>;
 }

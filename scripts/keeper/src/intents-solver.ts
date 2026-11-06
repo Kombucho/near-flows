@@ -30,7 +30,7 @@ const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const b58 = (b: Buffer) => { let n = BigInt("0x" + (b.toString("hex") || "0")), s = ""; while (n > 0n) { s = B58[Number(n % 58n)] + s; n /= 58n; } for (const x of b) { if (x) break; s = "1" + s; } return s; };
 const logsOf = (r: any): string[] => (r?.receipts_outcome ?? []).flatMap((x: any) => x.outcome.logs);
 
-const cfg = await chain.view<{ verifier: string }>(o.vault, "get_intents");
+const cfg = await chain.brainView<{ verifier: string }>(await chain.brainOf(o.vault), o.vault, "get_intents");
 const verifier = cfg.verifier;
 
 // The solver's own Ed25519 key on Intents (made once, registered once).
@@ -50,7 +50,7 @@ if (!known.includes(pubStr)) {
 }
 
 // 1. The vault signs its own intent.
-const r1: any = await chain.callRaw(o.vault, "intents_sign_swap", { token_in: o.in, token_out: o.out, amount_in: o.amount, min_out: "0", valid_secs: 600 }, 300n * TGAS);
+const r1: any = await chain.vaultCallRaw(o.vault, "intents_sign_swap", { token_in: o.in, token_out: o.out, amount_in: o.amount, min_out: "0", valid_secs: 600 });
 const ev = logsOf(r1).find((l) => l.includes('"intents_signed"'));
 if (!ev) throw new Error(`the vault didn't sign: ${logsOf(r1).join(" | ").slice(0, 300)}`);
 const vaultSigned = JSON.parse(ev.slice("EVENT_JSON:".length)).data[0].signed;

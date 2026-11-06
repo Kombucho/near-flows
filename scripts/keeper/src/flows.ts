@@ -15,12 +15,21 @@ export type Trigger =
   | { when: "manual" };
 
 export type PriceSource = { contract: string; method: string; args: string; per: string };
-export type FlowNode = { input: string; when: Trigger; action: { label: string; price: PriceSource | null } };
+/** `remote`: a node on another chain (run with step_remote; its price trigger reads the vault's oracle). */
+export type FlowNode = { input: string; when: Trigger; action: { label: string; price: PriceSource | null; remote?: unknown | null } };
 export type NodeState = { inbox: string; running: string; runs: number; last_run_ns: number; failures: number };
-/** As the vault returns it. A hidden flow has no `nodes`, only `hidden` fingerprints. */
+/** As the brain returns it. A hidden flow has no `nodes`, only `hidden` fingerprints. */
 export type Flow = { name: string; nodes: FlowNode[]; inputs?: string[]; hidden?: string[]; ledger: { nodes: NodeState[]; busy: number | null } };
+/** A relay vault's record in the brain (get_vault): flow ids are positions, deleted flows are null. */
+export type VaultState = { owner: string; keeper: string | null; busy: unknown | null; flows: (Flow | null)[] };
 
-export type Due = { flow: number; node: number; label: string; price?: { source: PriceSource; below?: bigint; above?: bigint } };
+export type Due = { flow: number; node: number; label: string; remote?: boolean; price?: { source: PriceSource; below?: bigint; above?: bigint } };
+
+/** The flows a keeper may run in a vault: only if it is the vault's keeper and no step is running. */
+export function runnable(v: VaultState | null, keeperId: string): [number, Flow][] {
+  if (!v || v.keeper !== keeperId || v.busy !== null) return [];
+  return v.flows.flatMap((f, id): [number, Flow][] => (f ? [[id, f]] : []));
+}
 
 /** Steps that may run at `nowNs`. Price-triggered ones come back with what to check. */
 export function due(flows: [number, Flow][], nowNs: bigint): Due[] {
@@ -34,7 +43,7 @@ export function due(flows: [number, Flow][], nowNs: bigint): Due[] {
       if (!collector && BigInt(s.inbox) === 0n) return; // nothing to spend
       const last = BigInt(s.last_run_ns);
       const w = n.when;
-      const base = { flow: id, node: i, label: n.action.label };
+      const base: Due = n.action.remote ? { flow: id, node: i, label: n.action.label, remote: true } : { flow: id, node: i, label: n.action.label };
       switch (w.when) {
         case "manual":
           return; // only the owner runs these
@@ -52,6 +61,8 @@ export function due(flows: [number, Flow][], nowNs: bigint): Due[] {
         }
         case "price_below":
         case "price_above":
+          // A remote node's trigger is the vault's own oracle feed: the brain reads it.
+          if (n.action.remote) return void out.push(base);
           if (!n.action.price) return; // the vault would refuse it anyway
           out.push({ ...base, price: { source: n.action.price, [w.when === "price_below" ? "below" : "above"]: BigInt(w.price) } });
           return;

@@ -37,7 +37,7 @@ const jup = process.env.JUPITER_API ?? "https://api.jup.ag/swap/v1";
 const solRpc = process.env.SOLANA_RPC ?? "https://api.mainnet-beta.solana.com";
 const b64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
 
-const sol = await chain.view<{ address: string | null }>(o.vault, "get_sol");
+const sol = await chain.brainView<{ address: string | null }>(await chain.brainOf(o.vault), o.vault, "get_sol");
 if (!sol?.address) throw new Error("the vault has no Solana address yet (owner: sol_setup)");
 console.log(`vault Solana address ${sol.address}`);
 
@@ -53,7 +53,7 @@ const swap = await (await fetch(`${jup}/swap`, {
 if (!swap.swapTransaction) throw new Error(`no transaction: ${JSON.stringify(swap).slice(0, 200)}`);
 const message = messageOf(Buffer.from(swap.swapTransaction, "base64"));
 
-const r: any = await chain.callRaw(o.vault, "sol_sign_swap", { message: b64(message) }, 300n * 10n ** 12n);
+const r: any = await chain.vaultCallRaw(o.vault, "sol_sign_swap", { message: b64(message) });
 const logs: string[] = (r?.receipts_outcome ?? []).flatMap((x: any) => x.outcome.logs);
 const signed = logs.find((l) => l.includes('"sol_signed"'));
 if (!signed) throw new Error(`not signed: ${logs.join(" | ").slice(0, 400)}`);

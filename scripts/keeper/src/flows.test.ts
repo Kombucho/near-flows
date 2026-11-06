@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { due, fired, priceOf, type Flow, type FlowNode, type NodeState } from "./flows.ts";
+import { due, fired, priceOf, runnable, type Flow, type FlowNode, type NodeState, type VaultState } from "./flows.ts";
 
 const MIN = 60_000_000_000;
 const node = (when: FlowNode["when"], input = "wrap.testnet", price: FlowNode["action"]["price"] = null): FlowNode => ({ input, when, action: { label: "x", price } });
@@ -44,4 +44,23 @@ test("price triggers: checked with a free view before sending anything", () => {
   assert.equal(fired(d, priceOf((3n * 10n ** 24n).toString(), src.per)), true);
   const g = flow([node({ when: "price_below", price: "100" })], [st("5")]);
   assert.equal(due([[0, g]], 0n).length, 0, "no price source: the vault would refuse, so don't try");
+});
+
+test("a relay vault's flows come from its brain record: ids are positions, deleted flows skipped", () => {
+  const f = flow([node({ when: "now" })], [st("10")]);
+  const v: VaultState = { owner: "alice.near", keeper: "k.near", busy: null, flows: [f, null, f] };
+  assert.deepEqual(runnable(v, "k.near").map(([id]) => id), [0, 2]);
+});
+
+test("a vault with another keeper, a step in flight or no record gives the keeper nothing", () => {
+  const f = flow([node({ when: "now" })], [st("10")]);
+  assert.equal(runnable({ owner: "a", keeper: "other.near", busy: null, flows: [f] }, "k.near").length, 0);
+  assert.equal(runnable({ owner: "a", keeper: "k.near", busy: { id: 3 }, flows: [f] }, "k.near").length, 0);
+  assert.equal(runnable(null, "k.near").length, 0);
+});
+
+test("remote nodes come back marked, oracle triggers included, for the chain's runner", () => {
+  const remote = (when: FlowNode["when"]): FlowNode => ({ input: "evm:4663:eth", when, action: { label: "r", price: null, remote: { out: "evm:4663:nvda" } } });
+  const f = flow([remote({ when: "now" }), remote({ when: "price_above", price: "1" })], [st("5"), st("5")]);
+  assert.deepEqual(due([[0, f]], 0n).map((d) => [d.node, d.remote, d.price]), [[0, true, undefined], [1, true, undefined]]);
 });
