@@ -13,7 +13,11 @@
 //! Who can do what:
 //! - The owner: save, fund, run, stop and delete flows; withdraw; pick a keeper.
 //! - The keeper: run a step whose trigger has fired. Nothing else.
-//! - Money leaves the vault only through the owner's own recipes or to the owner.
+//! - Money leaves the vault only through the owner's own recipes, or to the owner
+//!   (or wherever the owner says: `withdraw_to`).
+//!
+//! A vault's owner is an account (a named vault) or a key (a stealth vault,
+//! stealth.rs: the owner signs commands off chain, anyone relays them).
 //!
 //! Balances are never kept in a separate ledger that could drift: the vault's
 //! free balance of a token is what it really holds, minus what its flows hold.
@@ -32,6 +36,7 @@ pub mod sol;
 #[cfg(feature = "sol")]
 pub mod soltemplates;
 mod step;
+pub mod stealth;
 #[cfg(test)]
 mod tests;
 
