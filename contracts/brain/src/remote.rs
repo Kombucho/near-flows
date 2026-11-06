@@ -1,4 +1,4 @@
-//! Remote nodes, as vault/src/remote.rs: a flow node whose action is a
+//! Remote nodes: a flow node whose action is a
 //! transaction on another chain (an EVM template, a Solana template).
 //!
 //! The brain decides everything the vault decided: the trigger (block clock,
@@ -391,7 +391,7 @@ fn trigger_price(p: &FeedPrice, prices: &[(String, u128)]) -> u128 {
     }
 }
 
-// The vault's own tests (vault/src/remote.rs), unchanged.
+// The full vault's tests, carried over unchanged when it was removed.
 #[cfg(test)]
 mod tests {
     use super::*;

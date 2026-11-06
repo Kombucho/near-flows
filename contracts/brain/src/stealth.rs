@@ -1,4 +1,4 @@
-//! Stealth vaults, as vault/src/stealth.rs: the owner is an Ed25519 KEY. The
+//! Stealth vaults: the owner is an Ed25519 KEY. The
 //! owner signs commands off chain; anyone (normally the keeper) submits them
 //! to the vault's `exec` door; the brain checks the signature and runs the
 //! command as the owner. A stealth vault is its own owner (`owner` = the

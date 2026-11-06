@@ -5,8 +5,9 @@
 //! knows which vault is talking: the predecessor. A vault only ever touches
 //! its own record.
 //!
-//! WHY: the full vault is ~640 KB, ~64 NEAR to publish per version. The body is
-//! ~10 KB (~1 NEAR); the brain is deployed normally (storage staked, refundable).
+//! WHY: the old full vault (one ~640 KB contract per user, removed 2026-11) cost
+//! ~64 NEAR to publish per version. The body is ~10 KB (~1 NEAR); the brain is
+//! deployed normally (storage staked, refundable).
 //!
 //! Three ways in, each with its own proof of who's talking:
 //! - `handle`: a request the vault forwards (relay `x`, a named door, `new`).
@@ -20,15 +21,15 @@
 //!   decides in this private callback; its answer becomes the value the vault's
 //!   `cb` receives. One relay round less per read. #[private]: only the brain.
 //!
-//! # Porting status
+//! # What the brain does
 //!
-//! Everything the full vault does, with the same request names and arguments
-//! as the vault's methods (apps and keepers change only the door: `x` with
-//! `{"<method>": <args>}`; stealth relayers call `exec` unchanged):
+//! Everything the old full vault did, with the same request names and arguments
+//! its methods had (apps and keepers call the relay's `x` door with
+//! `{"<method>": <args>}`; stealth relayers call `exec`):
 //! - core: trust, save/delete/fund/drain/resume/unstick, step, withdraw,
 //!   withdraw_to, set_keeper, act.
-//! - limits, hidden (fingerprints byte-identical to the vault's pins, remote
-//!   nodes included), stealth (same signed text), intents.
+//! - limits, hidden (fingerprints pinned with the keeper's, remote nodes
+//!   included), stealth (same signed text as the keeper's), intents.
 //! - oracle: market floors on recipes, EVM leaves, Solana pairs and Intents
 //!   pairs; Pyth / priceboard reads issued by the brain itself.
 //! - evm: templates and rule trees, built and checked here, signed by the
@@ -37,7 +38,7 @@
 //!   co-sign), signed by the vault's `sign`.
 //! - remote: flow nodes on other chains, keeper-reported outputs capped and floored.
 //!
-//! What can't port as is:
+//! What differs from the old full vault:
 //! - The vault's synchronous state: balance and storage are a snapshot in the
 //!   header. A race with another receipt only makes the vault's transfer fail,
 //!   never the brain's books.
@@ -138,7 +139,7 @@ pub enum Deposit {
     Fixed { yocto: U128 },
 }
 
-/// One contract call in a recipe (same as the vault's; see vault/src/lib.rs).
+/// One contract call in a recipe.
 #[near(serializers = [borsh, json])]
 #[serde(tag = "call", rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq)]

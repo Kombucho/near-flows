@@ -1,4 +1,4 @@
-//! Hidden flows, as vault/src/hidden.rs: the brain stores only each node's
+//! Hidden flows: the brain stores only each node's
 //! input token and a fingerprint sha256(salt || borsh(node)); a node is
 //! revealed only when it runs (`step_hidden`). The fingerprint is byte-identical
 //! to the vault's (same Recipe borsh, pinned vector below), so the keeper's

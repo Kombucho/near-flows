@@ -1,4 +1,4 @@
-//! EVM chains through NEAR Chain Signatures, as vault/src/evm.rs: the brain
+//! EVM chains through NEAR Chain Signatures: the brain
 //! BUILDS every transaction from a template the owner set (rule trees over the
 //! ABI: fixed / vault / at_most / floor / market / same / bytes / encoded /
 //! tuple / list), applies caps, floors and market minimums, counts spending,

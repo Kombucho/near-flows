@@ -1,4 +1,4 @@
-//! Market prices, as vault/src/oracle.rs: a swap's minimum follows the market,
+//! Market prices: a swap's minimum follows the market,
 //!     max(keeper's quote, owner's hard floor, oracle price x (1 - slippage)).
 //! Every feed must be fresh, tight (confidence) and confirmed by its backup
 //! (Pyth's EMA, or another Pyth-compatible contract such as a priceboard).
