@@ -245,3 +245,60 @@ async fn the_keeper_is_paid_its_price_only_for_runs_it_did_that_worked() -> anyh
     assert_eq!((with_fee, without), (CENTI as i128 + 1, 1));
     Ok(())
 }
+
+/// Withdraw the vault's free NEAR down to under 0.001 NEAR (the 0.05 reserve and storage stay).
+async fn drain_near(w: &RelayWorld) -> anyhow::Result<()> {
+    let mut free = near_of(w, &w.vault).await? - NEAR / 20;
+    let mut r = x(&w.alice, &w.vault, "withdraw", json!({"token": "near", "amount": free.to_string()})).await?;
+    while r.is_failure() && free > CENTI / 10 {
+        free -= CENTI / 10;
+        r = x(&w.alice, &w.vault, "withdraw", json!({"token": "near", "amount": free.to_string()})).await?;
+    }
+    assert!(r.is_success(), "withdrew {free}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_vault_that_cant_pay_its_keeper_gets_no_free_work() -> anyhow::Result<()> {
+    let m = world().await?;
+    let w = &m.w;
+    x(&w.alice, &w.vault, "set_keeper", json!({"keeper": w.keeper.id(), "keeper_fee": CENTI.to_string()})).await?.into_result()?;
+    let f: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "s", "nodes": [swap(&m, "now")]})).await?.json()?;
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": (10 * ONE).to_string()})).await?.into_result()?;
+    drain_near(w).await?;
+
+    // The keeper's step is refused before anything moves: same NEAR, same tokens, same record, not busy.
+    let record = || async { anyhow::Ok(w.brain.view("get_vault").args_json(json!({"vault": w.vault})).await?.json::<Value>()?) };
+    let (near0, wnear0, usdc0, rec0) = (near_of(w, &w.vault).await?, bal(&m.wnear, &w.vault).await?, bal(&m.usdc, &w.vault).await?, record().await?);
+    let r = x(&w.keeper, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
+    assert!(fails_with(&r, "keeper fee unpaid") && fails_with(&r, "run your own keeper for free: https://github.com/Kombucho/near-flows (AGENTS.md)"), "{:?}", r.failures());
+    assert!(!r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?}", r.logs());
+    assert_eq!((near_of(w, &w.vault).await?, bal(&m.wnear, &w.vault).await?, bal(&m.usdc, &w.vault).await?), (near0, wnear0, usdc0), "funds untouched");
+    let rec = record().await?;
+    assert_eq!(rec, rec0, "ledger untouched");
+    assert!(rec["busy"].is_null(), "not left busy");
+
+    // The owner can still run it, keeper fee or not.
+    let r = x(&w.alice, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)) && fee_events(&r, "keeper").is_empty(), "{:?} {:?}", r.logs(), r.failures());
+    assert_eq!(bal(&m.usdc, &w.vault).await?, usdc0 + 20 * ONE);
+
+    // Your own keeper at fee 0 runs the drained vault as before.
+    x(&w.alice, &w.vault, "set_keeper", json!({"keeper": w.keeper.id()})).await?.into_result()?;
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": (10 * ONE).to_string()})).await?.into_result()?;
+    let r = x(&w.keeper, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)) && fee_events(&r, "keeper").is_empty(), "{:?} {:?}", r.logs(), r.failures());
+
+    // Topped up: the keeper's run pays exactly its price (+1 yocto: the swap's ft_transfer_call).
+    x(&w.alice, &w.vault, "set_keeper", json!({"keeper": w.keeper.id(), "keeper_fee": CENTI.to_string()})).await?.into_result()?;
+    w.alice.transfer_near(&w.vault, NearToken::from_near(1)).await?.into_result()?;
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": (10 * ONE).to_string()})).await?.into_result()?;
+    let before = near_of(w, &w.vault).await?;
+    let r = x(&w.keeper, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
+    let ev = fee_events(&r, "keeper");
+    assert_eq!(ev.len(), 1, "{:?} {:?}", r.logs(), r.failures());
+    assert_eq!(ev[0]["fee"], json!(CENTI.to_string()));
+    assert_eq!(before - near_of(w, &w.vault).await?, CENTI + 1, "the vault paid exactly the price");
+    println!("FEE keeper unpaid: refused up front, record and funds untouched; topped up, paid exactly {CENTI}");
+    Ok(())
+}
