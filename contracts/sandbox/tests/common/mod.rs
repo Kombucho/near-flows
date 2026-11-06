@@ -114,8 +114,16 @@ impl SolFork {
             println!("SKIPPED: install surfpool to run Solana fork tests");
             return None;
         }
+        // A private RPC (SURFPOOL_DATASOURCE_RPC_URL) avoids the public one's rate limits. surfpool
+        // won't take it together with --network, and it carries an API key, so it's never printed.
+        let source = match std::env::var("SURFPOOL_DATASOURCE_RPC_URL") {
+            Ok(url) if !url.is_empty() => vec!["--rpc-url".to_string(), url],
+            _ => vec!["--network".to_string(), "mainnet".to_string()],
+        };
         let child = Command::new(&bin)
-            .args(["start", "--network", "mainnet", "--port", &port.to_string(), "--ws-port", &(port + 1).to_string(), "--no-tui", "--no-studio", "--no-deploy", "--skip-blockhash-check", "-y"])
+            .arg("start")
+            .args(&source)
+            .args(["--port", &port.to_string(), "--ws-port", &(port + 1).to_string(), "--no-tui", "--no-studio", "--no-deploy", "--skip-blockhash-check", "-y"])
             .stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()?;
         let f = SolFork { child, rpc: format!("http://127.0.0.1:{port}") };
         for _ in 0..120 {

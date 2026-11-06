@@ -37,7 +37,7 @@ fn pump_buy(mint: &str, max_lamports: u64, floor_per_lamport: u64) -> Value {
 
 #[tokio::test]
 async fn the_vault_buys_a_pump_fun_coin_on_a_solana_fork() -> anyhow::Result<()> {
-    let Some(fork) = SolFork::start(8990).await else { return Ok(()) };
+    let Some(fork) = SolFork::start(9100).await else { return Ok(()) };
     let mint = std::env::var("PUMP_MINT").unwrap_or_else(|_| "GDFVPqix6jYh4xvr1CBx14JWUaLMTvAT2rYA9FyApump".into());
 
     let worker = near_workspaces::sandbox().await?;
