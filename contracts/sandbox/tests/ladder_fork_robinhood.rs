@@ -16,21 +16,6 @@ use ladder::*;
 use serde_json::{json, Value};
 
 const PORT: u16 = 9200;
-const V4_QUOTER: &str = "0x8dc178efb8111bb0973dd9d722ebeff267c98f94";
-const ETH: &str = "0x0000000000000000000000000000000000000000";
-
-/// Broadcast; returns (status, gas paid in wei).
-fn send(fork: &Fork, raw: &str) -> (u64, u128) {
-    let hash: String = serde_json::from_str(&fork.cast(&["rpc", "eth_sendRawTransaction", raw])).unwrap();
-    let r: Value = serde_json::from_str(&fork.cast(&["receipt", &hash, "--json"])).unwrap();
-    let hex = |k: &str| u128::from_str_radix(r[k].as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
-    (hex("status") as u64, hex("gasUsed") * hex("effectiveGasPrice"))
-}
-
-fn v4_quote(fork: &Fork, zero_for_one: bool, amount: u128) -> u128 {
-    num(&fork.cast(&["call", V4_QUOTER, "quoteExactInputSingle(((address,address,uint24,int24,address),bool,uint128,bytes))(uint256,uint256)",
-        &format!("(({ETH},{NVDA},10000,200,{ETH}),{zero_for_one},{amount},0x)")]))
-}
 
 #[tokio::test]
 async fn a_nvda_take_profit_ladder_walks_up_on_a_robinhood_fork_into_the_ethnvda_basket() -> anyhow::Result<()> {

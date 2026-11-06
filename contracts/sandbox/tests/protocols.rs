@@ -2,25 +2,20 @@
 //! deployed on testnet (fetched by scripts/fetch-protocols.sh), running in a
 //! local NEAR node. Build our wasm first: make build
 
+mod common;
+mod rhea;
+
+use common::{protocol as theirs, wasm as ours};
 use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::types::NearToken;
-use near_workspaces::{Account, AccountId, Contract, Worker};
+use near_workspaces::{Account, Contract, Worker};
+use rhea::{balance, register, Rhea};
 use serde_json::{json, Value};
 
 const ONE: u128 = 1_000_000_000_000_000_000; // 1 USDC in the mock (18 decimals)
 const NEAR: u128 = 1_000_000_000_000_000_000_000_000;
 const SCALE: u128 = NEAR; // prices are scaled 1e24
-
-fn ours(name: &str) -> Vec<u8> {
-    let path = format!("{}/../target/near/{name}/{name}.wasm", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read(&path).unwrap_or_else(|_| panic!("missing {path}: run `make build` first"))
-}
-
-fn theirs(id: &str) -> Vec<u8> {
-    let path = format!("{}/protocols/{id}.wasm", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read(&path).unwrap_or_else(|_| panic!("missing {path}: run scripts/fetch-protocols.sh first"))
-}
 
 struct World {
     worker: Worker<Sandbox>,
@@ -35,17 +30,6 @@ struct World {
     pool: u64,
 }
 
-async fn register(payer: &Account, token: &AccountId, who: &AccountId) -> anyhow::Result<()> {
-    payer.call(token, "storage_deposit").args_json(json!({"account_id": who, "registration_only": true}))
-        .deposit(NearToken::from_millinear(10)).transact().await?.into_result()?;
-    Ok(())
-}
-
-async fn balance(token: &Contract, who: &AccountId) -> anyhow::Result<u128> {
-    let v: String = token.view("ft_balance_of").args_json(json!({"account_id": who})).await?.json()?;
-    Ok(v.parse()?)
-}
-
 /// Real wNEAR, Rhea and LiNEAR; a pool of 1,000 wNEAR : 2,000 USDC (1 NEAR = 2 USDC);
 /// Alice's vault holds 100 NEAR and trusts all of them.
 async fn setup() -> anyhow::Result<World> {
@@ -53,33 +37,15 @@ async fn setup() -> anyhow::Result<World> {
     let lp = worker.root_account()?;
     let (alice, keeper) = (worker.dev_create_account().await?, worker.dev_create_account().await?);
 
-    let wrap = worker.dev_deploy(&theirs("wrap.testnet")).await?;
-    wrap.call("new").transact().await?.into_result()?;
+    let Rhea { wrap, dex: rhea } = rhea::deploy(&worker).await?;
     let usdc = worker.dev_deploy(&ours("mock_ft")).await?;
     usdc.call("new").args_json(json!({"owner_id": lp.id(), "total_supply": (1_000_000_000 * ONE).to_string(),
         "name": "Mock USDC", "symbol": "USDC", "decimals": 18, "call_fee_bps": 0})).transact().await?.into_result()?;
-    let rhea = worker.dev_deploy(&theirs("ref-finance-101.testnet")).await?;
-    rhea.call("new").args_json(json!({"owner_id": rhea.id(), "exchange_fee": 4, "referral_fee": 1, "boost_farm_id": "boostfarm.test.near", "burrowland_id": "burrow.test.near", "wnear_id": wrap.id()})).transact().await?.into_result()?;
     let linear = worker.dev_deploy(&theirs("linear-protocol.testnet")).await?;
     linear.call("new").args_json(json!({"owner_id": linear.id()})).max_gas().transact().await?.into_result()?;
 
     // The liquidity provider opens a wNEAR/USDC pool on Rhea.
-    lp.call(wrap.id(), "storage_deposit").args_json(json!({})).deposit(NearToken::from_millinear(10)).transact().await?.into_result()?;
-    lp.call(wrap.id(), "near_deposit").deposit(NearToken::from_near(1_000)).transact().await?.into_result()?;
-    for t in [wrap.id(), usdc.id()] {
-        register(&lp, t, rhea.id()).await?;
-    }
-    rhea.call("extend_whitelisted_tokens").args_json(json!({"tokens": [wrap.id(), usdc.id()]})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
-    let pool: u64 = lp.call(rhea.id(), "add_simple_pool").args_json(json!({"tokens": [wrap.id(), usdc.id()], "fee": 25}))
-        .deposit(NearToken::from_millinear(100)).transact().await?.json()?;
-    lp.call(rhea.id(), "storage_deposit").args_json(json!({})).deposit(NearToken::from_near(1)).transact().await?.into_result()?;
-    lp.call(rhea.id(), "register_tokens").args_json(json!({"token_ids": [wrap.id(), usdc.id()]})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
-    for (t, a) in [(wrap.id(), 1_000 * NEAR), (usdc.id(), 2_000 * ONE)] {
-        lp.call(t, "ft_transfer_call").args_json(json!({"receiver_id": rhea.id(), "amount": a.to_string(), "msg": ""}))
-            .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?.into_result()?;
-    }
-    lp.call(rhea.id(), "add_liquidity").args_json(json!({"pool_id": pool, "amounts": [(1_000 * NEAR).to_string(), (2_000 * ONE).to_string()]}))
-        .deposit(NearToken::from_near(1)).max_gas().transact().await?.into_result()?;
+    let pool = Rhea { wrap: wrap.clone(), dex: rhea.clone() }.pool(&lp, usdc.id(), 1_000 * NEAR, 2_000 * ONE).await?;
 
     // Alice's vault.
     let vault = worker.dev_deploy(&ours("vault")).await?;
@@ -94,20 +60,16 @@ async fn setup() -> anyhow::Result<World> {
     Ok(w)
 }
 
-fn wrap_near(w: &World) -> Value {
-    json!({"label": "Wrap NEAR", "calls": [{"call": "fn", "contract": w.wrap.id(), "method": "near_deposit", "args": "{}",
-        "deposit": {"kind": "input"}, "tgas": 10}], "out": w.wrap.id(), "min_out_per_in": null, "price": null})
+fn dex(w: &World) -> Rhea {
+    Rhea { wrap: w.wrap.clone(), dex: w.rhea.clone() }
 }
 
-/// A Rhea v1 instant swap, exactly the msg the Rhea SDK builds.
+fn wrap_near(w: &World) -> Value {
+    dex(w).wrap_recipe()
+}
+
 fn rhea_swap(w: &World, from: &Contract, to: &Contract, min_out_per_in: Option<u128>) -> Value {
-    let msg = format!(r#"{{"force":0,"actions":[{{"pool_id":{},"token_in":"{}","token_out":"{}","amount_in":"{{amount}}","min_amount_out":"{{min_out}}"}}],"skip_unwrap_near":true}}"#,
-        w.pool, from.id(), to.id());
-    json!({"label": "Swap on Rhea", "calls": [{"call": "ft", "receiver": w.rhea.id(), "msg": msg, "tgas": 120}],
-           "out": to.id(), "min_out_per_in": min_out_per_in.map(|m| m.to_string()),
-           "price": {"contract": w.rhea.id(), "method": "get_return",
-                     "args": json!({"pool_id": w.pool, "token_in": from.id(), "amount_in": NEAR.to_string(), "token_out": to.id()}).to_string(),
-                     "per": NEAR.to_string()}})
+    dex(w).swap_recipe(w.pool, from.id(), to.id(), min_out_per_in)
 }
 
 fn linear_stake(w: &World) -> Value {

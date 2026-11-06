@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{sol_template, wasm, SolFork};
+use common::{sol_sig, sol_template, wasm, SolFork};
 use serde_json::{json, Value};
 
 const TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
@@ -46,15 +46,12 @@ async fn the_vault_buys_a_pump_fun_coin_on_a_solana_fork() -> anyhow::Result<()>
         let (k, v) = (keeper.clone(), vault.id().clone());
         async move { k.call(&v, "sol_sign_tx").args_json(json!({"message": msg})).max_gas().transact().await }
     };
-    let sig_of = |r: &near_workspaces::result::ExecutionFinalResult| -> Option<String> {
-        r.logs().iter().find(|l| l.contains("sol_signed")).map(|l| l.split(r#""signature":""#).nth(1).unwrap().split('"').next().unwrap().to_string())
-    };
 
     // 1. The keeper builds a real buy with pump.fun's SDK: 0.05 SOL, 5% slippage.
     let b = fork.helper(&["pump-buy", &me, &mint, "50000000", "5"]);
     println!("pump.fun quote: 0.05 SOL -> {} coin units ({})", b["tokens"], b["tokenProgram"]);
     let r = sign(b["message"].as_str().unwrap().to_string()).await?;
-    let sig = sig_of(&r).unwrap_or_else(|| panic!("not signed: {:?} {:?}", r.logs(), r.failures()));
+    let sig = sol_sig(&r).unwrap_or_else(|| panic!("not signed: {:?} {:?}", r.logs(), r.failures()));
     let sent = fork.helper(&["send", b["message"].as_str().unwrap(), &sig]);
     assert!(sent["signature"].is_string() && sent["err"].is_null(), "not executed: {sent}");
     let held = fork.helper(&["balance", &me, &mint]);
@@ -65,10 +62,10 @@ async fn the_vault_buys_a_pump_fun_coin_on_a_solana_fork() -> anyhow::Result<()>
     // 2. Refusals, nothing signed: over the 0.1 SOL cap; a buy for someone else's wallet.
     let big = fork.helper(&["pump-buy", &me, &mint, "120000000", "5"]);
     let r = sign(big["message"].as_str().unwrap().to_string()).await?;
-    assert!(sig_of(&r).is_none() && format!("{:?}", r.failures()).contains("over the cap"), "{:?}", r.failures());
+    assert!(sol_sig(&r).is_none() && format!("{:?}", r.failures()).contains("over the cap"), "{:?}", r.failures());
     let other = fork.helper(&["pump-buy", "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", &mint, "10000000", "5"]);
     let r = sign(other["message"].as_str().unwrap().to_string()).await?;
-    assert!(sig_of(&r).is_none(), "another wallet's buy was signed");
+    assert!(sol_sig(&r).is_none(), "another wallet's buy was signed");
     // 3. The spending limit counts the SOL read from the message: 0.0525 used of 0.15; another 0.1 is refused.
     let more = fork.helper(&["pump-buy", &me, &mint, "95000000", "5"]);
     let r = sign(more["message"].as_str().unwrap().to_string()).await?;
@@ -85,15 +82,15 @@ async fn the_vault_buys_a_pump_fun_coin_on_a_solana_fork() -> anyhow::Result<()>
     // Refused: a minimum out under the owner's floor (60% slippage); more coin than the cap.
     let cheap = fork.helper(&["pump-sell", &me, &mint, &units, "60"]);
     let r = sign(cheap["message"].as_str().unwrap().to_string()).await?;
-    assert!(sig_of(&r).is_none() && failures(&r).contains("under the floor"), "{}", failures(&r));
+    assert!(sol_sig(&r).is_none() && failures(&r).contains("under the floor"), "{}", failures(&r));
     let more = (units.parse::<u128>()? + 1).to_string();
     let over = fork.helper(&["pump-sell", &me, &mint, &more, "5"]);
     let r = sign(over["message"].as_str().unwrap().to_string()).await?;
-    assert!(sig_of(&r).is_none() && failures(&r).contains("over the cap"), "{}", failures(&r));
+    assert!(sol_sig(&r).is_none() && failures(&r).contains("over the cap"), "{}", failures(&r));
 
     let s = fork.helper(&["pump-sell", &me, &mint, &units, "5"]);
     let r = sign(s["message"].as_str().unwrap().to_string()).await?;
-    let sig = sig_of(&r).unwrap_or_else(|| panic!("sell not signed: {:?} {:?}", r.logs(), r.failures()));
+    let sig = sol_sig(&r).unwrap_or_else(|| panic!("sell not signed: {:?} {:?}", r.logs(), r.failures()));
     let sent = fork.helper(&["send", s["message"].as_str().unwrap(), &sig]);
     assert!(sent["signature"].is_string() && sent["err"].is_null(), "sell not executed: {sent}");
     let after = fork.helper(&["balance", &me, &mint]);

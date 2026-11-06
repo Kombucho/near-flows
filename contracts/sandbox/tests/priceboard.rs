@@ -8,10 +8,11 @@
 //!   signed response needs a Wormhole Query API key: the real-signature checks
 //!   are in priceboard's unit tests).
 
+mod board;
 mod common;
 
+use board::*;
 use common::wasm;
-use ed25519_dalek::{Signer, SigningKey};
 use k256::ecdsa::SigningKey as Secp;
 use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
@@ -22,35 +23,6 @@ use serde_json::{json, Value};
 const ONE: u128 = 1_000_000_000_000_000_000;
 const NEAR_ID: &str = "c415de8d2eba7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750";
 const SOL_ID: &str = "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
-/// GDFVPqix6jYh4xvr1CBx14JWUaLMTvAT2rYA9FyApump, a pump.fun coin.
-const MEME: &str = "e202a830669968911d12fb8957d8651fcfa7a56a28cb6b84b7fc21239d8859df";
-
-fn attester(i: u8) -> SigningKey {
-    SigningKey::from_bytes(&[i + 1; 32])
-}
-
-fn near_key(k: &SigningKey) -> String {
-    format!("ed25519:{}", bs58::encode(k.verifying_key().as_bytes()).into_string())
-}
-
-/// The bytes attesters sign, built here independently of the contract.
-fn message(feed: &str, price: i64, expo: i32, t: i64) -> Vec<u8> {
-    let mut m = b"NEARFLOWS_PRICE_V1".to_vec();
-    m.extend(hex::decode(feed).unwrap());
-    m.extend(price.to_be_bytes());
-    m.extend(expo.to_be_bytes());
-    m.extend(t.to_be_bytes());
-    m
-}
-
-fn report(k: &SigningKey, feed: &str, price: i64, t: i64) -> Value {
-    json!({"attester": near_key(k), "price": price.to_string(), "expo": -12, "publish_time": t,
-        "signature": hex::encode(k.sign(&message(feed, price, -12, t)).to_bytes())})
-}
-
-async fn now(w: &Worker<Sandbox>) -> anyhow::Result<i64> {
-    Ok((w.view_block().await?.timestamp() / 1_000_000_000) as i64)
-}
 
 /// Fast-forward until the chain's clock passes `t` (sandbox blocks are under a second apart).
 async fn wait_until(w: &Worker<Sandbox>, t: i64) -> anyhow::Result<()> {
@@ -58,18 +30,6 @@ async fn wait_until(w: &Worker<Sandbox>, t: i64) -> anyhow::Result<()> {
         w.fast_forward(50).await?;
     }
     Ok(())
-}
-
-async fn attested_board(w: &Worker<Sandbox>, owner: &Account, k: u8) -> anyhow::Result<Contract> {
-    let b = w.dev_deploy(&wasm("priceboard")).await?;
-    b.call("new").args_json(json!({"owner": owner.id(), "ema_window_s": 600,
-        "source": {"kind": "attested", "attesters": (0..3).map(|i| near_key(&attester(i))).collect::<Vec<_>>(), "k": k, "max_skew_s": 60}}))
-        .transact().await?.into_result()?;
-    Ok(b)
-}
-
-async fn push(who: &Account, board: &Contract, reports: Vec<Value>) -> anyhow::Result<ExecutionFinalResult> {
-    Ok(who.call(board.id(), "push").args_json(json!({"feed": MEME, "reports": reports})).max_gas().transact().await?)
 }
 
 async fn price(board: &Contract, method: &str, age: u64) -> anyhow::Result<Option<Value>> {

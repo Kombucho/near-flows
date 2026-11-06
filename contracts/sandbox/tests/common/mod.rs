@@ -107,6 +107,17 @@ pub fn signed(r: &near_workspaces::result::ExecutionFinalResult) -> String {
     v["data"][0]["raw"].as_str().unwrap().to_string()
 }
 
+/// The Ed25519 signature (hex) a vault logged for a Solana message, if it signed one.
+pub fn sol_sig(r: &near_workspaces::result::ExecutionFinalResult) -> Option<String> {
+    r.logs().iter().find(|l| l.contains("sol_signed")).map(|l| l.split(r#""signature":""#).nth(1).unwrap().split('"').next().unwrap().to_string())
+}
+
+/// A real protocol's wasm as deployed on testnet (fetched by scripts/fetch-protocols.sh).
+pub fn protocol(id: &str) -> Vec<u8> {
+    let path = format!("{}/protocols/{id}.wasm", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read(&path).unwrap_or_else(|_| panic!("missing {path}: run scripts/fetch-protocols.sh first"))
+}
+
 /// A Solana mainnet fork (surfpool); killed when dropped.
 pub struct SolFork {
     child: Child,
