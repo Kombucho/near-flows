@@ -125,6 +125,9 @@ async fn flow_state(w: &World, flow: u32) -> anyhow::Result<Value> {
 fn report(what: &str, r: &ExecutionFinalResult) {
     println!("GAS {what}: {:.1} Tgas burnt over {} receipts", r.total_gas_burnt.as_gas() as f64 / 1e12, r.receipt_outcomes().len());
     for o in r.receipt_outcomes() {
+        if what == "relay step" {
+            println!("  {:>5.1} Tg  {}", o.gas_burnt.as_gas() as f64 / 1e12, o.executor_id);
+        }
         if o.is_failure() {
             println!("  {} {:?}", o.executor_id, o.clone().into_result().err());
         }
