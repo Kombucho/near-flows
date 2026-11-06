@@ -8,8 +8,9 @@
 #   SUFFIX=abcde STEP=costs ./scripts/deploy-relay-testnet.sh     # the funding table only
 #   SUFFIX=abcde STEP=vault,flow ./scripts/deploy-relay-testnet.sh
 #   SUFFIX=abcde DRY=1 ./scripts/deploy-relay-testnet.sh          # print every command, send nothing
+#   SUFFIX=abcde STEP=oracle ./scripts/deploy-relay-testnet.sh    # re-point an existing vault's feeds to the board
 #
-# STEP (comma list): build accounts brain factory publish priceboard vault flow check costs (default all).
+# STEP (comma list): build accounts brain factory publish priceboard vault oracle flow check costs (default all).
 # DRY=1 prints the exact near-cli commands and sends nothing (check still READS testnet).
 # PLAN=<file> also writes each command as a JSON line: contracts/sandbox/tests/deploy_sequence.rs
 # replays that file in a local sandbox, so the args here can't drift from the contracts.
@@ -36,7 +37,6 @@ RHEA="ref-finance-101.testnet"
 LINEAR="linear-protocol.testnet"
 USDT="usdt.itachicara.testnet"                # Rhea pool 1084: wNEAR/USDT
 MEME="mev-33.factory.v9.meme-cooking.testnet" # Rhea pool 2131: a meme.cooking testnet coin
-PYTH="pyth-oracle.testnet"
 RPC="${NEAR_RPC:-https://rpc.testnet.near.org}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WASM="$ROOT/contracts/target/near"
@@ -51,13 +51,19 @@ RHEA_STORAGE="0.1"                  # Rhea's min is 0.00102, but each registered
 GAS_X="300.0 Tgas"                  # a relay request (mainnet cap): brain.handle gets 40 (relay v2), the vault's cb the rest
 E24="000000000000000000000000"
 
-# Pyth feed ids (stable channel). pyth-oracle.testnet takes stable updates (its data source is
-# Pythnet's stable emitter), but a feed exists there only once someone pushes it: see `check`.
-NEAR_ID="c415de8d2eba7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750"
+# Every feed is read from OUR price board, attested by the keeper (k=1). WHY not Pyth's NEAR
+# contract: on 2026-11-06 pyth-oracle.testnet refused every Hermes update ("Source for
+# attestation is not allowed": Pyth's Aug 2026 Core upgrade moved the data source and the
+# NEAR receiver wasn't updated). WHY not Pyth at all for NEAR and NVDA: our Pyth key isn't
+# entitled to them, so those come from Chainlink on other chains.
+#   ETH, USDC, SOL: Pyth's own ids; the keeper relays Hermes prices (npm run pyth -- --board).
+#   NEAR, NVDA: Chainlink feeds, id = Wormhole chain (2 B) + 10 zero bytes + proxy address
+#   (npm run chainlink-price -- --board). The same ids work on an Evm (Wormhole-verified) board.
 USDC_ID="eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
 ETH_ID="ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"
 SOL_ID="ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
-NVDA_ID="a470c4ac46f44b547b2cba52338f311fb642b79375ce5f0cfd5cb5b99227b852" # NVDA/USD 24/7
+NEAR_ID="001700000000000000000000bf5c3fb2633e924598a46b9d07a174a9dbcf57c0" # Chainlink NEAR/USD, Arbitrum (23)
+NVDA_ID="004800000000000000000000379ec4f7c378f34a1b47e4f3cbebcbac3e8e9f15" # Chainlink RHNVDA/USD, Robinhood Chain (72)
 
 want() { [ "$STEP" = all ] && [ "$1" != costs ] && return 0; [[ ",$STEP," == *",$1,"* ]]; }
 size() { wc -c <"$WASM/$1/$1.wasm" | tr -d ' '; }
@@ -233,10 +239,17 @@ if want vault; then
   x "$OWNER" trust "{\"add\":[{\"contract\":\"$WRAP\",\"methods\":[\"near_deposit\"]},{\"contract\":\"$RHEA\",\"methods\":[\"get_return\",\"register_tokens\"]},{\"contract\":\"$LINEAR\",\"methods\":[\"deposit_and_stake\"]},{\"contract\":\"$USDT\"},{\"contract\":\"$MEME\"}],\"remove\":[]}"
   # The memecoin isn't on Rhea's global whitelist: the vault registers it for itself.
   x "$OWNER" act "{\"target\":\"$RHEA\",\"method\":\"register_tokens\",\"json_args\":\"{\\\"token_ids\\\":[\\\"$MEME\\\"]}\",\"one_yocto\":true}"
-  # Feeds for market floors and price triggers. EMA as each price's backup; 60 s fresh, 1% conf, 2% agree.
-  feed() { echo "{\"name\":\"$1\",\"contract\":\"$PYTH\",\"price_id\":\"$2\",\"backup\":{\"kind\":\"ema\"}}"; }
-  x "$OWNER" oracle_setup "{\"config\":{\"max_age_s\":60,\"max_conf_bps\":100,\"tolerance_bps\":200,\"feeds\":[$(feed near $NEAR_ID),$(feed usdc $USDC_ID),$(feed eth $ETH_ID),$(feed sol $SOL_ID),$(feed nvda $NVDA_ID)]}}"
   send "$OWNER" "$VAULT" "$VAULT_FUND"
+fi
+
+if want oracle; then
+  # Also for a vault that already exists: replaces its whole oracle config (owner only, through `x`).
+  # Feeds for market floors and price triggers, all on the board; each confirmed by the board's
+  # own EMA (10 min window) within 2%; fresh = under 60 s, so the keeper re-posts every ~30 s.
+  echo "== oracle: $VAULT reads near usdc eth sol nvda from $BOARD"
+  need "$OWNER" 0.05
+  feed() { echo "{\"name\":\"$1\",\"contract\":\"$BOARD\",\"price_id\":\"$2\",\"backup\":{\"kind\":\"ema\"}}"; }
+  x "$OWNER" oracle_setup "{\"config\":{\"max_age_s\":60,\"max_conf_bps\":100,\"tolerance_bps\":200,\"feeds\":[$(feed near $NEAR_ID),$(feed usdc $USDC_ID),$(feed eth $ETH_ID),$(feed sol $SOL_ID),$(feed nvda $NVDA_ID)]}}"
 fi
 
 if want flow; then
@@ -286,11 +299,13 @@ if want check; then
   echo "  brain record (cost, paid): $(rpc view "$BRAIN" get_storage "{\"vault\":\"$VAULT\"}")"
   echo "  brain allocated NEAR:     $(rpc view "$BRAIN" get_allocated "{\"vault\":\"$VAULT\",\"token\":\"near\"}")"
   echo "  board.get_source:         $(rpc view "$BOARD" get_source)"
+  echo "  vault oracle (first 300): $(rpc view "$BRAIN" get_oracle "{\"vault\":\"$VAULT\"}")"
   for f in "near $NEAR_ID" "usdc $USDC_ID" "eth $ETH_ID" "sol $SOL_ID" "nvda $NVDA_ID"; do
     set -- $f
-    echo "  pyth $1: exists $(rpc view "$PYTH" price_feed_exists "{\"price_identifier\":\"$2\"}"), latest $(rpc view "$PYTH" get_price_unsafe "{\"price_identifier\":\"$2\"}")"
+    echo "  board $1: $(rpc view "$BOARD" get_price_unsafe "{\"price_id\":\"$2\"}")"
   done
-  echo "  (a feed that doesn't exist or is stale: push it, cd scripts/keeper && PYTH_API_KEY=... KEEPER_ACCOUNT_ID=$KEEPER npm run pyth -- --vault $VAULT)"
+  echo "  (missing or stale: cd scripts/keeper && KEEPER_ACCOUNT_ID=$KEEPER, then"
+  echo "     PYTH_API_KEY=... npm run pyth -- --board $BOARD eth usdc sol     and     npm run chainlink-price -- --board $BOARD near nvda)"
 fi
 
 echo
