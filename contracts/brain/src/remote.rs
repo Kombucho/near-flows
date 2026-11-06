@@ -237,7 +237,6 @@ impl Talk {
     fn remote_begin(&mut self, flow_id: u32, node: u16, revealed: Option<Node<Recipe>>, args: RemoteArgs, by_owner: bool, prices: &[(String, u128)]) -> Reply {
         let n = revealed.clone().unwrap_or_else(|| self.flow(flow_id).nodes[node as usize].clone());
         let r = n.action.remote.clone().unwrap();
-        require!(self.pending(flow_id, node).is_none(), "a remote step is pending on this node");
         let price = match n.when {
             Trigger::PriceBelow { .. } | Trigger::PriceAbove { .. } => Some(trigger_price(r.price.as_ref().unwrap(), prices)),
             _ => None,

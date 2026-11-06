@@ -19,7 +19,7 @@ use near_sdk::{env, near, require, AccountId, CryptoHash, CurveType, Gas, NearTo
 /// A new vault's funding: its own few bytes, the 0.05 NEAR reserve, its record in the brain, headroom.
 pub const MIN_VAULT_DEPOSIT: NearToken = NearToken::from_millinear(100);
 /// The relay's `new` asks the brain, which answers; that whole round runs on this.
-const GAS_INIT: Gas = Gas::from_tgas(100);
+const GAS_INIT: Gas = Gas::from_tgas(150);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
 
 #[near(contract_state)]
