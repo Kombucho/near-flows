@@ -157,7 +157,7 @@ What it costs (NEAR, testnet faucet money; from DEPLOY-RELAY.md, measured by rep
 
 About 20.4 NEAR in total across 5 faucet accounts, each within its own 10 NEAR. Rollback order: withdraw from the vault first (it needs the brain), then delete the board, factory and brain (`near account delete-account <acc> beneficiary <yours> network-config testnet sign-with-legacy-keychain send`).
 
-Checks: `STEP=check` prints `factory.get_brain` = your brain, `vault.brain_id` = your brain, a `get_code_hash`, the vault's record cost and what it paid, and each Pyth feed's state. A Pyth feed that doesn't exist yet makes every market floor or price trigger refuse with "no price fresher than 60 s" (that's correct). Push it with the keeper's `npm run pyth` (DEPLOY-RELAY.md has the command).
+Checks: `STEP=check` prints `factory.get_brain` = your brain, `vault.brain_id` = your brain, a `get_code_hash`, the vault's record cost and what it paid, and each feed's price on the price board (every feed is read from there: Pyth's NEAR receiver refuses today's updates). A missing or stale price makes every market floor or price trigger refuse with "no price fresher than 60 s" (that's correct). Post them with the keeper's `npm run pyth -- --board` and `npm run chainlink-price -- --board` (DEPLOY-RELAY.md, "Price feeds").
 
 Your brain's fees are set at deploy (`FEES` in the script: 10 bps, cap 30; 0.01 NEAR per cross-chain signature, cap 0.05). To run a brain that never charges anything, deploy it with `"fees": null`. Then run your keeper as in path (a) with `FACTORY_ID=nf-relay-$SUFFIX.testnet`.
 

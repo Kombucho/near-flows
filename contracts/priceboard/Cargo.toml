@@ -2,7 +2,7 @@
 name = "priceboard"
 version = "0.1.0"
 edition = "2021"
-description = "Price board: Pyth's read interface for prices Pyth doesn't carry (pump.fun memecoins), from k-of-n signed attestations (trusts the attesters) or Wormhole Queries of the bonding curve (trusts Wormhole's guardians)."
+description = "Price board: Pyth's read interface for prices Pyth doesn't carry for us (pump.fun memecoins, NEAR, NVDA), from k-of-n signed attestations (trusts the attesters), Wormhole Queries of pump.fun bonding curves, or Wormhole Queries of Chainlink feeds on EVM chains (both trust Wormhole's guardians)."
 
 [lib]
 crate-type = ["cdylib", "rlib"]
