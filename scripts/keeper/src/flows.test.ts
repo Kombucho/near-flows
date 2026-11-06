@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { due, fired, priceOf, runnable, type Flow, type FlowNode, type NodeState, type VaultState } from "./flows.ts";
+import { canPayKeeper, due, fired, freeNear, keeperUnpaid, priceOf, REPO_URL, runnable, type Flow, type FlowNode, type NodeState, type VaultState } from "./flows.ts";
 
 const MIN = 60_000_000_000;
 const node = (when: FlowNode["when"], input = "wrap.testnet", price: FlowNode["action"]["price"] = null): FlowNode => ({ input, when, action: { label: "x", price } });
@@ -63,4 +63,18 @@ test("remote nodes come back marked, oracle triggers included, for the chain's r
   const remote = (when: FlowNode["when"]): FlowNode => ({ input: "evm:4663:eth", when, action: { label: "r", price: null, remote: { out: "evm:4663:nvda" } } });
   const f = flow([remote({ when: "now" }), remote({ when: "price_above", price: "1" })], [st("5"), st("5")]);
   assert.deepEqual(due([[0, f]], 0n).map((d) => [d.node, d.remote, d.price]), [[0, true, undefined], [1, true, undefined]]);
+});
+
+test("no free work: a vault that can't pay its keeper's price is skipped, with the pointer", () => {
+  const NEAR = 10n ** 24n;
+  const fee = NEAR / 100n; // 0.01 NEAR
+  // 1 NEAR, 10 kB of storage (0.1 NEAR), 0.05 reserve, 0.3 NEAR held by flows: 0.55 free.
+  assert.equal(freeNear(NEAR, 10_000, (3n * NEAR) / 10n), (55n * NEAR) / 100n);
+  assert.equal(freeNear(NEAR / 10n, 10_000, 0n), 0n, "never below zero");
+  assert.ok(canPayKeeper(fee, fee), "exactly the price: pays");
+  assert.ok(!canPayKeeper(fee, fee - 1n), "one yocto short: skipped");
+  assert.ok(canPayKeeper(0n, 0n), "your own keeper at fee 0: always runs");
+  const m = keeperUnpaid("alice.flows.testnet", fee, 5n);
+  assert.match(m, /keeper fee unpaid/);
+  assert.ok(m.includes(`run your own keeper for free: ${REPO_URL} (AGENTS.md)`), m);
 });

@@ -9,6 +9,7 @@ import { Account, JsonRpcProvider, KeyPairSigner, type KeyPairString } from "nea
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { freeNear } from "./flows.ts";
 
 const TGAS = 10n ** 12n;
 const ONE_YOCTO = 1n; // NEP-141 transfers require exactly 1 yoctoNEAR attached
@@ -102,6 +103,15 @@ export class Chain {
   /** A brain view about one vault (get_vault, get_flow, get_oracle...): the vault is an argument. */
   brainView<T>(brain: string, vault: string, method: string, args: Record<string, unknown> = {}): Promise<T> {
     return this.view<T>(brain, method, { vault, ...args });
+  }
+
+  /** A vault's free NEAR as the brain counts it: its account (balance, storage) and the NEAR its flows hold. */
+  async freeNear(brain: string, vault: string): Promise<bigint> {
+    const [acc, alloc] = await Promise.all([
+      this.provider.viewAccount({ accountId: vault }),
+      this.brainView<string>(brain, vault, "get_allocated", { token: "near" }),
+    ]);
+    return freeNear(BigInt(acc.amount), acc.storage_usage, BigInt(alloc));
   }
 
   /** A request to a relay vault: `x` with {"<method>": args}. Returns what the brain answered. */
