@@ -267,7 +267,9 @@ pub fn check_tx(message_bytes: &[u8], templates: &[Template], p: &TxPolicy) -> R
                     hit = Some((t, values));
                     break;
                 }
-                Err(e) => why = format!("{}: {e}", t.name),
+                // Report the template that was meant (its discriminator matched), not the last one tried.
+                Err(e) if ix.data.starts_with(&t.prefix) || !why.contains(": ") => why = format!("{}: {e}", t.name),
+                Err(_) => {}
             }
         }
         let (t, values) = hit.ok_or(Refusal::Program(why))?;

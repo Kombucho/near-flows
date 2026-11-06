@@ -128,6 +128,23 @@ fn a_meteora_position_opens_only_with_the_owner_signing() {
 }
 
 #[test]
+fn a_refusal_names_the_template_the_instruction_was_meant_for() {
+    // Two templates for the same program: the reason must come from the one whose discriminator
+    // matched (dlmm_open), not from whichever was tried last.
+    let mut other = dlmm_open();
+    other.name = "dlmm_close".into();
+    other.prefix = discriminator("close_position_if_empty").to_vec();
+    let (v, pos, thief) = (vault(), key(50), key(66));
+    let accounts = vec![v, pos, key(51), thief, key(52), key(53), key(54), pubkey(DLMM)];
+    let data = { let mut d = discriminator("initialize_position").to_vec(); d.extend((-300i32).to_le_bytes()); d.extend(69i32.to_le_bytes()); d };
+    let msg = Tx::new(v).signer(owner()).signer(pos).ix(pubkey(DLMM), accounts, data).bytes();
+    match check_tx(&msg, &[dlmm_open(), other], &policy()) {
+        Err(Refusal::Program(why)) => assert!(why.starts_with("dlmm_open: account 3"), "{why}"),
+        r => panic!("{r:?}"),
+    }
+}
+
+#[test]
 fn templates_are_checked_when_saved() {
     let mut t = pump_buy();
     t.fields[1].rule = FieldRule::AtLeast { of: 2, num: 1, den: 1 };
