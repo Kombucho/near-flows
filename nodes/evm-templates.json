@@ -1,0 +1,74 @@
+{
+  "about": "EVM nodes as templates the vault enforces (contracts/vault/src/evm.rs). The vault builds each call: fixed arguments are fixed here, 'vault' is the vault's own address, the keeper only fills at_most amounts (capped) and floor minimums (never below amount x num / den). Floors below are set for Base on 2026-11-06 (1 WETH ~ 2,224 USDC): owners set their own. Tested on a Base mainnet fork: contracts/sandbox/tests/evm_fork.rs.",
+  "chains": {
+    "base": {
+      "chain_id": 8453,
+      "verified": "addresses read from a Base fork on 2026-11-06 (Aave pool via PoolAddressesProvider.getPool, aUSDC via getReserveData)",
+      "tokens": {
+        "WETH": "0x4200000000000000000000000000000000000006",
+        "USDC": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "aUSDC": "0x4e65fe4dba92790696d040ac24aa414708f5c0ab"
+      },
+      "templates": [
+        {
+          "name": "approve_weth_uniswap",
+          "to": "0x4200000000000000000000000000000000000006",
+          "function": "approve(address,uint256)",
+          "args": [
+            { "rule": "fixed", "value": "0x2626664c2603336e57b271c5c0b26f421741e481" },
+            { "rule": "at_most", "max": "1000000000000000000" }
+          ],
+          "spends": null
+        },
+        {
+          "name": "uniswap_swap_weth_usdc",
+          "to": "0x2626664c2603336e57b271c5c0b26f421741e481",
+          "function": "exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))",
+          "args": [
+            { "rule": "fixed", "value": "0x4200000000000000000000000000000000000006" },
+            { "rule": "fixed", "value": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" },
+            { "rule": "fixed", "value": "500" },
+            { "rule": "vault" },
+            { "rule": "at_most", "max": "200000000000000000" },
+            { "rule": "floor", "of": 4, "num": "2000", "den": "1000000000000" },
+            { "rule": "fixed", "value": "0" }
+          ],
+          "spends": { "arg": 4, "token": "0x4200000000000000000000000000000000000006" }
+        },
+        {
+          "name": "approve_usdc_aave",
+          "to": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "function": "approve(address,uint256)",
+          "args": [
+            { "rule": "fixed", "value": "0xa238dd80c259a72e81d7e4664a9801593f98d1c5" },
+            { "rule": "at_most", "max": "1000000000" }
+          ],
+          "spends": null
+        },
+        {
+          "name": "aave_supply_usdc",
+          "to": "0xa238dd80c259a72e81d7e4664a9801593f98d1c5",
+          "function": "supply(address,uint256,address,uint16)",
+          "args": [
+            { "rule": "fixed", "value": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" },
+            { "rule": "at_most", "max": "500000000" },
+            { "rule": "vault" },
+            { "rule": "fixed", "value": "0" }
+          ],
+          "spends": { "arg": 1, "token": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" }
+        },
+        {
+          "name": "aave_withdraw_usdc",
+          "to": "0xa238dd80c259a72e81d7e4664a9801593f98d1c5",
+          "function": "withdraw(address,uint256,address)",
+          "args": [
+            { "rule": "fixed", "value": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" },
+            { "rule": "at_most", "max": "340282366920938463463374607431768211455" },
+            { "rule": "vault" }
+          ],
+          "spends": null
+        }
+      ]
+    }
+  }
+}

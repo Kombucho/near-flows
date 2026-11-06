@@ -138,6 +138,56 @@ impl Eip1559 {
     }
 }
 
+/// Function signatures a template may name: static arguments only (address,
+/// uintN, bool, and tuples of those), so every argument is exactly one 32-byte
+/// word and the vault can rule on each word on its own.
+pub mod sig {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Kind {
+        Address,
+        Uint(u16),
+        Bool,
+    }
+
+    /// The argument words of e.g. "exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))".
+    /// None if the text isn't a signature of static arguments.
+    pub fn words(sig: &str) -> Option<Vec<Kind>> {
+        let open = sig.find('(')?;
+        let name = &sig[..open];
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || !sig.ends_with(')') {
+            return None;
+        }
+        let inner = &sig[open + 1..sig.len() - 1];
+        let mut depth = 0i32;
+        for c in inner.chars() {
+            depth += match c { '(' => 1, ')' => -1, _ => 0 };
+            if depth < 0 {
+                return None;
+            }
+        }
+        if depth != 0 {
+            return None;
+        }
+        // A tuple of static types is encoded in place, word after word: flatten it.
+        let flat: String = inner.chars().filter(|c| *c != '(' && *c != ')').collect();
+        if flat.is_empty() {
+            return Some(vec![]);
+        }
+        flat.split(',').map(kind).collect()
+    }
+
+    fn kind(t: &str) -> Option<Kind> {
+        match t {
+            "address" => Some(Kind::Address),
+            "bool" => Some(Kind::Bool),
+            _ => {
+                let bits: u16 = t.strip_prefix("uint")?.parse().ok()?;
+                (bits % 8 == 0 && (8..=256).contains(&bits)).then_some(Kind::Uint(bits))
+            }
+        }
+    }
+}
+
 /// ABI encoding of the two calls the vault makes.
 pub mod abi {
     use super::{keccak256, Address};

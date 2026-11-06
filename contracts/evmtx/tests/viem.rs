@@ -46,3 +46,19 @@ fn address_from_a_public_key_matches_viem() {
     pk.extend([0xab; 64]);
     assert_eq!(hex_address(&address_of(&pk).unwrap()), v()["addr_of_pub"].as_str().unwrap().to_lowercase());
 }
+
+#[test]
+fn template_signatures_are_static_words_only() {
+    use evmtx::sig::{words, Kind::*};
+    assert_eq!(words("approve(address,uint256)"), Some(vec![Address, Uint(256)]));
+    assert_eq!(
+        words("exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))"),
+        Some(vec![Address, Address, Uint(24), Address, Uint(256), Uint(256), Uint(160)])
+    );
+    assert_eq!(words("supply(address,uint256,address,uint16)"), Some(vec![Address, Uint(256), Address, Uint(16)]));
+    assert_eq!(words("claim()"), Some(vec![]));
+    // Dynamic types (bytes, string, arrays) would need offsets: refused, as is anything malformed.
+    for bad in ["exactInput((bytes,address,uint256,uint256))", "f(string)", "f(uint256[])", "f(int256)", "f(uint7)", "f(address", "(address)", "f(a)b(address)"] {
+        assert_eq!(words(bad), None, "{bad}");
+    }
+}

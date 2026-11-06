@@ -1,12 +1,20 @@
 //! EVM chains from the vault, through NEAR Chain Signatures (secp256k1).
 //!
-//! Unlike Solana, the vault BUILDS these transactions itself (evmtx): an ERC-20
-//! approve for the router, or a Uniswap exactInputSingle whose recipient is the
-//! vault's own EVM address and whose minimum output is at least the owner's
-//! floor. The keeper only supplies numbers that can't redirect money: nonce,
-//! gas prices (capped), and a quote (the floor still applies). The vault signs
-//! the hash, assembles the signed transaction, and emits it for broadcast.
+//! The vault BUILDS every transaction it signs, from a TEMPLATE its owner set:
+//! a contract, a function signature, and a rule for each argument:
+//! - fixed: always this address or number (the pool's tokens, a fee tier),
+//! - vault: the vault's own EVM address (recipient, onBehalfOf, to),
+//! - at_most: a number the keeper picks, up to a cap (an amount),
+//! - floor: a minimum the keeper quotes, never below amount x num / den (the owner's floor).
+//! A keeper fills in numbers; it never picks an address. There is no rule for
+//! "an address the caller chooses", so no template can pay a stranger.
+//! Uniswap swaps, ERC-20 approvals and Aave supply/withdraw are all templates
+//! (nodes/evm-templates.json); a new protocol is a new template, not new code.
+//!
+//! The keeper also supplies nonce and gas prices (capped by the owner). The vault
+//! signs the hash, assembles the signed transaction, and emits it for broadcast.
 
+use evmtx::sig::Kind;
 use evmtx::{abi, address_of, hex_address, parse_address, Eip1559};
 use near_sdk::json_types::U128;
 use near_sdk::{env, near, require, AccountId, Gas, NearToken, Promise};
@@ -17,24 +25,47 @@ pub const EVM_PATH: &str = "evm-1";
 const ECDSA_DOMAIN: u32 = 0;
 const GAS_SIGN: Gas = Gas::from_tgas(50);
 const GAS_CB: Gas = Gas::from_tgas(15);
-const APPROVE_GAS: u64 = 80_000;
+const MAX_TEMPLATES: usize = 32;
 /// secp256k1 group order n, big-endian (for the low-s rule, EIP-2).
 const N: [u8; 32] = [
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e,
     0x8c, 0xd0, 0x36, 0x41, 0x41,
 ];
 
+/// The rule for one argument of a template.
+#[near(serializers = [borsh, json])]
+#[serde(tag = "rule", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Arg {
+    /// Always this value: a 0x address, or a number (decimal).
+    Fixed { value: String },
+    /// The vault's own EVM address.
+    Vault,
+    /// A number the keeper picks, at most `max`.
+    AtMost { max: U128 },
+    /// A minimum the keeper quotes; the vault uses at least `args[of] * num / den`.
+    Floor { of: u8, num: U128, den: U128 },
+}
+
+/// Which argument spends a token, and which token: counted against the spending limit "evm:<chain>:<token>".
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
-pub struct EvmPair {
-    /// 0x-prefixed token addresses
-    pub token_in: String,
-    pub token_out: String,
-    /// Uniswap pool fee tier (500, 3000, 10000)
-    pub fee: u32,
-    pub max_in: U128,
-    /// least output per input, scaled 1e12
-    pub min_out_per_in_e12: U128,
+pub struct Spend {
+    pub arg: u8,
+    pub token: String,
+}
+
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvmTemplate {
+    /// The node's name, e.g. "uniswap_swap_weth_usdc".
+    pub name: String,
+    /// The contract it calls.
+    pub to: String,
+    /// The function, e.g. "approve(address,uint256)". Static arguments only.
+    pub function: String,
+    pub args: Vec<Arg>,
+    pub spends: Option<Spend>,
 }
 
 #[near(serializers = [borsh, json])]
@@ -44,9 +75,7 @@ pub struct EvmConfig {
     pub chain_id: u64,
     /// The vault's EVM address, from the signer.
     pub address: Option<String>,
-    /// Uniswap SwapRouter02 on this chain.
-    pub router: String,
-    pub pairs: Vec<EvmPair>,
+    pub templates: Vec<EvmTemplate>,
     pub max_fee: U128,
     pub max_tip: U128,
     pub gas_cap: u64,
@@ -65,12 +94,12 @@ pub struct TxJson {
 
 #[near]
 impl Vault {
-    /// Owner: one EVM chain, its Uniswap router, and fee caps. Learns the vault's address from the signer.
-    pub fn evm_setup(&mut self, signer: AccountId, chain_id: u64, router: String, max_fee: U128, max_tip: U128, gas_cap: u64) -> Promise {
+    /// Owner: one EVM chain and gas caps. Learns the vault's address from the signer.
+    pub fn evm_setup(&mut self, signer: AccountId, chain_id: u64, max_fee: U128, max_tip: U128, gas_cap: u64) -> Promise {
         self.assert_owner();
-        require!(parse_address(&router.to_lowercase()).is_some(), "router: a 0x address");
-        require!(gas_cap <= 1_000_000, "gas cap: at most 1M");
-        self.evm = Some(EvmConfig { signer: signer.clone(), chain_id, address: None, router: router.to_lowercase(), pairs: vec![], max_fee, max_tip, gas_cap });
+        require!(gas_cap <= 2_000_000, "gas cap: at most 2M");
+        let templates = self.evm.as_ref().filter(|c| c.chain_id == chain_id).map(|c| c.templates.clone()).unwrap_or_default();
+        self.evm = Some(EvmConfig { signer: signer.clone(), chain_id, address: None, templates, max_fee, max_tip, gas_cap });
         let args = near_sdk::serde_json::json!({"path": EVM_PATH, "predecessor": env::current_account_id(), "domain_id": ECDSA_DOMAIN});
         Promise::new(signer)
             .function_call("derived_public_key".to_string(), args.to_string().into_bytes(), NearToken::from_yoctonear(0), Gas::from_tgas(10))
@@ -86,47 +115,55 @@ impl Vault {
         self.emit("evm_address", &format!(r#"{{"address":"{addr}"}}"#));
     }
 
-    /// Owner: allow a pair, or remove it with `max_in: "0"`.
-    pub fn evm_allow(&mut self, pair: EvmPair) {
+    /// Owner: add a template, or replace the one with the same name.
+    pub fn evm_template(&mut self, template: EvmTemplate) {
         self.assert_owner();
-        let mut pair = pair;
-        pair.token_in = pair.token_in.to_lowercase();
-        pair.token_out = pair.token_out.to_lowercase();
-        require!(parse_address(&pair.token_in).is_some() && parse_address(&pair.token_out).is_some(), "tokens: 0x addresses");
+        let mut t = template;
+        t.to = t.to.to_lowercase();
+        check_template(&mut t);
         let cfg = self.evm.as_mut().unwrap_or_else(|| env::panic_str("run evm_setup first"));
-        cfg.pairs.retain(|p| !(p.token_in == pair.token_in && p.token_out == pair.token_out));
-        if pair.max_in.0 > 0 {
-            require!(cfg.pairs.len() < 16, "too many pairs");
-            cfg.pairs.push(pair);
+        cfg.templates.retain(|x| x.name != t.name);
+        require!(cfg.templates.len() < MAX_TEMPLATES, "too many templates");
+        cfg.templates.push(t);
+    }
+
+    /// Owner: remove a template.
+    pub fn evm_template_remove(&mut self, name: String) {
+        self.assert_owner();
+        if let Some(cfg) = self.evm.as_mut() {
+            cfg.templates.retain(|x| x.name != name);
         }
     }
 
-    /// Owner or keeper: approve the router to spend `amount` of `token_in` (an allowed pair's input).
-    pub fn evm_approve(&mut self, token_in: String, amount: U128, nonce: u64, max_fee: U128, max_tip: U128) -> Promise {
+    /// Owner or keeper: call template `name` with `values` (one per argument; only
+    /// at_most and floor arguments read theirs). The vault builds, checks and signs it.
+    pub fn evm_call(&mut self, name: String, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64) -> Promise {
         let cfg = self.evm_caller_cfg();
-        let token_in = token_in.to_lowercase();
-        let pair = cfg.pairs.iter().find(|p| p.token_in == token_in).unwrap_or_else(|| env::panic_str("refused: no allowed pair spends this token"));
-        require!(amount.0 <= pair.max_in.0, "refused: more than one swap's limit");
-        let router = parse_address(&cfg.router).unwrap();
-        let tx = self.evm_tx(&cfg, nonce, max_fee, max_tip, APPROVE_GAS, parse_address(&token_in).unwrap(), abi::approve(&router, amount.0));
-        self.evm_sign(cfg.signer, tx)
-    }
-
-    /// Owner or keeper: swap on Uniswap. `min_out` is the keeper's quote-based minimum;
-    /// the transaction uses the HIGHER of it and the owner's floor.
-    #[allow(clippy::too_many_arguments)]
-    pub fn evm_swap(&mut self, token_in: String, token_out: String, amount_in: U128, min_out: U128, nonce: u64, max_fee: U128, max_tip: U128, gas: u64) -> Promise {
-        let cfg = self.evm_caller_cfg();
-        let (ti, to) = (token_in.to_lowercase(), token_out.to_lowercase());
-        let pair = cfg.pairs.iter().find(|p| p.token_in == ti && p.token_out == to).cloned().unwrap_or_else(|| env::panic_str("refused: pair not allowed"));
-        require!(amount_in.0 > 0 && amount_in.0 <= pair.max_in.0, "refused: amount over the pair's limit");
-        let floor = crate::mul_div(amount_in.0, pair.min_out_per_in_e12.0, 1_000_000_000_000);
-        let out_min = min_out.0.max(floor);
-        self.charge(&format!("evm:{}:{ti}", cfg.chain_id), amount_in.0);
+        let t = cfg.templates.iter().find(|t| t.name == name).cloned().unwrap_or_else(|| env::panic_str("refused: no such template"));
+        require!(values.len() == t.args.len(), "one value per argument");
         let me = parse_address(cfg.address.as_deref().unwrap_or_else(|| env::panic_str("the vault's EVM address isn't known yet"))).unwrap();
-        let data = abi::exact_input_single(&parse_address(&ti).unwrap(), &parse_address(&to).unwrap(), pair.fee, &me, amount_in.0, out_min);
-        let tx = self.evm_tx(&cfg, nonce, max_fee, max_tip, gas, parse_address(&cfg.router).unwrap(), data);
-        self.emit("evm_swap_requested", &format!(r#"{{"token_in":"{ti}","token_out":"{to}","amount_in":"{}","min_out":"{out_min}"}}"#, amount_in.0));
+        let kinds = evmtx::sig::words(&t.function).unwrap();
+        let mut data = abi::selector(&t.function).to_vec();
+        for (i, (rule, kind)) in t.args.iter().zip(&kinds).enumerate() {
+            let word = match rule {
+                Arg::Fixed { value } => fixed_word(value, *kind),
+                Arg::Vault => addr_word(&me),
+                Arg::AtMost { max } => {
+                    require!(values[i].0 <= max.0, format!("refused: argument {i} over its cap"));
+                    uint_word(values[i].0, *kind)
+                }
+                Arg::Floor { of, num, den } => {
+                    let floor = crate::mul_div(values[*of as usize].0, num.0, den.0);
+                    uint_word(values[i].0.max(floor), *kind)
+                }
+            };
+            data.extend(word);
+        }
+        if let Some(sp) = &t.spends {
+            self.charge(&format!("evm:{}:{}", cfg.chain_id, sp.token), values[sp.arg as usize].0);
+        }
+        let tx = self.evm_tx(&cfg, nonce, max_fee, max_tip, gas, parse_address(&t.to).unwrap(), data);
+        self.emit("evm_call_requested", &format!(r#"{{"template":"{name}","to":"{}","data":"0x{}"}}"#, t.to, hex::encode(&tx.data)));
         self.evm_sign(cfg.signer, tx)
     }
 
@@ -216,4 +253,60 @@ fn sub(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
         out[i] = d as u8;
     }
     out
+}
+
+/// Check a template once, when the owner saves it: a static function, one rule
+/// per argument word, each rule fitting its word's type.
+fn check_template(t: &mut EvmTemplate) {
+    require!(!t.name.is_empty() && t.name.len() <= 40, "name: 1 to 40 characters");
+    require!(parse_address(&t.to).is_some(), "to: a 0x address");
+    let kinds = evmtx::sig::words(&t.function).unwrap_or_else(|| env::panic_str("function: a signature with static arguments only"));
+    require!(kinds.len() == t.args.len() && kinds.len() <= 16, "one rule per argument (at most 16)");
+    for (i, (rule, kind)) in t.args.iter_mut().zip(&kinds).enumerate() {
+        match rule {
+            Arg::Fixed { value } => {
+                *value = value.to_lowercase();
+                let _ = fixed_word(value, *kind);
+            }
+            Arg::Vault => require!(*kind == Kind::Address, format!("argument {i}: only an address can be the vault")),
+            Arg::AtMost { .. } => require!(matches!(kind, Kind::Uint(_)), format!("argument {i}: at_most needs a number")),
+            Arg::Floor { den, .. } => require!(matches!(kind, Kind::Uint(_)) && den.0 > 0, format!("argument {i}: floor needs a number and den > 0")),
+        }
+    }
+    for (i, rule) in t.args.iter().enumerate() {
+        if let Arg::Floor { of, .. } = rule {
+            require!(matches!(t.args.get(*of as usize), Some(Arg::AtMost { .. })), format!("argument {i}: a floor is relative to an at_most amount"));
+        }
+    }
+    if let Some(sp) = t.spends.as_mut() {
+        sp.token = sp.token.to_lowercase();
+        require!(parse_address(&sp.token).is_some(), "spends: a token address");
+        require!(matches!(t.args.get(sp.arg as usize), Some(Arg::AtMost { .. })), "spends: an at_most amount");
+    }
+}
+
+fn addr_word(a: &evmtx::Address) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    w[12..].copy_from_slice(a);
+    w
+}
+
+/// A number as a word of type `kind` (refused if it doesn't fit).
+fn uint_word(v: u128, kind: Kind) -> [u8; 32] {
+    let bits = match kind {
+        Kind::Uint(b) => b,
+        Kind::Bool => 1,
+        Kind::Address => env::panic_str("a number where an address goes"),
+    };
+    require!(bits >= 128 || v >> bits == 0, "refused: number too big for its type");
+    let mut w = [0u8; 32];
+    w[16..].copy_from_slice(&v.to_be_bytes());
+    w
+}
+
+fn fixed_word(value: &str, kind: Kind) -> [u8; 32] {
+    match kind {
+        Kind::Address => addr_word(&parse_address(value).unwrap_or_else(|| env::panic_str("fixed: a 0x address"))),
+        _ => uint_word(value.parse().unwrap_or_else(|_| env::panic_str("fixed: a decimal number")), kind),
+    }
 }

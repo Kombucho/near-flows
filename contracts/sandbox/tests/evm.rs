@@ -35,14 +35,32 @@ fn recover(hash: &[u8; 32], r: &str, s: &str, v: u8) -> Address {
     address_of(key.to_encoded_point(false).as_bytes()).unwrap()
 }
 
+fn approve_t() -> Value {
+    json!({"name": "approve_usdc", "to": USDC, "function": "approve(address,uint256)",
+        "args": [{"rule": "fixed", "value": ROUTER}, {"rule": "at_most", "max": "100000000"}], "spends": null})
+}
+
+/// USDC (6 dec) -> WETH (18 dec): at most 100 USDC a swap, at least 0.00025 WETH per USDC (2.5e8 wei per micro-USDC).
+fn swap_t() -> Value {
+    json!({"name": "swap_usdc_weth", "to": ROUTER, "function": "exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))",
+        "args": [{"rule": "fixed", "value": USDC}, {"rule": "fixed", "value": WETH}, {"rule": "fixed", "value": "3000"}, {"rule": "vault"},
+                 {"rule": "at_most", "max": "100000000"}, {"rule": "floor", "of": 4, "num": "250000000", "den": "1"}, {"rule": "fixed", "value": "0"}],
+        "spends": {"arg": 4, "token": USDC}})
+}
+
+fn call(name: &str, values: &[u128], nonce: u64, fee_gwei: u128) -> Value {
+    json!({"name": name, "values": values.iter().map(|v| v.to_string()).collect::<Vec<_>>(), "nonce": nonce,
+        "max_fee": (fee_gwei * GWEI).to_string(), "max_tip": (2 * GWEI).to_string(), "gas": 250_000u64})
+}
+
 #[tokio::test]
-async fn the_vault_builds_and_signs_uniswap_swaps_only_within_policy() -> anyhow::Result<()> {
+async fn the_vault_builds_and_signs_evm_calls_only_from_its_templates() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
     let (alice, keeper, mallory) = (worker.dev_create_account().await?, worker.dev_create_account().await?, worker.dev_create_account().await?);
     let signer = worker.dev_deploy(&wasm("mock_signer")).await?;
     let vault = worker.dev_deploy(&wasm("vault")).await?;
     vault.call("new").args_json(json!({"owner": alice.id(), "keeper": keeper.id()})).transact().await?.into_result()?;
-    alice.call(vault.id(), "evm_setup").args_json(json!({"signer": signer.id(), "chain_id": 11155111u64, "router": ROUTER,
+    alice.call(vault.id(), "evm_setup").args_json(json!({"signer": signer.id(), "chain_id": 11155111u64,
         "max_fee": (50 * GWEI).to_string(), "max_tip": (3 * GWEI).to_string(), "gas_cap": 300_000u64})).max_gas().transact().await?.into_result()?;
     let cfg: Value = vault.view("get_evm").await?.json()?;
     let me_hex = cfg["address"].as_str().unwrap().to_string();
@@ -51,28 +69,39 @@ async fn the_vault_builds_and_signs_uniswap_swaps_only_within_policy() -> anyhow
     assert_eq!(me_hex, hex_address(&me));
     println!("vault's EVM address: {me_hex}");
 
-    // USDC (6 dec) -> WETH (18 dec): at most 100 USDC a swap, at least 0.00025 WETH per USDC (2.5e8 wei per micro-USDC).
-    alice.call(vault.id(), "evm_allow").args_json(json!({"pair": {"token_in": USDC, "token_out": WETH, "fee": 3000, "max_in": "100000000",
-        "min_out_per_in_e12": "250000000000000000000"}})).transact().await?.into_result()?;
+    // Templates the vault refuses to store: they could take a caller's address, or don't fit their types.
+    let mut bad = Vec::new();
+    let mut t = approve_t(); t["args"][0] = json!({"rule": "at_most", "max": "1"}); bad.push(("a number where the spender goes", t));
+    let mut t = approve_t(); t["args"][1] = json!({"rule": "vault"}); bad.push(("the vault as an amount", t));
+    let mut t = approve_t(); t["function"] = json!("approve(bytes,uint256)"); bad.push(("dynamic argument", t));
+    let mut t = approve_t(); t["args"].as_array_mut().unwrap().pop(); bad.push(("missing rule", t));
+    let mut t = swap_t(); t["args"][2] = json!({"rule": "fixed", "value": "16777216"}); bad.push(("fee too big for uint24", t));
+    let mut t = swap_t(); t["args"][5] = json!({"rule": "floor", "of": 2, "num": "1", "den": "1"}); bad.push(("floor relative to a fixed value", t));
+    let mut t = swap_t(); t["spends"] = json!({"arg": 0, "token": USDC}); bad.push(("spends a fixed argument", t));
+    for (name, t) in bad {
+        assert!(alice.call(vault.id(), "evm_template").args_json(json!({"template": t})).transact().await?.is_failure(), "{name}");
+    }
+    assert!(mallory.call(vault.id(), "evm_template").args_json(json!({"template": approve_t()})).transact().await?.is_failure(), "only the owner sets templates");
+    for t in [approve_t(), swap_t()] {
+        alice.call(vault.id(), "evm_template").args_json(json!({"template": t})).transact().await?.into_result()?;
+    }
     alice.call(vault.id(), "set_limit").args_json(json!({"token": format!("evm:11155111:{USDC}"), "max": "150000000", "window_ns": 86_400_000_000_000u64}))
         .transact().await?.into_result()?;
 
-    // 1. Approve the router: signed by the vault's key.
-    let r = keeper.call(vault.id(), "evm_approve").args_json(json!({"token_in": USDC, "amount": "100000000", "nonce": 0, "max_fee": (30 * GWEI).to_string(), "max_tip": (2 * GWEI).to_string()}))
-        .max_gas().transact().await?;
+    // 1. Approve the router: exactly the bytes of the hand-written encoder (checked against viem), signed by the vault's key.
+    let r = keeper.call(vault.id(), "evm_call").args_json(call("approve_usdc", &[0, 100_000_000], 0, 30)).max_gas().transact().await?;
     let logs = r.logs().iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let ev = field(&logs, "evm_signed").unwrap_or_else(|| panic!("{logs:?} {:?}", r.failures())).clone();
-    let approve = Eip1559 { chain_id: 11155111, nonce: 0, max_priority_fee: 2 * GWEI, max_fee: 30 * GWEI, gas_limit: 80_000, to: parse_address(USDC).unwrap(), value: 0,
+    let approve = Eip1559 { chain_id: 11155111, nonce: 0, max_priority_fee: 2 * GWEI, max_fee: 30 * GWEI, gas_limit: 250_000, to: parse_address(USDC).unwrap(), value: 0,
         data: abi::approve(&parse_address(ROUTER).unwrap(), 100_000_000) };
     assert_eq!(recover(&approve.signing_hash(), &get(&ev, "r"), &get(&ev, "s"), get(&ev, "v").parse()?), me, "signed by the vault");
 
     // 2. Swap 40 USDC; the keeper's quote asks for only 1 wei: the owner's floor (0.01 WETH) wins.
-    let r = keeper.call(vault.id(), "evm_swap").args_json(json!({"token_in": USDC, "token_out": WETH, "amount_in": "40000000", "min_out": "1", "nonce": 1,
-        "max_fee": (30 * GWEI).to_string(), "max_tip": (2 * GWEI).to_string(), "gas": 250_000u64})).max_gas().transact().await?;
-    println!("GAS build + sign a Uniswap swap: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
+    let r = keeper.call(vault.id(), "evm_call").args_json(call("swap_usdc_weth", &[0, 0, 0, 0, 40_000_000, 1, 0], 1, 30)).max_gas().transact().await?;
+    println!("GAS build + sign a Uniswap swap from its template: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
     let logs = r.logs().iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let ev = field(&logs, "evm_signed").unwrap_or_else(|| panic!("{logs:?} {:?}", r.failures())).clone();
-    let floor = 40_000_000u128 * 250_000_000_000_000_000_000 / 1_000_000_000_000;
+    let floor = 40_000_000u128 * 250_000_000;
     let swap = Eip1559 { chain_id: 11155111, nonce: 1, max_priority_fee: 2 * GWEI, max_fee: 30 * GWEI, gas_limit: 250_000, to: parse_address(ROUTER).unwrap(), value: 0,
         data: abi::exact_input_single(&parse_address(USDC).unwrap(), &parse_address(WETH).unwrap(), 3000, &me, 40_000_000, floor) };
     let (rr, ss, vv) = (get(&ev, "r"), get(&ev, "s"), get(&ev, "v").parse::<u8>()?);
@@ -81,24 +110,26 @@ async fn the_vault_builds_and_signs_uniswap_swaps_only_within_policy() -> anyhow
     assert_eq!(get(&ev, "raw"), format!("0x{}", hex::encode(&raw)), "exactly the transaction we expect: router, vault as recipient, the floor as minimum");
 
     // 3. Refusals.
-    let swap_args = |amount: &str, fee_gwei: u128, token_out: &str| json!({"token_in": USDC, "token_out": token_out, "amount_in": amount, "min_out": "0", "nonce": 2,
-        "max_fee": (fee_gwei * GWEI).to_string(), "max_tip": GWEI.to_string(), "gas": 250_000u64});
     for (name, who, args) in [
-        ("over 100 USDC", &keeper, swap_args("100000001", 30, WETH)),
-        ("gas price over the cap", &keeper, swap_args("1000000", 51, WETH)),
-        ("a pair nobody allowed", &keeper, swap_args("1000000", 30, "0x0000000000000000000000000000000000000bad")),
-        ("a stranger", &mallory, swap_args("1000000", 30, WETH)),
+        ("over 100 USDC", &keeper, call("swap_usdc_weth", &[0, 0, 0, 0, 100_000_001, 0, 0], 2, 30)),
+        ("gas price over the cap", &keeper, call("swap_usdc_weth", &[0, 0, 0, 0, 1_000_000, 0, 0], 2, 51)),
+        ("a template nobody set", &keeper, call("swap_usdc_scam", &[0, 0, 0, 0, 1_000_000, 0, 0], 2, 30)),
+        ("wrong number of values", &keeper, call("swap_usdc_weth", &[1_000_000], 2, 30)),
+        ("approving more than the cap", &keeper, call("approve_usdc", &[0, 100_000_001], 2, 30)),
+        ("a stranger", &mallory, call("swap_usdc_weth", &[0, 0, 0, 0, 1_000_000, 0, 0], 2, 30)),
     ] {
-        let r = who.call(vault.id(), "evm_swap").args_json(args).max_gas().transact().await?;
+        let r = who.call(vault.id(), "evm_call").args_json(args).max_gas().transact().await?;
         assert!(r.is_failure(), "{name}");
         assert!(!r.logs().iter().any(|l| l.contains("evm_signed")), "{name} got signed");
     }
-    assert!(keeper.call(vault.id(), "evm_approve").args_json(json!({"token_in": WETH, "amount": "1", "nonce": 3, "max_fee": "1", "max_tip": "1"}))
-        .max_gas().transact().await?.is_failure(), "approving a token no pair spends");
-    // 4. The spending limit: 40 + 100 = 140 of 150 USDC a day; another 20 is refused.
-    let ok = keeper.call(vault.id(), "evm_swap").args_json(swap_args("100000000", 30, WETH)).max_gas().transact().await?;
+    // A keeper's "value" for a fixed or vault argument is ignored: it can't pick the recipient.
+    let r = keeper.call(vault.id(), "evm_call").args_json(call("swap_usdc_weth", &[1, 2, 3, 0xbad, 1_000_000, 0, 9], 2, 30)).max_gas().transact().await?;
+    let data = r.logs().iter().find(|l| l.contains("evm_call_requested")).unwrap().to_string();
+    assert!(data.contains(&hex::encode(abi::exact_input_single(&parse_address(USDC).unwrap(), &parse_address(WETH).unwrap(), 3000, &me, 1_000_000, 250_000_000_000_000))));
+    // 4. The spending limit: 40 + 1 + 100 = 141 of 150 USDC a day; another 20 is refused.
+    let ok = keeper.call(vault.id(), "evm_call").args_json(call("swap_usdc_weth", &[0, 0, 0, 0, 100_000_000, 0, 0], 3, 30)).max_gas().transact().await?;
     assert!(ok.logs().iter().any(|l| l.contains("evm_signed")), "{:?}", ok.failures());
-    let r = keeper.call(vault.id(), "evm_swap").args_json(swap_args("20000000", 30, WETH)).max_gas().transact().await?;
+    let r = keeper.call(vault.id(), "evm_call").args_json(call("swap_usdc_weth", &[0, 0, 0, 0, 20_000_000, 0, 0], 4, 30)).max_gas().transact().await?;
     assert!(format!("{:?}", r.failures()).contains("spending limit"));
     let _ = alice.transfer_near(vault.id(), NearToken::from_millinear(1)).await?;
     Ok(())
