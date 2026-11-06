@@ -185,11 +185,17 @@ impl Talk {
         let rules = leaves(t);
         require!(values.len() == rules.len(), format!("one value per leaf ({})", rules.len()));
         let nums = numbers(&rules, &values, prices);
-        let tys = sig::args(&t.function).unwrap();
-        let mut at = 0;
-        let vals: Vec<Val> = t.args.iter().zip(&tys).map(|(r, ty)| build(r, ty, &me, &nums, &mut at)).collect();
-        let mut data = abi::selector(&t.function).to_vec();
-        data.extend(encode(&tys, &vals));
+        // A plain transfer (no function) sends only value, no calldata.
+        let data = if t.function.is_empty() {
+            Vec::new()
+        } else {
+            let tys = sig::args(&t.function).unwrap();
+            let mut at = 0;
+            let vals: Vec<Val> = t.args.iter().zip(&tys).map(|(r, ty)| build(r, ty, &me, &nums, &mut at)).collect();
+            let mut data = abi::selector(&t.function).to_vec();
+            data.extend(encode(&tys, &vals));
+            data
+        };
         let value = if t.value.is_some() { nums[rules.len() - 1].unwrap_or(0) } else { 0 };
         if let Some(sp) = &t.spends {
             self.charge(&format!("evm:{}:{}", cfg.chain_id, sp.token), nums[sp.arg as usize].unwrap_or(0));
@@ -293,10 +299,17 @@ enum Leaf {
 
 /// Check a template once, when the owner saves it: a parsable function, rules
 /// shaped like its types, every leaf fitting its type, and references (floor,
-/// same) pointing at an amount or a minimum, never at another `same`.
+/// same) pointing at an amount or a minimum, never at another `same`. An empty
+/// function is a plain transfer of value to `to` (a fixed address: a deposit
+/// address, say), with no arguments and an at_most value.
 fn check_template(t: &mut EvmTemplate) {
     require!(!t.name.is_empty() && t.name.len() <= 40, "name: 1 to 40 characters");
     require!(parse_address(&t.to).is_some(), "to: a 0x address");
+    if t.function.is_empty() {
+        require!(t.args.is_empty() && t.spends.is_none(), "a plain transfer has no arguments");
+        require!(matches!(t.value, Some(Arg::AtMost { .. })), "a plain transfer: an at_most value");
+        return;
+    }
     let tys = sig::args(&t.function).unwrap_or_else(|| env::panic_str("function: a signature of address/uintN/intN/bool/bytes, tuples and T[]"));
     require!(tys.len() == t.args.len(), "one rule per argument");
     let mut kinds = Vec::new();

@@ -36,6 +36,8 @@
 //! - sol + soltemplates: Jupiter checks and instruction templates (owner
 //!   co-sign), signed by the vault's `sign`.
 //! - remote: flow nodes on other chains, keeper-reported outputs capped and floored.
+//! - hop (new here): bridged tokens out of the vault's Intents balance to its
+//!   own address on Solana / EVM chains, as a remote flow node or a one-off.
 //!
 //! What can't port as is:
 //! - The vault's synchronous state: balance and storage are a snapshot in the
@@ -57,6 +59,7 @@ mod close;
 pub mod fees;
 pub mod evm;
 mod hidden;
+pub mod hop;
 pub mod intents;
 mod limits;
 pub mod oracle;
@@ -314,6 +317,8 @@ pub enum Req {
     WithdrawTo { token: String, amount: U128, to: AccountId, via_intents: bool },
     IntentsSetup { verifier: AccountId, signer: AccountId },
     IntentsAllow { pair: IntentsPair },
+    /// Let a POA token leave Intents for the vault's own address on its chain (hop.rs).
+    IntentsHop { hop: hop::Hop },
     OracleSetup { config: OracleConfig },
     EvmSetup { signer: AccountId, chain_id: u64, max_fee: U128, max_tip: U128, gas_cap: u64 },
     EvmTemplate { template: evm::EvmTemplate },
@@ -328,6 +333,8 @@ pub enum Req {
     StepHidden { flow_id: u32, node: u16, reveal: Node<Recipe>, salt: String },
     IntentsSignSwap { token_in: AccountId, token_out: AccountId, amount_in: U128, min_out: U128, valid_secs: u64 },
     IntentsWithdraw { token: AccountId, amount: U128 },
+    /// Outside any flow: hop `amount` of `token` to the vault's own address (hop.rs).
+    IntentsHopOut { token: AccountId, amount: U128 },
     EvmCall { name: String, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64 },
     SolSignSwap { message: String },
     SolSignTx { message: String },
@@ -366,6 +373,8 @@ pub(crate) enum Next {
     SolSigned(String),
     RemoteEvmSigned { flow_id: u32, node: u16, tx: evm::TxJson },
     RemoteSolSigned { flow_id: u32, node: u16, hash: String },
+    /// A hop's withdrawal from the vault's Intents account returned (hop.rs).
+    RemoteHopSent { flow_id: u32, node: u16, amount: U128 },
     /// A read that didn't fit where it was asked for: the vault's next round makes it.
     Read { views: Vec<(AccountId, String, String)>, read: Read, gas: u64 },
     /// The owed fees' ft_transfer to the treasury returned.
@@ -514,6 +523,7 @@ impl Brain {
             Next::Exec { tgas, .. } => *tgas,
             Next::EvmSigned(_) | Next::RemoteEvmSigned { .. } => evm::GAS_SIGNED.as_tgas(),
             Next::SolSigned(_) | Next::RemoteSolSigned { .. } => sol::GAS_SIGNED.as_tgas(),
+            Next::RemoteHopSent { .. } => hop::GAS_HOP_SENT.as_tgas(),
         };
         let mut t = Talk::open(env::predecessor_account_id(), ctx, spent);
         let r = match next {
@@ -526,6 +536,7 @@ impl Brain {
             Next::SolSigned(hash) => t.on_sol_signed(hash),
             Next::RemoteEvmSigned { flow_id, node, tx } => t.on_remote_evm_signed(flow_id, node, tx),
             Next::RemoteSolSigned { flow_id, node, hash } => t.on_remote_sol_signed(flow_id, node, hash),
+            Next::RemoteHopSent { flow_id, node, amount } => t.on_remote_hop_sent(flow_id, node, amount),
         };
         t.finish(r);
     }
@@ -743,6 +754,10 @@ impl Talk {
                 crew_only();
                 return self.intents_withdraw(token, amount.0).into();
             }
+            Req::IntentsHopOut { token, amount } => {
+                crew_only();
+                return self.intents_hop_out(token, amount.0).into();
+            }
             Req::EvmCall { name, values, nonce, max_fee, max_tip, gas } => {
                 crew_only();
                 return self.evm_call(evm::EvmArgs { name, values, nonce, max_fee, max_tip, gas });
@@ -833,6 +848,7 @@ impl Talk {
             Req::SetAutoClose { on, to } => self.set_auto_close(on, to),
             Req::IntentsSetup { verifier, signer } => return self.intents_setup(verifier, signer),
             Req::IntentsAllow { pair } => self.intents_allow(pair),
+            Req::IntentsHop { hop } => self.intents_hop(hop),
             Req::OracleSetup { config } => self.oracle_setup(config),
             Req::EvmSetup { signer, chain_id, max_fee, max_tip, gas_cap } => return self.evm_setup(signer, chain_id, max_fee, max_tip, gas_cap),
             Req::EvmTemplate { template } => self.evm_template(template),

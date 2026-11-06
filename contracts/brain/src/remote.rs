@@ -12,6 +12,11 @@
 //! What changed in the split: the pending steps live in the vault's record
 //! (`VaultState.remote`), and the signer's answer comes back through the vault
 //! (`on_vault` RemoteEvmSigned / RemoteSolSigned), since only the vault may sign.
+//!
+//! A HOP node (hop.rs) is a remote node too: its input is a token in the vault's
+//! Intents balance (`intents:<token>`), its action the bridge withdrawal to the
+//! vault's own address on the other chain, its output what landed there
+//! (keeper-reported, between the amount less the owner's fee bound and the amount).
 
 use flow::{Node, Trigger};
 use near_sdk::json_types::U128;
@@ -30,6 +35,8 @@ const GAS_BUILD: Gas = Gas::from_tgas(14);
 const GAS_SIGNED_CB: Gas = Gas::from_tgas(12);
 /// The vault's rounds after the brain's answer: its `sign`, the brain's callback, its own.
 const NEED_TGAS: u64 = 50 + 12 + crate::RELAY_TGAS;
+/// A hop's: the verifier's withdrawal, the brain's callback, the vault's own.
+const HOP_NEED_TGAS: u64 = crate::hop::GAS_HOP.as_tgas() + crate::hop::GAS_HOP_SENT.as_tgas() + crate::RELAY_TGAS;
 
 #[near(serializers = [borsh, json])]
 #[serde(tag = "chain", rename_all = "snake_case")]
@@ -51,6 +58,8 @@ pub enum RemoteCall {
         #[serde(default)]
         min_field: Option<u8>,
     },
+    /// Out of the vault's Intents balance to its own address on another chain (hop.rs).
+    Hop {},
 }
 
 #[near(serializers = [borsh, json])]
@@ -82,6 +91,7 @@ pub struct Remote {
 pub enum RemoteArgs {
     Evm { values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64 },
     Sol { message: String },
+    Hop {},
 }
 
 #[near(serializers = [borsh, json])]
@@ -108,8 +118,10 @@ pub struct Begin {
     revealed: Option<Node<Recipe>>,
 }
 
+/// A token held where the brain can't read it as a NEAR balance: another chain,
+/// or the vault's Intents account (`intents:<token>`, hop.rs). Funded on the owner's word.
 pub fn is_remote(token: &str) -> bool {
-    token.starts_with("evm:") || token.starts_with("sol:")
+    token.starts_with("evm:") || token.starts_with("sol:") || token.starts_with("intents:")
 }
 
 impl Remote {
@@ -117,11 +129,19 @@ impl Remote {
         let prefix = match self.call {
             RemoteCall::Evm { .. } => "evm:",
             RemoteCall::Sol { .. } => "sol:",
+            // A hop spends an Intents balance and must say which chain it lands on;
+            // its cap is the amount itself (hop.rs), its token checked at each step.
+            RemoteCall::Hop {} => {
+                let lands = |o: &str| (o.starts_with("sol:") || o.starts_with("evm:")) && o.len() <= 80;
+                return input.starts_with("intents:") && input.len() <= 80 && self.out.as_deref().is_some_and(lands)
+                    && self.price.as_ref().map_or(true, |p| !p.feed.is_empty());
+            }
         };
         let collector = input == flow::NO_INPUT;
         let amount = match &self.call {
             RemoteCall::Evm { amount_leaf, .. } => amount_leaf.is_some(),
             RemoteCall::Sol { amount_field, .. } => amount_field.is_some(),
+            RemoteCall::Hop {} => true,
         };
         let token_ok = |t: &str| t.starts_with(prefix) && t.len() <= 80;
         (collector || token_ok(input))
@@ -129,6 +149,11 @@ impl Remote {
             && self.out.as_deref().map_or(true, |o| token_ok(o) && o != input)
             && (self.out.is_none() || if collector { self.max_out.is_some() } else { self.max_out_per_in.is_some() || self.max_out.is_some() })
             && self.price.as_ref().map_or(true, |p| !p.feed.is_empty())
+    }
+
+    /// The most a report may say came out (0: nothing comes out).
+    fn out_cap(&self, amount: u128) -> u128 {
+        if self.out.is_some() { self.cap(amount) } else { 0 }
     }
 
     fn cap(&self, amount: u128) -> u128 {
@@ -149,8 +174,6 @@ impl Talk {
         require!(by_owner || Some(sender) == self.vs.keeper.as_ref(), "owner or keeper only");
         // No free work: a keeper run the vault can't pay for is refused before anything is signed.
         self.require_keeper_paid(by_owner);
-        require!(self.ctx.gas_left / 1_000_000_000_000 >= NEED_TGAS, format!("attach at least {} Tgas for this step", NEED_TGAS + crate::HANDLE_TGAS + crate::X_TGAS));
-        self.need_after = NEED_TGAS;
         let f = self.flow(flow_id);
         let n = match (f.is_hidden(), reveal) {
             (false, None) => f.nodes.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).clone(),
@@ -166,6 +189,9 @@ impl Talk {
             (true, None) => env::panic_str("a hidden flow's node comes with reveal and salt"),
         };
         require!(n.action.remote.is_some(), "not a remote node: use step");
+        let need = if matches!(n.action.remote.as_ref().unwrap().call, RemoteCall::Hop {}) { HOP_NEED_TGAS } else { NEED_TGAS };
+        require!(self.ctx.gas_left / 1_000_000_000_000 >= need, format!("attach at least {} Tgas for this step", need + crate::HANDLE_TGAS + crate::X_TGAS));
+        self.need_after = need;
         self.check_node(&n);
         let revealed = self.flow(flow_id).is_hidden().then_some(n.clone());
         let feeds = self.remote_feeds(&n);
@@ -284,7 +310,7 @@ impl Talk {
                     None => 0,
                 };
                 let hash = format!("0x{}", hex::encode(tx.signing_hash()));
-                self.remote_pending_start(flow_id, node, &r, amount, min, expires, hash, revealed);
+                self.remote_pending_start(flow_id, node, &r, amount, min, r.out_cap(amount), expires, hash, revealed);
                 let (ans, carry) = crate::evm::evm_sign_call(&cfg.signer, &tx);
                 let next = Next::RemoteEvmSigned { flow_id, node, tx: carry };
                 self.charge_signature(ans).then("on_vault", near_sdk::borsh::to_vec(&next).unwrap(), GAS_SIGNED_CB).into()
@@ -296,18 +322,48 @@ impl Talk {
                 }
                 let min = min_field.and_then(|f| values.get(f as usize).copied()).unwrap_or(0);
                 let hash = hex::encode(env::sha256(&bytes));
-                self.remote_pending_start(flow_id, node, &r, amount, min, Some(now + SOL_TTL_S * 1_000_000_000), hash.clone(), revealed);
+                self.remote_pending_start(flow_id, node, &r, amount, min, r.out_cap(amount), Some(now + SOL_TTL_S * 1_000_000_000), hash.clone(), revealed);
                 let cfg = self.sol_cfg();
                 let next = Next::RemoteSolSigned { flow_id, node, hash };
                 self.charge_signature(crate::sol::sol_sign_call(&cfg.signer, &bytes)).then("on_vault", near_sdk::borsh::to_vec(&next).unwrap(), GAS_SIGNED_CB).into()
+            }
+            (RemoteCall::Hop {}, RemoteArgs::Hop {}) => {
+                let token: AccountId = n.input.strip_prefix("intents:").and_then(|t| t.parse().ok()).unwrap_or_else(|| env::panic_str("a hop's input: intents:<token>"));
+                let out = r.out.clone().unwrap();
+                // What's reported must be on the chain the token lands on.
+                let lands = match crate::hop::hop_chain_of(token.as_str()) {
+                    Some((crate::hop::HopChain::Sol, _)) => "sol:".to_string(),
+                    Some((crate::hop::HopChain::Evm, Some(id))) => format!("evm:{id}:"),
+                    _ => env::panic_str("not a POA bridge token"),
+                };
+                require!(out.starts_with(&lands), format!("refused: {token} lands on {lands}, the node reports {out}"));
+                let (ans, to, max_fee) = self.hop_call(&token, amount);
+                // 1:1 (same decimals on both sides), tightened by the node's own caps if it has any.
+                let max = if r.max_out_per_in.is_some() || r.max_out.is_some() { r.cap(amount).min(amount) } else { amount };
+                let min = amount.saturating_sub(max_fee).min(max);
+                // No deadline: once the token burned, only the bridge can bring it back, so only
+                // the owner may call a hop failed (remote_report with no output).
+                self.remote_pending_start(flow_id, node, &r, amount, min, max, None, format!("{}{to}", crate::hop::WITHDRAW_MEMO_PREFIX), revealed);
+                let next = Next::RemoteHopSent { flow_id, node, amount: U128(amount) };
+                ans.then("on_vault", near_sdk::borsh::to_vec(&next).unwrap(), crate::hop::GAS_HOP_SENT).into()
             }
             _ => env::panic_str("refused: args for another chain"),
         }
     }
 
+    /// The verifier answered the hop's withdrawal: what it sent (ft_withdraw returns
+    /// the amount the token took). All of it: in flight to the other chain, the
+    /// report comes when it lands. Less (the token refused, the verifier refunded): failed.
+    pub(crate) fn on_remote_hop_sent(&mut self, flow_id: u32, node: u16, amount: U128) -> Reply {
+        let sent = crate::amount_result(0).unwrap_or(0);
+        let ok = sent == amount.0;
+        self.emit(if ok { "hop_sent" } else { "hop_failed" }, &format!(r#""flow":{flow_id},"node":{node},"amount":"{}","sent":"{sent}""#, amount.0));
+        self.remote_signed(flow_id, node, ok);
+        Answer::default().ret(&format!(r#""{sent}""#)).into()
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn remote_pending_start(&mut self, flow_id: u32, node: u16, r: &Remote, amount: u128, min: u128, expires_ns: Option<u64>, hash: String, revealed: Option<Node<Recipe>>) {
-        let max = if r.out.is_some() { r.cap(amount) } else { 0 };
+    fn remote_pending_start(&mut self, flow_id: u32, node: u16, r: &Remote, amount: u128, min: u128, max: u128, expires_ns: Option<u64>, hash: String, revealed: Option<Node<Recipe>>) {
         require!(min <= max || r.out.is_none(), format!("refused: the node's cap {max} is below its signed minimum {min}"));
         self.emit(
             "remote_step",
