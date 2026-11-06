@@ -12,9 +12,31 @@
 //! - `cb`: executes a brain answer. Only ever runs as the vault's own callback
 //!   on its own call to the brain (checked below).
 //! - `new`: once, by whoever creates the account (the factory): fixes the brain.
+//! - Named doors, `exec`, `nft_on_transfer`, `mt_on_transfer`: the same as `x`,
+//!   with the args wrapped as `{"<method>": <args>}`, so callers that only know
+//!   the method name (the stealth keeper's `exec`, token contracts calling a
+//!   receiver hook) reach the brain unchanged. A hook's return value is the
+//!   brain's (e.g. mt_on_transfer: "refund nothing", one "0" per token).
 //! - `ft_on_transfer`: accepts any token sent to it (it becomes free balance,
 //!   exactly like the full vault). No brain round trip: nothing to decide.
-//! - `brain`: view, which brain this vault obeys.
+//! - `brain_id`: view, which brain this vault obeys.
+//!
+//! Why named doors and not "forward any unknown method": NEAR has no fallback
+//! method. A call to a name the code doesn't export fails before any code runs,
+//! so the closest thing is a list of names compiled in. `x` is the generic door
+//! for everything we control (the app, keepers, stealth relayers); the named
+//! doors exist only for callers we don't control, who call a fixed name. Which
+//! names: every receiver hook in the NEP standards a vault can be sent assets
+//! with (NEP-141 ft, NEP-171 nft, NEP-245 mt: Intents withdrawals). Anything
+//! else (a protocol inventing its own callback) needs a new relay version for
+//! NEW vaults; old vaults can still be served through `x` by a keeper.
+//!
+//! Why a named door is no new power: it is `x` with a fixed wrapping. The brain
+//! sees the real predecessor (e.g. the token contract) as the sender, exactly
+//! as through `x`, so it must treat hook args as claims, never as facts: the
+//! brain's hook answers change no state and spend nothing, they only say what
+//! the vault returns (keep everything). Anyone calling `mt_on_transfer` by hand
+//! gets the same harmless answer.
 //!
 //! Who can make it do what (the security argument):
 //! - Promises are created in exactly two places: `x`/`new` (one fixed call to
@@ -107,7 +129,11 @@ pub const KIND_TRANSFER: u8 = 1;
 pub const HEADER_FIXED: usize = 1 + 16 + 8 + 16 + 8;
 pub const TGAS: u64 = 1_000_000_000_000;
 /// What `brain.handle` gets for deciding a request. Unused gas is refunded.
-pub const GAS_HANDLE: u64 = 30 * TGAS;
+/// Enough for the brain to also issue its own reads (balances, prices, keys)
+/// and decide in its private callback, whose answer then reaches `cb`.
+pub const GAS_HANDLE: u64 = 60 * TGAS;
+/// Receiver hooks run on the gas their caller left them: the brain only answers a value.
+pub const GAS_HOOK: u64 = 8 * TGAS;
 /// The least `cb` gets; it also gets ALL the unused gas (weight 1), because it
 /// launches the next round of the brain's actions and they carry their own gas.
 pub const GAS_CB: u64 = 10 * TGAS;
@@ -265,6 +291,10 @@ mod contract {
 
     /// brain.<method>(OUT[..len]) with `gas`, then this vault's `cb`, after `after` (if any).
     fn ask_brain(after: Option<u64>, method: &[u8], len: usize, gas: u64) -> u64 {
+        ask_brain_cb(after, method, len, gas, GAS_CB)
+    }
+
+    fn ask_brain_cb(after: Option<u64>, method: &[u8], len: usize, gas: u64, cb_gas: u64) -> u64 {
         let b = brain();
         let zero = 0u128.to_le_bytes();
         unsafe {
@@ -276,7 +306,7 @@ mod contract {
             promise_batch_action_function_call_weight(p, method.len() as u64, method.as_ptr() as u64, len as u64, out.as_ptr() as u64, zero.as_ptr() as u64, gas, 0);
             let m = me();
             let c = promise_batch_then(p, m.len() as u64, m.as_ptr() as u64);
-            promise_batch_action_function_call_weight(c, 2, b"cb".as_ptr() as u64, 0, 0, zero.as_ptr() as u64, GAS_CB, 1);
+            promise_batch_action_function_call_weight(c, 2, b"cb".as_ptr() as u64, 0, 0, zero.as_ptr() as u64, cb_gas, 1);
             c
         }
     }
@@ -291,6 +321,49 @@ mod contract {
             let c = ask_brain(None, b"handle", h + n, GAS_HANDLE);
             promise_return(c);
         }
+    }
+
+    /// Forward the raw input wrapped as {"<name>": <input>} (`{}` if empty).
+    fn forward_named(name: &[u8], gas: u64, cb_gas: u64) {
+        let h = header(true);
+        unsafe {
+            let out = &mut *addr_of_mut!(OUT);
+            let mut at = h;
+            for part in [&b"{\""[..], name, &b"\":"[..]] {
+                out[at..at + part.len()].copy_from_slice(part);
+                at += part.len();
+            }
+            input(0);
+            let end = out.len() - 1;
+            let n = reg_into(&mut out[at..end]);
+            if n == 0 {
+                out[at..at + 2].copy_from_slice(b"{}");
+                at += 2;
+            } else {
+                at += n;
+            }
+            out[at] = b'}';
+            let c = ask_brain_cb(None, b"handle", at + 1, gas, cb_gas);
+            promise_return(c);
+        }
+    }
+
+    /// A stealth vault's command, signed by its owner's key (checked by the brain).
+    #[no_mangle]
+    pub extern "C" fn exec() {
+        forward_named(b"exec", GAS_HANDLE, GAS_CB);
+    }
+
+    /// NEP-171: the brain answers (keep it: "false").
+    #[no_mangle]
+    pub extern "C" fn nft_on_transfer() {
+        forward_named(b"nft_on_transfer", GAS_HOOK, GAS_HOOK / 2);
+    }
+
+    /// NEP-245 (NEAR Intents withdrawals): the brain answers (keep all: one "0" per token).
+    #[no_mangle]
+    pub extern "C" fn mt_on_transfer() {
+        forward_named(b"mt_on_transfer", GAS_HOOK, GAS_HOOK / 2);
     }
 
     /// Once, by whoever creates the account. Input: u8 len + brain account, then
