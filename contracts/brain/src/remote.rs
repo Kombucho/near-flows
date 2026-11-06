@@ -147,6 +147,8 @@ impl Talk {
     pub(crate) fn step_remote(&mut self, sender: &AccountId, flow_id: u32, node: u16, args: RemoteArgs, reveal: Option<Node<Recipe>>, salt: Option<String>) -> Reply {
         let by_owner = *sender == self.vs.owner;
         require!(by_owner || Some(sender) == self.vs.keeper.as_ref(), "owner or keeper only");
+        // No free work: a keeper run the vault can't pay for is refused before anything is signed.
+        self.require_keeper_paid(by_owner);
         require!(self.ctx.gas_left / 1_000_000_000_000 >= NEED_TGAS, format!("attach at least {} Tgas for this step", NEED_TGAS + crate::HANDLE_TGAS + crate::X_TGAS));
         self.need_after = NEED_TGAS;
         let f = self.flow(flow_id);

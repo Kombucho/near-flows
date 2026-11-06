@@ -16,13 +16,16 @@
 // Solana message), which then calls step_remote and remote_report.
 // The keeper can't do anything else to a vault: no withdrawing, no editing.
 // Best practice: give it a key that may only call `x` on the vaults.
+// A vault paying this keeper (keeper_fee > 0) whose free NEAR can't cover the
+// price is skipped (the brain would refuse it): its owner can top up, or run
+// their own keeper for free (AGENTS.md).
 //
 // Environment: FACTORY_ID (the relay factory), KEEPER_ACCOUNT_ID, NEAR_NETWORK (default testnet),
 // NEAR_RPC (default FastNEAR testnet), KEEPER_PRIVATE_KEY (or a near-cli key file).
 
 import { parseArgs } from "node:util";
 import { Chain, loadKey } from "./chain.ts";
-import { due, fired, priceOf, runnable, type Flow, type FlowNode, type VaultState } from "./flows.ts";
+import { canPayKeeper, due, fired, keeperUnpaid, priceOf, runnable, type Flow, type FlowNode, type VaultState } from "./flows.ts";
 import { loadStore, unlock, type Node } from "./hidden.ts";
 
 const { values: opt } = parseArgs({
@@ -69,7 +72,18 @@ async function round() {
       }
       flows.push([id, f]);
     }
-    for (const d of due(flows, now)) {
+    const todo = due(flows, now);
+    // The owner's price for this keeper's runs (paid by the vault if a step works).
+    // A vault that can't pay it gets no free work: the brain would refuse the step.
+    const fee = BigInt(state?.keeper_fee ?? "0");
+    if (fee > 0n && todo.some((d) => !d.remote)) {
+      const free = await chain.freeNear(brain, vault).catch(() => null);
+      if (free !== null && !canPayKeeper(fee, free)) {
+        log(keeperUnpaid(vault, fee, free));
+        continue;
+      }
+    }
+    for (const d of todo) {
       if (d.remote) {
         log(`${vault} flow ${d.flow} node ${d.node} "${d.label}" is due on another chain: its runner sends step_remote`);
         continue;
@@ -79,8 +93,6 @@ async function round() {
         const raw = await chain.view<string>(s.contract, s.method, JSON.parse(s.args)).catch(() => null);
         if (raw === null || !fired(d, priceOf(raw, s.per))) continue;
       }
-      // The owner's price for this keeper's run (paid by the vault if the step works).
-      const fee = BigInt(state?.keeper_fee ?? "0");
       log(`${vault} flow ${d.flow} node ${d.node} "${d.label}" is due${fee > 0n ? ` (pays ${Number(fee) / 1e24} NEAR)` : ""}`);
       if (!opt.send) continue;
       try {

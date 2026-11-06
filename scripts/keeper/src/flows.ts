@@ -5,6 +5,12 @@
 export const MAX_FAILURES = 3;
 export const NO_INPUT = "none";
 const SCALE = 10n ** 24n;
+/** Where to learn to run your own keeper for free (the brain's fees.rs REPO_URL). */
+export const REPO_URL = "https://github.com/Kombucho/near-flows";
+/** The NEAR a vault always keeps (brain lib.rs RESERVE: 0.05 NEAR). */
+export const RESERVE = 50_000_000_000_000_000_000_000n;
+/** yoctoNEAR per byte of storage. */
+export const BYTE_COST = 10_000_000_000_000_000_000n;
 
 export type Trigger =
   | { when: "now" }
@@ -83,4 +89,22 @@ export function fired(d: Due, price: bigint): boolean {
   if (d.price.below !== undefined) return price <= d.price.below;
   if (d.price.above !== undefined) return price >= d.price.above;
   return false;
+}
+
+/** A vault's free NEAR as the brain counts it (free_near): its balance less its
+ *  storage, the reserve and what its flows hold in NEAR. Never below zero. */
+export function freeNear(balance: bigint, storageBytes: bigint | number, allocatedNear: bigint): bigint {
+  const f = balance - BigInt(storageBytes) * BYTE_COST - RESERVE - allocatedNear;
+  return f > 0n ? f : 0n;
+}
+
+/** Should this keeper run steps for a vault charging `fee`? The brain refuses a
+ *  keeper run the vault can't pay (no free work), so don't spend gas on it. */
+export function canPayKeeper(fee: bigint, free: bigint): boolean {
+  return fee === 0n || free >= fee;
+}
+
+/** The same pointer the brain's refusal carries. */
+export function keeperUnpaid(vault: string, fee: bigint, free: bigint): string {
+  return `${vault}: keeper fee unpaid (price ${fee}, free NEAR ${free} yocto): skipped. Top up NEAR, or run your own keeper for free: ${REPO_URL} (AGENTS.md)`;
 }

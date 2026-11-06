@@ -23,13 +23,19 @@
 //! (`set_keeper`, at most MAX_KEEPER_FEE). After each step or remote report
 //! the keeper ran successfully, the vault pays it that much NEAR. Only the
 //! owner can change it: a keeper raising its price needs the owner's new
-//! `set_keeper`.
+//! `set_keeper`. No free work: a keeper step or remote step on a vault whose
+//! free NEAR can't cover the price is refused UP FRONT (before anything moves,
+//! the vault never left busy), pointing the owner to running their own keeper
+//! for free (REPO_URL, AGENTS.md). The owner can always run it themselves.
 
 use near_sdk::json_types::U128;
 use near_sdk::{env, near, require, AccountId, Gas};
 
 use crate::wire::Answer;
 use crate::{Next, Reply, Talk, NEAR};
+
+/// Where to learn to run your own keeper (fee 0). Placeholder until the owner confirms the repo.
+pub const REPO_URL: &str = "https://github.com/Kombucho/near-flows";
 
 /// A fat-finger guard on the keeper's price: 0.05 NEAR per run.
 pub const MAX_KEEPER_FEE: u128 = 50_000_000_000_000_000_000_000;
@@ -67,6 +73,11 @@ impl Fees {
     }
 }
 
+/// The refusal a keeper gets on a vault that can't pay it (the keeper script logs the same pointer).
+pub fn keeper_unpaid(fee: u128, free: u128) -> String {
+    format!("keeper fee unpaid: the keeper's price is {fee} yoctoNEAR and the vault's free NEAR is {free}: top up NEAR, or run your own keeper for free: {REPO_URL} (AGENTS.md)")
+}
+
 pub(crate) fn fees() -> Fees {
     env::state_read::<crate::Brain>().unwrap_or_else(|| env::panic_str("no state")).fees
 }
@@ -92,7 +103,22 @@ impl Talk {
         ans
     }
 
-    /// The keeper's price for a run it did, if the vault can pay it.
+    /// Before a keeper run (not the owner's): refuse it if the vault can't pay the
+    /// keeper's price. Called before anything moves, so a refusal leaves no trace.
+    pub(crate) fn require_keeper_paid(&self, by_owner: bool) {
+        let fee = self.vs.keeper_fee.0;
+        if by_owner || fee == 0 || self.vs.keeper.is_none() {
+            return;
+        }
+        let free = self.free_near();
+        if free < fee {
+            env::panic_str(&keeper_unpaid(fee, free));
+        }
+    }
+
+    /// The keeper's price for a run it did. Checked up front (`require_keeper_paid`);
+    /// only if the free NEAR left meanwhile (the owner withdrew while a remote step
+    /// was out) does it go unpaid, logged.
     pub(crate) fn pay_keeper(&mut self, ans: Answer) -> Answer {
         let (Some(k), fee) = (self.vs.keeper.clone(), self.vs.keeper_fee.0) else { return ans };
         if fee == 0 {
@@ -203,6 +229,12 @@ mod tests {
     #[should_panic(expected = "fee over its cap")]
     fn a_fee_over_its_cap_is_refused() {
         fees(30, 31).check();
+    }
+
+    #[test]
+    fn the_unpaid_keeper_refusal_points_to_running_your_own() {
+        let m = keeper_unpaid(10, 3);
+        assert!(m.starts_with("keeper fee unpaid") && m.contains("top up NEAR") && m.contains(REPO_URL) && m.contains("AGENTS.md"), "{m}");
     }
 
     #[test]

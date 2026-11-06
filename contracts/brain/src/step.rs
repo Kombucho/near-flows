@@ -99,6 +99,8 @@ impl Talk {
         let by_owner = *sender == self.vs.owner;
         require!(by_owner || Some(sender) == self.vs.keeper.as_ref(), "owner or keeper only");
         self.idle();
+        // No free work: a keeper run the vault can't pay for is refused before anything moves.
+        self.require_keeper_paid(by_owner);
         require!(n.action.remote.is_none(), "a remote node runs with step_remote");
         // A step that runs out of gas halfway leaves the vault busy: refuse up front.
         // (A read moved to its own round checks its share too: `read`.)
