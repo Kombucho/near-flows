@@ -513,38 +513,60 @@ async fn gas_vs_positions() -> anyhow::Result<()> {
     assert_solvent(&w).await
 }
 
+/// A relay vault for `owner` in this world: a brain, a relay factory, the relay
+/// published, then one vault from the factory (no keeper). WHY here and not
+/// relayw::relay_world: the market world above has its own worker, and the vault
+/// must live on the same chain as the market.
+async fn relay_vault(w: &World, owner: &Account) -> anyhow::Result<(Contract, AccountId)> {
+    let root = w.worker.root_account()?;
+    let factory = root.create_subaccount("flows").initial_balance(NearToken::from_near(30)).transact().await?.into_result()?;
+    let brain = root.create_subaccount("brain").initial_balance(NearToken::from_near(15)).transact().await?.into_result()?
+        .deploy(&wasm("brain")).await?.into_result()?;
+    brain.call("new").args_json(json!({"factory": factory.id()})).transact().await?.into_result()?;
+    factory.deploy(&wasm("factory_relay")).await?.into_result()?;
+    factory.call(factory.id(), "new").args_json(json!({"owner": factory.id(), "brain": brain.id()})).transact().await?.into_result()?;
+    factory.call(factory.id(), "publish").args(wasm("relay")).deposit(NearToken::from_near(2)).max_gas().transact().await?.into_result()?;
+    owner.call(factory.id(), "create_vault").args_json(json!({"name": "alice", "keeper": null}))
+        .deposit(NearToken::from_near(2)).max_gas().transact().await?.into_result()?;
+    Ok((brain, format!("alice.{}", factory.id()).parse()?))
+}
+
+/// A request to a relay vault: `{"<method>": <args>}` through its `x` door.
+async fn x(who: &Account, vault: &AccountId, method: &str, args: Value) -> anyhow::Result<ExecutionFinalResult> {
+    Ok(who.call(vault, "x").args(json!({ method: args }).to_string().into_bytes()).max_gas().transact().await?)
+}
+
 /// The market's own nodes inside a flow (nodes/library.json: market_buy,
-/// market_lp_your_bag, market_dip_buy): a vault buys the coin, puts every coin
-/// it receives on a take-profit ladder, and sets dip buys with other wNEAR.
+/// market_lp_your_bag, market_dip_buy): a relay vault buys the coin, puts every
+/// coin it receives on a take-profit ladder, and sets dip buys with other wNEAR.
 #[tokio::test]
 async fn market_nodes_run_inside_a_vault_flow() -> anyhow::Result<()> {
     let w = setup().await?;
-    let vault = w.worker.dev_deploy(&wasm("vault")).await?;
-    vault.call("new").args_json(json!({"owner": w.alice.id(), "keeper": null})).transact().await?.into_result()?;
-    register(&w.owner, &w.coin, vault.id()).await?;
-    register(&w.owner, &w.wnear, vault.id()).await?;
-    w.owner.call(w.market.id(), "storage_deposit").args_json(json!({"account_id": vault.id()})).deposit(NearToken::from_near(1)).transact().await?.into_result()?;
-    transfer(&w.owner, &w.wnear, vault.id(), 50 * ONE).await?;
-    w.alice.call(vault.id(), "trust").args_json(json!({"add": [{"contract": w.market.id()}, {"contract": w.coin.id()}, {"contract": w.wnear.id()}], "remove": []}))
-        .transact().await?.into_result()?;
+    let (_brain, vault) = relay_vault(&w, &w.alice).await?;
+    register(&w.owner, &w.coin, &vault).await?;
+    register(&w.owner, &w.wnear, &vault).await?;
+    w.owner.call(w.market.id(), "storage_deposit").args_json(json!({"account_id": vault})).deposit(NearToken::from_near(1)).transact().await?.into_result()?;
+    transfer(&w.owner, &w.wnear, &vault, 50 * ONE).await?;
+    x(&w.alice, &vault, "trust", json!({"add": [{"contract": w.market.id()}, {"contract": w.coin.id()}, {"contract": w.wnear.id()}], "remove": []}))
+        .await?.into_result()?;
     let recipe = |label: &str, msg: &str, out: Option<&AccountId>| json!({"label": label, "out": out, "min_out_per_in": null, "price": null,
         "calls": [{"call": "ft", "receiver": w.market.id(), "msg": msg, "tgas": 100}]});
-    let f: u32 = w.alice.call(vault.id(), "save_flow").args_json(json!({"name": "memecoin plan", "nodes": [
+    let f: u32 = x(&w.alice, &vault, "save_flow", json!({"name": "memecoin plan", "nodes": [
         {"input": w.wnear.id(), "action": recipe("Buy", r#"{"action":"buy","min_out":"0"}"#, Some(w.coin.id())), "when": {"when": "now"}, "next": [{"to": 1, "bps": 10000}]},
         {"input": w.coin.id(), "action": recipe("LP your bag", r#"{"action":"ladder"}"#, None), "when": {"when": "now"}},
         {"input": w.wnear.id(), "action": recipe("Dip buy", r#"{"action":"wheel"}"#, None), "when": {"when": "now"}},
-    ]})).max_gas().transact().await?.into_result()?.json()?;
+    ]})).await?.into_result()?.json()?;
     for (node, amt) in [(0, 10 * ONE), (2, 10 * ONE)] {
-        w.alice.call(vault.id(), "fund").args_json(json!({"flow_id": f, "node": node, "amount": amt.to_string()})).max_gas().transact().await?.into_result()?;
+        x(&w.alice, &vault, "fund", json!({"flow_id": f, "node": node, "amount": amt.to_string()})).await?.into_result()?;
     }
     for node in [0u16, 1, 2] {
-        let r = w.alice.call(vault.id(), "step").args_json(json!({"flow_id": f, "node": node})).max_gas().transact().await?;
+        let r = x(&w.alice, &vault, "step", json!({"flow_id": f, "node": node})).await?;
         println!("GAS step {node}: {:.1} Tgas {:?}", r.total_gas_burnt.as_gas() as f64 / 1e12, r.logs().iter().filter(|l| l.contains("flows")).collect::<Vec<_>>());
         assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "node {node}: {:?} {:?}", r.logs(), r.failures());
     }
-    assert_eq!(balance(&w.coin, vault.id()).await?, 0, "every coin bought went onto the ladder");
-    assert_eq!(balance(&w.wnear, vault.id()).await?, 30 * ONE, "10 bought, 10 waiting as dip buys");
-    let p = positions(&w, vault.id()).await?;
+    assert_eq!(balance(&w.coin, &vault).await?, 0, "every coin bought went onto the ladder");
+    assert_eq!(balance(&w.wnear, &vault).await?, 30 * ONE, "10 bought, 10 waiting as dip buys");
+    let p = positions(&w, &vault).await?;
     println!("vault positions: {}", p.len());
     assert!(p.len() >= 5, "ladder rungs + dip bids belong to the vault: {}", p.len());
     assert_solvent(&w).await

@@ -433,7 +433,7 @@
       "setup": "x {\"sol_setup\": {signer, max_cu_price, max_cu_limit}}; x {\"sol_allow\": {\"pair\": {in_mint, out_mint, max_in, min_out_per_in_e12}}}",
       "call": "x {\"sol_sign_swap\": {message}} -> event sol_signed {signature}; helper: scripts/keeper `npm run jupiter` (simulates; --broadcast to send)",
       "guards": "solguard: one signer (the vault), no lookup tables, only ComputeBudget/ATA/Jupiter v1 routes, proceeds to the vault's own accounts, no platform fee, floor after slippage, size and fee caps",
-      "tested": "contracts/solguard (synthetic attacks + real Jupiter txs), sandbox/tests/sol.rs; LIVE: solvault.nf-keeper-ksleb.testnet, real MPC signature over a live Jupiter route, verified; Jupiter is mainnet-only so not broadcast; EXECUTED on a Solana mainnet fork (surfpool, scripts/fork-solana.sh): live testnet vault + real MPC signature, 0.1 USDC -> 0.0011 SOL"
+      "tested": "contracts/solguard (synthetic attacks + real Jupiter txs), sandbox/tests/sol.rs; LIVE: solvault.nf-keeper-ksleb.testnet, real MPC signature over a live Jupiter route, verified; Jupiter is mainnet-only so not broadcast; EXECUTED on a Solana mainnet fork (surfpool, with a full vault before relay vaults): live testnet vault + real MPC signature, 0.1 USDC -> 0.0011 SOL"
     },
     {
       "id": "evm_template_call",
