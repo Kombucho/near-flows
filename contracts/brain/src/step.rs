@@ -1,24 +1,26 @@
-//! One step of a flow, as in vault/src/step.rs, but every arrow is a round
-//! trip: the brain answers, the vault executes, the vault's callback asks the
-//! brain again with the results.
+//! One step of a flow, as in vault/src/step.rs. Balances and prices are views,
+//! so the brain reads them ITSELF (its own promises, `on_read`); only the
+//! recipe's calls go through the vault, because only they must come from it:
 //!
-//!   [price view] -> balances before -> call 1 -> ... -> balances after -> finish
+//!   vault x -> brain: [price view] -> balances before -> answer: call 1
+//!   vault cb runs call 1 -> brain on_vault -> answer: call 2 ...
+//!   ... last call -> brain on_vault: balances after -> answer: done
 //!
 //! Each callback carries the step's id: a late callback from a step that was
 //! cleared (`unstick`) can't land in the next step.
 
-use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::json_types::U128;
 use near_sdk::{env, near, require, AccountId, Gas};
 
 use flow::Node;
 
 use crate::wire::Answer;
-use crate::{amount_result, callback, mul_div, result, Brain, BrainExt, Call, Deposit, Recipe, Talk, GAS_BRAIN_CB, GAS_VIEW, NEAR, PRICE_SCALE};
+use crate::{amount_result, mul_div, result, Call, Deposit, Next, Read, Recipe, Reply, Talk, GAS_READ, NEAR, PRICE_SCALE};
 
-/// A relay round: the brain's callback and the vault's `cb`, with receipts.
-const ROUND_TGAS: u64 = 30;
-const VIEW_TGAS: u64 = 5;
+/// The brain's callback after a recipe call: it may read two balances and decide again.
+pub(crate) const GAS_ON_CALL: Gas = Gas::from_tgas(45);
+/// The vault's `cb` (relay GAS_CB) and receipt costs, per round.
+const RELAY_TGAS: u64 = 10;
 
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
@@ -32,139 +34,49 @@ pub struct StepCtx {
     pub out_before: Option<U128>,
     pub native_used: U128,
     pub failed: bool,
+    /// A hidden flow's node, as revealed to run this step.
+    pub revealed: Option<Node<Recipe>>,
 }
 
-#[derive(BorshSerialize, BorshDeserialize)]
-#[borsh(crate = "near_sdk::borsh")]
-pub(crate) struct PriceArgs {
-    flow_id: u32,
-    node: u16,
-    by_owner: bool,
-    per: u128,
-}
-
-#[derive(BorshSerialize, BorshDeserialize)]
-#[borsh(crate = "near_sdk::borsh")]
-pub(crate) struct StepArgs {
-    id: u64,
-    /// on_measured: before (1) or after (0). on_call: the call's index.
-    at: u8,
-}
-
-/// Gas a whole step needs, from the vault's `x` down to its last callback.
+/// Gas the vault's rounds need after the brain's first answer.
 pub fn need_tgas(n: &Node<Recipe>) -> u64 {
-    let measure = 2 * VIEW_TGAS + ROUND_TGAS;
-    let calls: u64 = n.action.calls.iter().map(|c| c.tgas() + ROUND_TGAS).sum();
-    let price = if n.action.price.is_some() { VIEW_TGAS + ROUND_TGAS } else { 0 };
-    ROUND_TGAS + 2 * measure + calls + price
-}
-
-#[near]
-impl Brain {
-    pub fn on_price(&self) {
-        let (mut t, a): (Talk, PriceArgs) = callback();
-        let amount = amount_result(0).unwrap_or_else(|| env::panic_str("price source failed"));
-        require!(a.per > 0, "bad price source");
-        let price = mul_div(amount, PRICE_SCALE, a.per);
-        let ans = t.start(a.flow_id, a.node, Some(price), a.by_owner);
-        t.save(ans).send();
-    }
-
-    pub fn on_measured(&self) {
-        let (mut t, a): (Talk, StepArgs) = callback();
-        let mut ctx = t.current(a.id);
-        let (input, out) = t.tokens(&ctx);
-        let mut i = 0;
-        let mut next = || {
-            i += 1;
-            amount_result(i - 1)
-        };
-        let in_bal = input.map(|_| next());
-        let out_bal = out.map(|_| next());
-        let ans = if a.at == 1 {
-            if in_bal == Some(None) || out_bal == Some(None) {
-                // Couldn't even read a balance: nothing happened, give the input back.
-                t.end(Err(ctx.amount.0), 0, false)
-            } else {
-                ctx.in_before = in_bal.flatten().map(U128);
-                ctx.out_before = out_bal.flatten().map(U128);
-                t.vs.busy = Some(ctx);
-                t.run_call(0)
-            }
-        } else {
-            let in_used = match (ctx.in_before, in_bal) {
-                (Some(b), Some(Some(a))) => b.0.saturating_sub(a).min(ctx.amount.0),
-                (Some(_), _) => ctx.amount.0,
-                (None, _) => ctx.native_used.0,
-            };
-            let out_amount = match (ctx.out_before, out_bal) {
-                (Some(b), Some(Some(a))) => a.saturating_sub(b.0),
-                _ => 0,
-            };
-            let left = ctx.amount.0 - in_used;
-            let collector = t.node(&ctx).input == flow::NO_INPUT;
-            ctx.failed |= in_used == 0 && !collector;
-            if ctx.failed {
-                t.end(Err(left), out_amount, false)
-            } else {
-                t.end(Ok(out_amount), in_used, true)
-            }
-        };
-        t.save(ans).send();
-    }
-
-    pub fn on_call(&self) {
-        let (mut t, a): (Talk, StepArgs) = callback();
-        let mut ctx = t.current(a.id);
-        let calls = t.node(&ctx).action.calls;
-        let i = a.at as usize;
-        // ft_transfer_call "succeeds" even when the receiver refuses and refunds:
-        // zero used = refused, and the rest of the recipe must not run.
-        let ok = match (&calls[i], result(0)) {
-            (_, None) => false,
-            (Call::Ft { .. }, Some(raw)) => near_sdk::serde_json::from_slice::<U128>(&raw).map_or(false, |used| used.0 > 0),
-            (Call::Fn { .. }, Some(_)) => true,
-        };
-        let ans = if ok {
-            if matches!(calls[i], Call::Fn { deposit: Deposit::Input, .. }) {
-                ctx.native_used = ctx.amount;
-            }
-            t.vs.busy = Some(ctx);
-            if i + 1 < calls.len() { t.run_call(a.at + 1) } else { t.measure(false) }
-        } else {
-            ctx.failed = true;
-            t.vs.busy = Some(ctx);
-            t.measure(false)
-        };
-        t.save(ans).send();
-    }
+    n.action.calls.iter().map(|c| c.tgas() + GAS_ON_CALL.as_tgas() + RELAY_TGAS).sum::<u64>() + RELAY_TGAS
 }
 
 impl Talk {
-    pub(crate) fn begin_step(&mut self, sender: &AccountId, flow_id: u32, node: u16) -> Answer {
+    /// Run node `n` (stored, or revealed by the caller and already checked).
+    pub(crate) fn begin_step(&mut self, sender: &AccountId, flow_id: u32, node: u16, n: Node<Recipe>, hidden: bool) -> Reply {
         let by_owner = *sender == self.vs.owner;
         require!(by_owner || Some(sender) == self.vs.keeper.as_ref(), "owner or keeper only");
         self.idle();
-        let n = self.flow(flow_id).nodes.get(node as usize).unwrap_or_else(|| env::panic_str("no such node")).clone();
         // A step that runs out of gas halfway leaves the vault busy: refuse up front.
         let need = need_tgas(&n);
-        require!(self.ctx.gas_left / 1_000_000_000_000 >= need, format!("attach at least {need} Tgas for this step"));
-        if let Some(why) = self.untrusted(&n) {
-            env::panic_str(&format!("untrusted: {why}"));
-        }
+        require!(self.ctx.gas_left / 1_000_000_000_000 >= need, format!("attach at least {} Tgas for this step", need + crate::HANDLE_TGAS));
+        // Trust can be withdrawn after a flow was saved: check again before every step.
+        self.check_node(&n);
+        let revealed = hidden.then(|| n.clone());
         if matches!(n.when, flow::Trigger::PriceBelow { .. } | flow::Trigger::PriceAbove { .. }) {
             let src = n.action.price.clone().unwrap_or_else(|| env::panic_str("price trigger without a price source"));
-            let args = borsh::to_vec(&PriceArgs { flow_id, node, by_owner, per: src.per.0 }).unwrap();
-            return Answer::default().call(&src.contract, &src.method, src.args.as_bytes(), 0, GAS_VIEW).then("on_price", args, GAS_BRAIN_CB);
+            // Its callback reads the balances next, so it gets two reads' worth.
+            let read = Read::Price { flow_id, node, by_owner, per: src.per.0, revealed };
+            return self.read(vec![(src.contract, src.method, src.args)], read, Gas::from_tgas(2 * GAS_READ.as_tgas()));
         }
-        self.start(flow_id, node, None, by_owner)
+        self.start(flow_id, node, None, by_owner, revealed)
     }
 
-    fn start(&mut self, flow_id: u32, node: u16, price: Option<u128>, by_owner: bool) -> Answer {
+    pub(crate) fn on_price(&mut self, flow_id: u32, node: u16, by_owner: bool, per: u128, revealed: Option<Node<Recipe>>) -> Reply {
+        let amount = amount_result(0).unwrap_or_else(|| env::panic_str("price source failed"));
+        require!(per > 0, "bad price source");
+        self.start(flow_id, node, Some(mul_div(amount, PRICE_SCALE, per)), by_owner, revealed)
+    }
+
+    fn start(&mut self, flow_id: u32, node: u16, price: Option<u128>, by_owner: bool, revealed: Option<Node<Recipe>>) -> Reply {
         self.idle();
         let now = env::block_timestamp();
         let f = self.flow_mut(flow_id);
-        let amount = f.ledger.begin(&f.nodes, node, now, price, by_owner).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
+        let n = revealed.clone().unwrap_or_else(|| f.nodes[node as usize].clone());
+        let amount = f.ledger.begin_node(&n, node, now, price, by_owner).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
+        self.charge(&n.input, amount);
         let id = self.vs.next_step;
         self.vs.next_step += 1;
         self.vs.busy = Some(StepCtx {
@@ -177,6 +89,7 @@ impl Talk {
             out_before: None,
             native_used: U128(0),
             failed: false,
+            revealed,
         });
         self.measure(true)
     }
@@ -185,9 +98,9 @@ impl Talk {
         let ctx = self.vs.busy.clone().unwrap_or_else(|| env::panic_str("nothing running"));
         require!(env::block_timestamp() >= ctx.started_ns + crate::STUCK_NS, "the step may still finish");
         self.vs.busy = None;
+        let n = self.node(&ctx);
         let f = self.flow_mut(ctx.flow);
-        let nodes = f.nodes.clone();
-        let _ = f.ledger.finish(&nodes, ctx.node, Err(0));
+        let _ = f.ledger.finish_node(&n, ctx.node, Err(0));
         f.ledger.pause(ctx.node).ok();
     }
 
@@ -199,7 +112,7 @@ impl Talk {
     }
 
     fn node(&self, ctx: &StepCtx) -> Node<Recipe> {
-        self.flow(ctx.flow).nodes[ctx.node as usize].clone()
+        ctx.revealed.clone().unwrap_or_else(|| self.flow(ctx.flow).nodes[ctx.node as usize].clone())
     }
 
     fn tokens(&self, ctx: &StepCtx) -> (Option<AccountId>, Option<AccountId>) {
@@ -208,26 +121,98 @@ impl Talk {
         (input, n.action.out.clone())
     }
 
-    /// Read the vault's balances of the step's tokens, then `on_measured`.
-    fn measure(&self, before: bool) -> Answer {
+    /// The brain reads the vault's balances of the step's tokens, then `on_measured`.
+    /// Nothing to read (NEAR in, nothing out): decide right away.
+    fn measure(&mut self, before: bool) -> Reply {
         let ctx = self.vs.busy.clone().unwrap();
         let (input, out) = self.tokens(&ctx);
-        let mut a = Answer::default();
-        for t in input.iter().chain(out.iter()) {
-            a = a.call(t, "ft_balance_of", format!(r#"{{"account_id":"{}"}}"#, self.vault).as_bytes(), 0, GAS_VIEW);
+        if input.is_none() && out.is_none() {
+            return self.measured(ctx, before, None, None);
         }
-        // Nothing to measure (NEAR in, nothing out): the callback runs straight away.
-        a.then("on_measured", borsh::to_vec(&StepArgs { id: ctx.id, at: before as u8 }).unwrap(), GAS_BRAIN_CB)
+        let views = input.iter().chain(out.iter()).map(|t| self.balance_view(t)).collect();
+        self.read(views, Read::Measured { id: ctx.id, before }, GAS_READ)
     }
 
-    fn run_call(&mut self, i: u8) -> Answer {
+    pub(crate) fn on_measured(&mut self, id: u64, before: bool) -> Reply {
+        let ctx = self.current(id);
+        let (input, out) = self.tokens(&ctx);
+        let mut i = 0;
+        let mut next = || {
+            i += 1;
+            amount_result(i - 1)
+        };
+        let in_bal = input.map(|_| next());
+        let out_bal = out.map(|_| next());
+        self.measured(ctx, before, in_bal, out_bal)
+    }
+
+    /// `in_bal` / `out_bal`: None = no such token; Some(None) = the read failed.
+    fn measured(&mut self, mut ctx: StepCtx, before: bool, in_bal: Option<Option<u128>>, out_bal: Option<Option<u128>>) -> Reply {
+        if before {
+            if in_bal == Some(None) || out_bal == Some(None) {
+                // Couldn't even read a balance: nothing happened, give the input back.
+                return self.end(Err(ctx.amount.0), 0, false);
+            }
+            ctx.in_before = in_bal.flatten().map(U128);
+            ctx.out_before = out_bal.flatten().map(U128);
+            self.vs.busy = Some(ctx);
+            return self.run_call(0);
+        }
+        let in_used = match (ctx.in_before, in_bal) {
+            (Some(b), Some(Some(a))) => b.0.saturating_sub(a).min(ctx.amount.0),
+            (Some(_), _) => ctx.amount.0, // unknown: assume spent (the rest shows up as free)
+            (None, _) => ctx.native_used.0,
+        };
+        let out_amount = match (ctx.out_before, out_bal) {
+            (Some(b), Some(Some(a))) => a.saturating_sub(b.0),
+            _ => 0,
+        };
+        let left = ctx.amount.0 - in_used;
+        // A call can "succeed" without doing anything (a refused ft_transfer_call
+        // just refunds): nothing spent = failed, unless it's a collector.
+        let collector = self.node(&ctx).input == flow::NO_INPUT;
+        if ctx.failed || (in_used == 0 && !collector) {
+            self.end(Err(left), out_amount, false)
+        } else {
+            self.end(Ok(out_amount), in_used, true)
+        }
+    }
+
+    /// The vault's recipe call `i` came back.
+    pub(crate) fn on_call(&mut self, id: u64, i: u8) -> Reply {
+        let mut ctx = self.current(id);
+        let calls = self.node(&ctx).action.calls;
+        let c = i as usize;
+        // ft_transfer_call "succeeds" even when the receiver refuses and refunds:
+        // zero used = refused, and the rest of the recipe must not run.
+        let ok = match (&calls[c], result(0, 1024)) {
+            (_, None) => false,
+            (Call::Ft { .. }, Some(raw)) => near_sdk::serde_json::from_slice::<U128>(&raw).map_or(false, |used| used.0 > 0),
+            (Call::Fn { .. }, Some(_)) => true,
+        };
+        if ok {
+            if matches!(calls[c], Call::Fn { deposit: Deposit::Input, .. }) {
+                ctx.native_used = ctx.amount;
+            }
+            self.vs.busy = Some(ctx);
+            if c + 1 < calls.len() {
+                return self.run_call(i + 1);
+            }
+        } else {
+            ctx.failed = true;
+            self.vs.busy = Some(ctx);
+        }
+        self.measure(false)
+    }
+
+    /// Answer: the vault runs recipe call `i`, then `on_vault` Call.
+    fn run_call(&mut self, i: u8) -> Reply {
         let mut ctx = self.vs.busy.clone().unwrap();
         let node = self.node(&ctx);
         let call = &node.action.calls[i as usize];
-        // Not enough gas left to launch this call and come back: close the step
-        // as failed (measuring what moved) rather than leave the vault stuck.
-        let left = self.ctx.gas_left / 1_000_000_000_000;
-        if left < call.tgas() + 2 * ROUND_TGAS + 2 * VIEW_TGAS + 20 {
+        // Not enough gas left in the vault's next round to launch this call and
+        // come back: close the step as failed rather than leave the vault stuck.
+        if self.ctx.gas_left / 1_000_000_000_000 < call.tgas() + GAS_ON_CALL.as_tgas() + 2 * RELAY_TGAS {
             ctx.failed = true;
             self.vs.busy = Some(ctx);
             return self.measure(false);
@@ -242,7 +227,7 @@ impl Talk {
                 .replace("{owner}", self.vs.owner.as_str())
                 .replace("{vault}", self.vault.as_str())
         };
-        let args = borsh::to_vec(&StepArgs { id: ctx.id, at: i }).unwrap();
+        let next = near_sdk::borsh::to_vec(&Next::Call { id: ctx.id, i }).unwrap();
         let a = match call {
             Call::Ft { receiver, msg, tgas } => {
                 let token: AccountId = node.input.parse().unwrap();
@@ -259,18 +244,18 @@ impl Talk {
                 Answer::default().call(contract, method, fill(args).as_bytes(), attach, Gas::from_tgas(*tgas))
             }
         };
-        a.then("on_call", args, GAS_BRAIN_CB)
+        a.then("on_vault", next, GAS_ON_CALL).into()
     }
 
     /// Close the step. `result`: Ok(output) or Err(input that came back).
-    fn end(&mut self, result: Result<u128, u128>, extra: u128, ok: bool) -> Answer {
+    fn end(&mut self, result: Result<u128, u128>, extra: u128, ok: bool) -> Reply {
         let ctx = self.vs.busy.take().unwrap();
         let node = self.node(&ctx);
         let min = mul_div(extra, node.action.min_out_per_in.map_or(0, |m| m.0), PRICE_SCALE);
+        // A collector finding nothing yet is normal; only spenders must get something back.
         let promises_output = node.action.out.is_some() && node.input != flow::NO_INPUT;
         let f = self.flow_mut(ctx.flow);
-        let nodes = f.nodes.clone();
-        f.ledger.finish(&nodes, ctx.node, result).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
+        f.ledger.finish_node(&node, ctx.node, result).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
         let mut paused = false;
         if let Ok(out) = result {
             if out < min || (promises_output && out == 0) {
@@ -289,6 +274,6 @@ impl Talk {
             if ok { "used" } else { "stray_out" }
         );
         self.emit(if ok { "step" } else { "step_failed" }, &data);
-        Answer::default().ret(&format!("{{{data}}}"))
+        Answer::default().ret(&format!("{{{data}}}")).into()
     }
 }

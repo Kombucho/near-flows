@@ -8,14 +8,18 @@
 //!
 //! A vault gets NO access keys, and the relay has no code path that deploys:
 //! nobody can ever change its code or its brain.
+//!
+//! Two kinds, as in factory/src/lib.rs: named (`create_vault`, owner -> vault
+//! remembered) and stealth (`create_stealth_vault`, owned by a key; the caller,
+//! typically a relayer, is neither kept nor logged).
 
 use near_sdk::store::{LookupMap, Vector};
-use near_sdk::{env, near, require, AccountId, CryptoHash, Gas, NearToken, PanicOnDefault, Promise, PromiseError};
+use near_sdk::{env, near, require, AccountId, CryptoHash, CurveType, Gas, NearToken, PanicOnDefault, Promise, PromiseError, PublicKey};
 
 /// A new vault's funding: its own few bytes, the 0.05 NEAR reserve, its record in the brain, headroom.
 pub const MIN_VAULT_DEPOSIT: NearToken = NearToken::from_millinear(100);
 /// The relay's `new` asks the brain, which answers; that whole round runs on this.
-const GAS_INIT: Gas = Gas::from_tgas(60);
+const GAS_INIT: Gas = Gas::from_tgas(100);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
 
 #[near(contract_state)]
@@ -56,23 +60,34 @@ impl Factory {
         let deposit = env::attached_deposit();
         require!(deposit >= MIN_VAULT_DEPOSIT, "attach at least 0.1 NEAR");
         require!(!self.vaults.contains_key(&owner), "you already have a vault");
-        require!(
-            (2..=32).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'),
-            "name: 2-32 of a-z 0-9 - _"
-        );
-        let hash = self.code_hash.unwrap_or_else(|| env::panic_str("no vault code published yet"));
-        let vault: AccountId = format!("{name}.{}", env::current_account_id()).parse().unwrap_or_else(|_| env::panic_str("bad name"));
+        let vault = self.vault_id(&name);
         self.vaults.insert(owner.clone(), vault.clone());
-        // Relay init: u8 length + brain account, then the request the brain sees.
-        let mut init = vec![self.brain.len() as u8];
-        init.extend(self.brain.as_bytes());
-        init.extend(near_sdk::serde_json::json!({"init": {"owner": owner, "keeper": keeper}}).to_string().into_bytes());
-        Promise::new(vault.clone())
-            .create_account()
-            .transfer(deposit)
-            .use_global_contract(hash)
-            .function_call("new".to_string(), init, NearToken::from_yoctonear(0), GAS_INIT)
+        self.deploy(&vault, deposit, near_sdk::serde_json::json!({"init": {"owner": owner, "keeper": keeper}}))
             .then(Self::ext(env::current_account_id()).with_static_gas(GAS_CALLBACK).on_created(owner, vault, deposit))
+    }
+
+    /// Create a stealth vault `<name>.<factory>` owned by `owner_key` (`ed25519:<base58>`).
+    /// The caller (anyone, e.g. a relayer) is not recorded; a taken name refunds it.
+    #[payable]
+    pub fn create_stealth_vault(&mut self, name: String, owner_key: PublicKey, keeper: Option<AccountId>) -> Promise {
+        let deposit = env::attached_deposit();
+        require!(deposit >= MIN_VAULT_DEPOSIT, "attach at least 0.1 NEAR");
+        require!(owner_key.curve_type() == CurveType::ED25519, "the owner key must be ed25519");
+        let vault = self.vault_id(&name);
+        self.deploy(&vault, deposit, near_sdk::serde_json::json!({"init_stealth": {"owner_key": owner_key, "keeper": keeper}}))
+            .then(Self::ext(env::current_account_id()).with_static_gas(GAS_CALLBACK).on_created_stealth(env::predecessor_account_id(), vault, deposit))
+    }
+
+    /// Like `on_created`, but the payer is neither kept nor logged: it's only here to refund.
+    #[private]
+    pub fn on_created_stealth(&mut self, payer: AccountId, vault: AccountId, deposit: NearToken, #[callback_result] r: Result<(), PromiseError>) -> bool {
+        if r.is_ok() {
+            self.list.push(vault.clone());
+            env::log_str(&format!(r#"EVENT_JSON:{{"standard":"flows","version":"1.0.0","event":"vault_created","data":[{{"stealth":true,"vault":"{vault}"}}]}}"#));
+            return true;
+        }
+        Promise::new(payer).transfer(deposit).detach();
+        false
     }
 
     /// If the vault couldn't be made (e.g. the name is taken), forget it and
@@ -109,5 +124,29 @@ impl Factory {
 
     pub fn get_code_hash(&self) -> Option<String> {
         self.code_hash.map(|h| near_sdk::bs58::encode(h).into_string())
+    }
+}
+
+impl Factory {
+    fn vault_id(&self, name: &str) -> AccountId {
+        require!(
+            (2..=32).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'),
+            "name: 2-32 of a-z 0-9 - _"
+        );
+        format!("{name}.{}", env::current_account_id()).parse().unwrap_or_else(|_| env::panic_str("bad name"))
+    }
+
+    /// Make the keyless account on the published relay; its `new` gets the brain's
+    /// account (u8 length + bytes) followed by the init request the brain sees.
+    fn deploy(&self, vault: &AccountId, deposit: NearToken, request: near_sdk::serde_json::Value) -> Promise {
+        let hash = self.code_hash.unwrap_or_else(|| env::panic_str("no vault code published yet"));
+        let mut init = vec![self.brain.len() as u8];
+        init.extend(self.brain.as_bytes());
+        init.extend(request.to_string().into_bytes());
+        Promise::new(vault.clone())
+            .create_account()
+            .transfer(deposit)
+            .use_global_contract(hash)
+            .function_call("new".to_string(), init, NearToken::from_yoctonear(0), GAS_INIT)
     }
 }

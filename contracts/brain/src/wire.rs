@@ -1,12 +1,15 @@
 //! The brain's side of the relay wire format (documented in relay/src/lib.rs):
 //! reading the header every vault call carries, and writing answers.
 
+use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::{env, AccountId, Gas};
 
 pub const VERSION: u8 = 1;
 
-/// What the vault reports about itself and its caller.
-#[derive(Clone, Debug)]
+/// What the vault reports about itself and its caller. `gas_left` is rewritten by the
+/// brain on entry to "what the vault's next round will have" (see `Talk::open`).
+#[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
 pub struct Ctx {
     pub balance: u128,
     pub storage: u64,
