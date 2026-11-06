@@ -1,5 +1,4 @@
-//! Solana through NEAR Chain Signatures, as vault/src/sol.rs and
-//! soltemplates.rs: the keeper brings a message (a Jupiter swap, or a
+//! Solana through NEAR Chain Signatures: the keeper brings a message (a Jupiter swap, or a
 //! transaction made only of the owner's instruction templates: pump.fun,
 //! Meteora, pump AMM...); the brain checks every byte with solguard, counts the
 //! spending READ FROM THE MESSAGE, and answers with the vault's `sign` call
@@ -294,7 +293,7 @@ impl Talk {
         Answer::default().ret(&ret).into()
     }
 
-    // ---------- templates (vault/src/soltemplates.rs) ----------
+    // ---------- templates ----------
 
     pub(crate) fn sol_owner_wallet(&mut self, wallet: Option<String>) {
         if let Some(w) = &wallet {

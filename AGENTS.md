@@ -37,7 +37,7 @@ Check: `ls scripts/keeper/node_modules/near-api-js` exists.
 
 ```
 make build    # every contract's wasm, into contracts/target/near/<name>/<name>.wasm
-make test     # unit tests (math, engine, market, bazaar, flow, vault, relay, brain...)
+make test     # unit tests (math, engine, market, bazaar, flow, solguard, priceboard, relay, brain)
 cd scripts/keeper && npm test    # keeper unit tests (pure logic, no network)
 ```
 

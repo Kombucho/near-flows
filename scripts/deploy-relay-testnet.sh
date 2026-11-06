@@ -31,7 +31,7 @@ TREASURY="${TREASURY_ID:-$OWNER}"
 FEES="{\"treasury\":\"$TREASURY\",\"admin\":\"$OWNER\",\"cap_bps\":30,\"bps\":10,\"per_signature\":\"10000000000000000000000\",\"per_signature_cap\":\"50000000000000000000000\"}"
 VAULT_NAME="${VAULT_NAME:-demo}"
 VAULT="$VAULT_NAME.$FACTORY"
-# Real testnet contracts (same as deploy-flows-testnet.sh).
+# Real testnet contracts.
 WRAP="wrap.testnet"
 RHEA="ref-finance-101.testnet"
 LINEAR="linear-protocol.testnet"
@@ -253,7 +253,7 @@ if want oracle; then
 fi
 
 if want flow; then
-  # Same flow as deploy-flows-testnet.sh. No market floors here: testnet Rhea pools don't
+  # No market floors here: testnet Rhea pools don't
   # track Pyth (1 wNEAR buys ~1.24 testnet USDT), so a floor would rightly refuse every swap.
   echo "== demo flow: 1 NEAR -> LiNEAR; 2 NEAR -> wrap -> half USDT, half memecoin; 0.5 NEAR DCA into LiNEAR every 10 min"
   need "$OWNER" 0.05

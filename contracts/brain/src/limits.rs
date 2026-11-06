@@ -1,4 +1,4 @@
-//! Spending limits, as vault/src/limits.rs: "flows may spend at most X of this
+//! Spending limits: "flows may spend at most X of this
 //! token per period". Every step's input (and every intent's) counts, whoever
 //! runs it. Tightening takes effect at once; loosening or removing waits
 //! LOOSEN_DELAY_NS, so a hijacked agent can't raise the cap and drain in one go.

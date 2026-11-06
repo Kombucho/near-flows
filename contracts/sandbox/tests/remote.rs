@@ -1,16 +1,18 @@
-//! Remote flow nodes: a flow whose nodes sign transactions on other chains.
-//! The vault checks each trigger itself (price triggers from the oracle, here
-//! mock_pyth with the real receiver's interface), puts the node's own input in
-//! the transaction, signs it (mock_signer really signs), and routes the output
-//! the keeper reports, but only between the minimum it signed and the node's cap.
+//! Remote flow nodes on a relay vault: a flow whose nodes sign transactions on
+//! other chains. The brain checks each trigger itself (price triggers from the
+//! oracle, here mock_pyth with the real receiver's interface), puts the node's
+//! own input in the transaction, has the vault sign it (mock_signer really
+//! signs), and routes the output the keeper reports, but only between the
+//! minimum it signed and the node's cap.
 
 mod common;
 mod ladder;
+mod relayw;
 
 use base64::Engine;
-use common::wasm;
 use ladder::*;
 use near_workspaces::result::ExecutionFinalResult;
+use relayw::{relay_world, view, x};
 use serde_json::{json, Value};
 
 fn num(v: &Value) -> u128 {
@@ -24,20 +26,20 @@ fn fails_with(r: &ExecutionFinalResult, why: &str) -> bool {
 #[tokio::test]
 async fn a_take_profit_ladder_fires_on_oracle_prices_and_routes_only_bounded_reports() -> anyhow::Result<()> {
     let w = world().await?;
-    let f: u32 = w.alice.call(w.vault.id(), "save_flow").args_json(json!({"name": "NVDA ladder", "nodes": ladder()})).max_gas().transact().await?.into_result()?.json()?;
+    let f: u32 = req(&w, &w.alice, "save_flow", json!({"name": "NVDA ladder", "nodes": ladder()})).await?.into_result()?.json()?;
     let eth_in = 30_000_000_000_000_000u128; // 0.03 ETH
     // The vault can't see its ETH on Robinhood Chain: the owner's word funds the entry node; nobody else's.
-    assert!(w.keeper.call(w.vault.id(), "fund").args_json(json!({"flow_id": f, "node": 0, "amount": eth_in.to_string()})).transact().await?.is_failure());
-    w.alice.call(w.vault.id(), "fund").args_json(json!({"flow_id": f, "node": 0, "amount": eth_in.to_string()})).max_gas().transact().await?.into_result()?;
-    assert!(fails_with(&w.keeper.call(w.vault.id(), "step").args_json(json!({"flow_id": f, "node": 0})).max_gas().transact().await?, "step_remote"), "a remote node isn't a NEAR step");
+    assert!(req(&w, &w.keeper, "fund", json!({"flow_id": f, "node": 0, "amount": eth_in.to_string()})).await?.is_failure());
+    req(&w, &w.alice, "fund", json!({"flow_id": f, "node": 0, "amount": eth_in.to_string()})).await?.into_result()?;
+    assert!(fails_with(&req(&w, &w.keeper, "step", json!({"flow_id": f, "node": 0})).await?, "step_remote"), "a remote node isn't a NEAR step");
 
     // Buy: the keeper asks for 999 ETH in; the vault signs the node's 0.03 ETH, a deadline 5 minutes out,
     // and the template's floor (10.67 NVDA per ETH) since the keeper's quote (1 wei) is lower.
     let r = step(&w, &w.keeper, f, 0, evm_args(v4_values(1, true), 0)).await?;
     assert!(r.logs().iter().any(|l| l.contains("evm_signed")), "{:?} {:?}", r.logs(), r.failures());
-    let req = event(&r, "evm_call_requested");
-    assert_eq!(req["value"], json!(eth_in.to_string()), "the ETH attached is the node's input");
-    let data = req["data"].as_str().unwrap().to_string();
+    let call = event(&r, "evm_call_requested");
+    assert_eq!(call["value"], json!(eth_in.to_string()), "the ETH attached is the node's input");
+    let data = call["data"].as_str().unwrap().to_string();
     assert!(data.contains(&format!("{eth_in:064x}")) && !data.contains(&format!("{:064x}", 999 * E18)));
     let s = event(&r, "remote_step");
     let min = eth_in * 1067 / 100; // 0.32010 NVDA
@@ -47,7 +49,7 @@ async fn a_take_profit_ladder_fires_on_oracle_prices_and_routes_only_bounded_rep
 
     // While it's out there: the node can't run again, the flow can't be drained, and only the owner may call it failed.
     assert!(fails_with(&step(&w, &w.keeper, f, 0, evm_args(v4_values(1, true), 1)).await?, "Busy"));
-    assert!(w.alice.call(w.vault.id(), "drain").args_json(json!({"flow_id": f})).transact().await?.is_failure());
+    assert!(req(&w, &w.alice, "drain", json!({"flow_id": f})).await?.is_failure());
     assert!(fails_with(&report(&w, &w.keeper, f, 0, None).await?, "may still land"));
     // Reports outside the bounds: less than the signed minimum (that tx reverted), more than the cap.
     assert!(fails_with(&report(&w, &w.keeper, f, 0, Some(min - 1)).await?, "below the signed minimum"));
@@ -101,9 +103,9 @@ async fn a_take_profit_ladder_fires_on_oracle_prices_and_routes_only_bounded_rep
 #[tokio::test]
 async fn a_remote_step_that_did_not_land_gives_its_input_back_only_once_it_cannot_land() -> anyhow::Result<()> {
     let w = world().await?;
-    let f: u32 = w.alice.call(w.vault.id(), "save_flow").args_json(json!({"name": "ladder", "nodes": ladder()})).max_gas().transact().await?.into_result()?.json()?;
+    let f: u32 = req(&w, &w.alice, "save_flow", json!({"name": "ladder", "nodes": ladder()})).await?.into_result()?.json()?;
     let eth_in = 10_000_000_000_000_000u128;
-    w.alice.call(w.vault.id(), "fund").args_json(json!({"flow_id": f, "node": 0, "amount": eth_in.to_string()})).max_gas().transact().await?.into_result()?;
+    req(&w, &w.alice, "fund", json!({"flow_id": f, "node": 0, "amount": eth_in.to_string()})).await?.into_result()?;
     let r = step(&w, &w.keeper, f, 0, evm_args(v4_values(1, true), 0)).await?;
     let expires = event(&r, "remote_step")["expires_ns"].as_u64().unwrap();
     assert!(fails_with(&report(&w, &w.keeper, f, 0, None).await?, "may still land"));
@@ -137,8 +139,8 @@ async fn a_remote_node_spends_only_what_its_template_spends_and_counts_against_l
     bad[1]["action"]["remote"]["out"] = json!(tok(NVDA));
     bad[1]["next"] = json!([]);
     bad[0]["next"] = json!([]);
-    let f: u32 = w.alice.call(w.vault.id(), "save_flow").args_json(json!({"name": "bad", "nodes": [bad[0].clone(), bad[1].clone()]})).max_gas().transact().await?.into_result()?.json()?;
-    w.alice.call(w.vault.id(), "fund").args_json(json!({"flow_id": f, "node": 1, "amount": "1000"})).max_gas().transact().await?.into_result()?;
+    let f: u32 = req(&w, &w.alice, "save_flow", json!({"name": "bad", "nodes": [bad[0].clone(), bad[1].clone()]})).await?.into_result()?.json()?;
+    req(&w, &w.alice, "fund", json!({"flow_id": f, "node": 1, "amount": "1000"})).await?.into_result()?;
     nvda_price(&w, 500, 0).await?;
     assert!(fails_with(&step(&w, &w.keeper, f, 1, evm_args(v4_values(1, false), 0)).await?, "doesn't spend evm:4663:eth"));
     assert_eq!(inbox(&ledger(&w, f).await?, 1), 1000, "the refusal undid the ledger too");
@@ -147,12 +149,12 @@ async fn a_remote_node_spends_only_what_its_template_spends_and_counts_against_l
     let mut uncapped = ladder();
     uncapped[0]["action"]["remote"]["max_out_per_in"] = Value::Null;
     uncapped[0]["next"] = json!([]);
-    assert!(w.alice.call(w.vault.id(), "save_flow").args_json(json!({"name": "x", "nodes": [uncapped[0].clone()]})).max_gas().transact().await?.is_failure());
+    assert!(req(&w, &w.alice, "save_flow", json!({"name": "x", "nodes": [uncapped[0].clone()]})).await?.is_failure());
 
     // A spending limit on ETH (0.015 per hour) holds across remote steps, whoever runs them.
-    w.alice.call(w.vault.id(), "set_limit").args_json(json!({"token": "evm:4663:eth", "max": "15000000000000000", "window_ns": 3_600_000_000_000u64})).transact().await?.into_result()?;
-    let f: u32 = w.alice.call(w.vault.id(), "save_flow").args_json(json!({"name": "ladder", "nodes": ladder()})).max_gas().transact().await?.into_result()?.json()?;
-    w.alice.call(w.vault.id(), "fund").args_json(json!({"flow_id": f, "node": 0, "amount": "20000000000000000"})).max_gas().transact().await?.into_result()?;
+    req(&w, &w.alice, "set_limit", json!({"token": "evm:4663:eth", "max": "15000000000000000", "window_ns": 3_600_000_000_000u64})).await?.into_result()?;
+    let f: u32 = req(&w, &w.alice, "save_flow", json!({"name": "ladder", "nodes": ladder()})).await?.into_result()?.json()?;
+    req(&w, &w.alice, "fund", json!({"flow_id": f, "node": 0, "amount": "20000000000000000"})).await?.into_result()?;
     assert!(fails_with(&step(&w, &w.keeper, f, 0, evm_args(v4_values(1, true), 0)).await?, "spending limit"));
     assert_eq!(inbox(&ledger(&w, f).await?, 0), 20_000_000_000_000_000);
     Ok(())
@@ -165,20 +167,20 @@ async fn a_hidden_remote_node_runs_only_as_committed() -> anyhow::Result<()> {
     let salts: Vec<String> = (0..nodes.len()).map(|i| format!("{:02x}", i + 1).repeat(32)).collect();
     let mut prints = Vec::new();
     for (n, s) in nodes.iter().zip(&salts) {
-        prints.push(w.vault.view("fingerprint_of").args_json(json!({"node": n, "salt": s})).await?.json::<String>()?);
+        prints.push(w.brain.view("fingerprint_of").args_json(json!({"node": n, "salt": s})).await?.json::<String>()?);
     }
     let inputs: Vec<Value> = nodes.iter().map(|n| n["input"].clone()).collect();
-    let f: u32 = w.alice.call(w.vault.id(), "save_hidden_flow").args_json(json!({"name": "secret ladder", "inputs": inputs, "fingerprints": prints}))
-        .transact().await?.into_result()?.json()?;
-    w.alice.call(w.vault.id(), "fund").args_json(json!({"flow_id": f, "node": 0, "amount": "10000000000000000"})).max_gas().transact().await?.into_result()?;
+    let f: u32 = req(&w, &w.alice, "save_hidden_flow", json!({"name": "secret ladder", "inputs": inputs, "fingerprints": prints}))
+        .await?.into_result()?.json()?;
+    req(&w, &w.alice, "fund", json!({"flow_id": f, "node": 0, "amount": "10000000000000000"})).await?.into_result()?;
     let run = |reveal: Value, salt: &str| {
         json!({"flow_id": f, "node": 0, "args": evm_args(v4_values(1, true), 0), "reveal": reveal, "salt": salt})
     };
     // A keeper swapping in a looser node (a 1000x cap) doesn't match the commitment.
     let mut greedy = nodes[0].clone();
     greedy["action"]["remote"]["max_out_per_in"] = json!((20_000 * E24).to_string());
-    assert!(fails_with(&w.keeper.call(w.vault.id(), "step_remote").args_json(run(greedy, &salts[0])).max_gas().transact().await?, "fingerprint"));
-    let r = w.keeper.call(w.vault.id(), "step_remote").args_json(run(nodes[0].clone(), &salts[0])).max_gas().transact().await?;
+    assert!(fails_with(&req(&w, &w.keeper, "step_remote", run(greedy, &salts[0])).await?, "fingerprint"));
+    let r = req(&w, &w.keeper, "step_remote", run(nodes[0].clone(), &salts[0])).await?;
     assert!(r.logs().iter().any(|l| l.contains("evm_signed")), "{:?}", r.failures());
     // The report routes along the revealed node's routes.
     report(&w, &w.keeper, f, 0, Some(150_000_000_000_000_000)).await?.into_result()?;
@@ -198,20 +200,17 @@ fn b58(k: &[u8; 32]) -> String {
 
 #[tokio::test]
 async fn solana_lp_fees_are_swept_into_a_memecoin_buy() -> anyhow::Result<()> {
-    let worker = near_workspaces::sandbox().await?;
-    let (alice, keeper) = (worker.dev_create_account().await?, worker.dev_create_account().await?);
-    let signer = worker.dev_deploy(&wasm("mock_signer")).await?;
-    let vault = worker.dev_deploy(&wasm("vault")).await?;
-    vault.call("new").args_json(json!({"owner": alice.id(), "keeper": keeper.id()})).transact().await?.into_result()?;
-    alice.call(vault.id(), "sol_setup").args_json(json!({"signer": signer.id(), "max_cu_price": 100_000u64, "max_cu_limit": 1_400_000u32})).max_gas().transact().await?.into_result()?;
-    let me_b58 = vault.view("get_sol").await?.json::<Value>()?["address"].as_str().unwrap().to_string();
+    let w = relay_world().await?;
+    let (alice, keeper, vault) = (&w.alice, &w.keeper, &w.vault);
+    x(alice, vault, "sol_setup", json!({"signer": w.signer.id(), "max_cu_price": 100_000u64, "max_cu_limit": 1_400_000u32})).await?.into_result()?;
+    let me_b58 = view(&w.brain, vault, "get_sol", Value::Null).await?["address"].as_str().unwrap().to_string();
     let me = solguard::pubkey(&me_b58);
     // Two templates: a fee claim paying the vault (spends nothing) and a buy spending at most 1 SOL, at least 1,000 coin units per lamport.
-    alice.call(vault.id(), "sol_template").args_json(json!({"template": {"name": "claim_fee", "program": b58(&SWEEP_PROGRAM), "prefix": "01",
-        "fields": [], "accounts": [{"acc": "vault"}], "spends": []}})).transact().await?.into_result()?;
-    alice.call(vault.id(), "sol_template").args_json(json!({"template": {"name": "buy", "program": b58(&BUY_PROGRAM), "prefix": "02",
+    x(alice, vault, "sol_template", json!({"template": {"name": "claim_fee", "program": b58(&SWEEP_PROGRAM), "prefix": "01",
+        "fields": [], "accounts": [{"acc": "vault"}], "spends": []}})).await?.into_result()?;
+    x(alice, vault, "sol_template", json!({"template": {"name": "buy", "program": b58(&BUY_PROGRAM), "prefix": "02",
         "fields": [{"ty": "u64", "rule": "at_most", "max": "1000000000"}, {"ty": "u64", "rule": "at_least", "of": 0, "num": "1000", "den": "1"}],
-        "accounts": [{"acc": "vault"}], "spends": [{"field": 0, "key": "sol:SOL"}]}})).transact().await?.into_result()?;
+        "accounts": [{"acc": "vault"}], "spends": [{"field": 0, "key": "sol:SOL"}]}})).await?.into_result()?;
     let coin = "sol:Coin1111111111111111111111111111111111111";
     let nodes = json!([
         // 0: sweep fees every hour; whatever is reported (at most 0.5 SOL a sweep) goes to the buy.
@@ -223,7 +222,7 @@ async fn solana_lp_fees_are_swept_into_a_memecoin_buy() -> anyhow::Result<()> {
          "action": {"label": "Buy the memecoin", "calls": [], "out": null, "min_out_per_in": null, "price": null,
             "remote": {"call": {"chain": "sol", "template": "buy", "amount_field": 0, "min_field": 1}, "out": coin, "max_out_per_in": (100_000 * E24).to_string()}}}
     ]);
-    let f: u32 = alice.call(vault.id(), "save_flow").args_json(json!({"name": "fees into a coin", "nodes": nodes})).max_gas().transact().await?.into_result()?.json()?;
+    let f: u32 = x(alice, vault, "save_flow", json!({"name": "fees into a coin", "nodes": nodes})).await?.into_result()?.json()?;
     let b64 = |b: Vec<u8>| base64::engine::general_purpose::STANDARD.encode(b);
     let claim = || solguard::testkit::Tx::new(me).ix(SWEEP_PROGRAM, vec![me], vec![1]).bytes();
     let buy = |lamports: u64, min: u64| {
@@ -234,12 +233,12 @@ async fn solana_lp_fees_are_swept_into_a_memecoin_buy() -> anyhow::Result<()> {
     };
     let sol = |msg: Vec<u8>| json!({"chain": "sol", "message": b64(msg)});
     let run = |node: u16, args: Value| {
-        let (k, v) = (keeper.clone(), vault.id().clone());
-        async move { k.call(&v, "step_remote").args_json(json!({"flow_id": f, "node": node, "args": args})).max_gas().transact().await }
+        let (k, v) = (keeper.clone(), vault.clone());
+        async move { x(&k, &v, "step_remote", json!({"flow_id": f, "node": node, "args": args})).await }
     };
     let rep = |node: u16, out: u128| {
-        let (k, v) = (keeper.clone(), vault.id().clone());
-        async move { k.call(&v, "remote_report").args_json(json!({"flow_id": f, "node": node, "out": out.to_string()})).transact().await }
+        let (k, v) = (keeper.clone(), vault.clone());
+        async move { x(&k, &v, "remote_report", json!({"flow_id": f, "node": node, "out": out.to_string()})).await }
     };
 
     // The sweep: a claim with a buy riding along (it spends) is refused; the plain claim is signed.
@@ -268,7 +267,7 @@ async fn solana_lp_fees_are_swept_into_a_memecoin_buy() -> anyhow::Result<()> {
     assert_eq!((num(&s["amount"]), num(&s["min_out"])), (120_000_000, 150_000_000_000));
     assert!(rep(1, 149_999_999_999).await?.is_failure());
     rep(1, 160_000_000_000).await?.into_result()?;
-    let l: Value = vault.view("get_flow").args_json(json!({"flow_id": f})).await?.json::<Value>()?["ledger"].clone();
+    let l = view(&w.brain, vault, "get_flow", json!({"flow_id": f})).await?["ledger"].clone();
     assert_eq!((l["nodes"][1]["inbox"].as_str().unwrap(), l["nodes"][1]["out_total"].as_str().unwrap()), ("0", "160000000000"));
     Ok(())
 }

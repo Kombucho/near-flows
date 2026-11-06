@@ -1,7 +1,7 @@
 //! Relay vaults on real chains (local forks of mainnet): the brain builds and
 //! checks, the relay vault signs with its own MPC path (test signer), the fork
 //! executes. Same templates as evm_fork.rs / sol_fork.rs (nodes/*.json).
-//! Base fork on port 9400 (anvil), Solana fork on 9402/9403 (surfpool, public RPC).
+//! Base fork on port 9803 (anvil), Solana fork on 9810/9811 (surfpool, public RPC).
 //! Skipped when anvil / surfpool aren't installed.
 
 mod common;
@@ -19,7 +19,7 @@ const GWEI: u128 = 1_000_000_000;
 #[tokio::test]
 async fn a_relay_vault_swaps_on_uniswap_on_a_base_fork() -> anyhow::Result<()> {
     let url = std::env::var("BASE_RPC").unwrap_or_else(|_| "https://mainnet.base.org".into());
-    let Some(fork) = Fork::start(&url, 9400).await else { return Ok(()) };
+    let Some(fork) = Fork::start(&url, 9803).await else { return Ok(()) };
     assert_eq!(fork.cast(&["chain-id"]), "8453");
     let w = relay_world().await?;
     let r = x(&w.alice, &w.vault, "evm_setup", json!({"signer": w.signer.id(), "chain_id": 8453u64,
@@ -65,26 +65,16 @@ async fn a_relay_vault_swaps_on_uniswap_on_a_base_fork() -> anyhow::Result<()> {
     let stranger = w.worker.dev_create_account().await?;
     assert!(fails_with(&x(&stranger, &w.vault, "evm_call", call("uniswap_swap_weth_usdc", swap(1), 4)).await?, "owner or keeper only"));
 
-    // Gas against the full vault: the same setup and calls (signing needs no fork).
-    let full = w.worker.dev_deploy(&common::wasm("vault")).await?;
-    full.call("new").args_json(json!({"owner": w.alice.id(), "keeper": w.keeper.id()})).transact().await?.into_result()?;
-    w.alice.call(full.id(), "evm_setup").args_json(json!({"signer": w.signer.id(), "chain_id": 8453u64,
-        "max_fee": (2 * GWEI).to_string(), "max_tip": (GWEI / 10).to_string(), "gas_cap": 500_000u64})).max_gas().transact().await?.into_result()?;
-    for t in common::templates("base") {
-        w.alice.call(full.id(), "evm_template").args_json(json!({"template": t})).max_gas().transact().await?.into_result()?;
-    }
-    let r = w.keeper.call(full.id(), "evm_call").args_json(call("approve_weth_uniswap", vec![0, 200_000_000_000_000_000], 0)).max_gas().transact().await?;
-    println!("GAS full vault evm_call (approve): {:.1} Tgas", tgas(&r));
-    let r = w.keeper.call(full.id(), "evm_call").args_json(call("uniswap_swap_weth_usdc", swap(quote * 99 / 100), 1)).max_gas().transact().await?;
-    println!("GAS full vault evm_call (swap): {:.1} Tgas", tgas(&r));
-    assert!(!signed(&r).is_empty());
+    // WHY no full-vault comparison any more: contracts/vault is gone. Its last
+    // figures (2026-11-06, same setup and calls): evm_call approve 18.5 Tgas
+    // (relay 23.9), swap 18.9 Tgas (relay 24.4).
     Ok(())
 }
 
 #[tokio::test]
 async fn a_relay_vault_buys_a_pump_fun_coin_on_a_solana_fork() -> anyhow::Result<()> {
     std::env::remove_var("SURFPOOL_DATASOURCE_RPC_URL"); // public RPC only
-    let Some(fork) = SolFork::start(9402).await else { return Ok(()) };
+    let Some(fork) = SolFork::start(9810).await else { return Ok(()) };
     let mint = std::env::var("PUMP_MINT").unwrap_or_else(|_| "GDFVPqix6jYh4xvr1CBx14JWUaLMTvAT2rYA9FyApump".into());
     let w = relay_world().await?;
     let r = x(&w.alice, &w.vault, "sol_setup", json!({"signer": w.signer.id(), "max_cu_price": 1_000_000u64, "max_cu_limit": 1_400_000u32})).await?;
@@ -116,16 +106,7 @@ async fn a_relay_vault_buys_a_pump_fun_coin_on_a_solana_fork() -> anyhow::Result
     let more = fork.helper(&["pump-buy", &me, &mint, "95000000", "5"]);
     assert!(fails_with(&x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": more["message"]})).await?, "spending limit"));
 
-    // Gas against the full vault, same template, a fresh buy for its own address.
-    let full = w.worker.dev_deploy(&common::wasm("vault")).await?;
-    full.call("new").args_json(json!({"owner": w.alice.id(), "keeper": w.keeper.id()})).transact().await?.into_result()?;
-    w.alice.call(full.id(), "sol_setup").args_json(json!({"signer": w.signer.id(), "max_cu_price": 1_000_000u64, "max_cu_limit": 1_400_000u32})).max_gas().transact().await?.into_result()?;
-    let fme = full.view("get_sol").await?.json::<Value>()?["address"].as_str().unwrap().to_string();
-    w.alice.call(full.id(), "sol_template").args_json(json!({"template": sol_template("pump_buy", &[("mint", &mint), ("max_lamports", "100000000"), ("floor_per_lamport", &(per_lamport / 2).to_string())])}))
-        .max_gas().transact().await?.into_result()?;
-    let fb = fork.helper(&["pump-buy", &fme, &mint, "50000000", "5"]);
-    let r = w.keeper.call(full.id(), "sol_sign_tx").args_json(json!({"message": fb["message"]})).max_gas().transact().await?;
-    println!("GAS full vault sol_sign_tx: {:.1} Tgas", tgas(&r));
-    assert!(sol_sig(&r).is_some(), "{:?}", r.failures());
+    // WHY no full-vault comparison any more: contracts/vault is gone. Its last
+    // figure (2026-11-06, same template, a fresh buy): sol_sign_tx 15.7 Tgas (relay 21.0).
     Ok(())
 }

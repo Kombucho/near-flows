@@ -10,6 +10,7 @@
 
 mod board;
 mod common;
+mod relayw;
 
 use board::*;
 use common::wasm;
@@ -100,29 +101,27 @@ async fn token(w: &Worker<Sandbox>, owner: &Account, sym: &str, decimals: u8) ->
 
 #[tokio::test]
 async fn a_vault_swap_floor_follows_an_attested_memecoin_price() -> anyhow::Result<()> {
-    let w = near_workspaces::sandbox().await?;
+    // A relay vault (the full vault is gone): the brain reads the board through Pyth's interface.
+    let relayw::RelayWorld { worker: w, alice, keeper, vault, .. } = relayw::relay_world().await?;
     let root = w.dev_create_account().await?;
-    let (alice, keeper) = (w.dev_create_account().await?, w.dev_create_account().await?);
     let (wnear, meme) = (token(&w, &root, "wNEAR", 18).await?, token(&w, &root, "MEME", 6).await?);
     let dex = w.dev_deploy(&wasm("mock_dex")).await?;
     dex.call("new").args_json(json!({"lst": wnear.id()})).transact().await?.into_result()?;
     let pyth = w.dev_deploy(&wasm("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
     let board = attested_board(&w, &keeper, 2).await?;
-    let vault = w.dev_deploy(&wasm("vault")).await?;
-    vault.call("new").args_json(json!({"owner": alice.id(), "keeper": keeper.id()})).transact().await?.into_result()?;
     for t in [&wnear, &meme] {
-        for who in [dex.id(), vault.id()] {
+        for who in [dex.id(), &vault] {
             root.call(t.id(), "storage_deposit").args_json(json!({"account_id": who})).deposit(NearToken::from_millinear(10)).transact().await?.into_result()?;
         }
     }
     root.call(meme.id(), "ft_transfer").args_json(json!({"receiver_id": dex.id(), "amount": (u128::MAX / 8).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
-    root.call(wnear.id(), "ft_transfer").args_json(json!({"receiver_id": vault.id(), "amount": (1_000 * ONE).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
-    alice.call(vault.id(), "trust").args_json(json!({"add": [{"contract": wnear.id()}, {"contract": meme.id()}, {"contract": dex.id()}], "remove": []})).transact().await?.into_result()?;
+    root.call(wnear.id(), "ft_transfer").args_json(json!({"receiver_id": vault, "amount": (1_000 * ONE).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
+    relayw::x(&alice, &vault, "trust", json!({"add": [{"contract": wnear.id()}, {"contract": meme.id()}, {"contract": dex.id()}], "remove": []})).await?.into_result()?;
     // NEAR from Pyth; the memecoin from the board (its own EMA as the backup). Up to 5% apart, under 60 s, confidence under 1%.
-    alice.call(vault.id(), "oracle_setup").args_json(json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 500, "feeds": [
+    relayw::x(&alice, &vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 500, "feeds": [
         {"name": "near", "contract": pyth.id(), "price_id": NEAR_ID, "backup": {"kind": "ema"}},
-        {"name": "meme", "contract": board.id(), "price_id": MEME, "backup": {"kind": "ema"}}]}})).transact().await?.into_result()?;
+        {"name": "meme", "contract": board.id(), "price_id": MEME, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
     alice.call(pyth.id(), "set_price").args_json(json!({"price_id": NEAR_ID, "price": "200000000", "conf": "100000", "expo": -8, "ema": "200000000", "age_s": 0}))
         .transact().await?.into_result()?;
     // The attesters say $5.1204e-8 (the live curve's price at SOL $89.92).
@@ -134,10 +133,10 @@ async fn a_vault_swap_floor_follows_an_attested_memecoin_price() -> anyhow::Resu
     let node = json!({"input": wnear.id(), "when": {"when": "now"}, "action": {"label": "Buy MEME", "out": meme.id(), "min_out_per_in": null, "price": null,
         "calls": [{"call": "ft", "receiver": dex.id(), "tgas": 50, "msg": format!(r#"{{"token_out":"{}","min_out":"{{min_out}}"}}"#, meme.id())}],
         "market": {"sell": "near", "buy": "meme", "dec_in": 18, "dec_out": 6, "slippage_bps": 100}}});
-    let f: u32 = alice.call(vault.id(), "save_flow").args_json(json!({"name": "ape", "nodes": [node]})).max_gas().transact().await?.into_result()?.json()?;
-    alice.call(vault.id(), "fund").args_json(json!({"flow_id": f, "node": 0, "amount": (100 * ONE).to_string()})).max_gas().transact().await?.into_result()?;
+    let f: u32 = relayw::x(&alice, &vault, "save_flow", json!({"name": "ape", "nodes": [node]})).await?.into_result()?.json()?;
+    relayw::x(&alice, &vault, "fund", json!({"flow_id": f, "node": 0, "amount": (100 * ONE).to_string()})).await?.into_result()?;
     let rate = |r: u128| dex.call("set_rate").args_json(json!({"token_in": wnear.id(), "token_out": meme.id(), "rate": r.to_string()})).transact();
-    let step = || keeper.call(vault.id(), "step").args_json(json!({"flow_id": f, "node": 0})).max_gas().transact();
+    let step = || relayw::x(&keeper, &vault, "step", json!({"flow_id": f, "node": 0}));
 
     // A pool pushed 5% under the market (Python fractions: fair = 2e18 / 5.1204e10 / 1e12 per base unit).
     rate(37_106_476_056_558_081_399).await?.into_result()?;
@@ -152,7 +151,7 @@ async fn a_vault_swap_floor_follows_an_attested_memecoin_price() -> anyhow::Resu
     assert!(r.logs().join("\n").contains(r#""out":"3905944848058745""#), "{:?} {:?}", r.logs(), r.failures());
 
     // No fresh memecoin price, no trade.
-    alice.call(vault.id(), "fund").args_json(json!({"flow_id": f, "node": 0, "amount": (100 * ONE).to_string()})).max_gas().transact().await?.into_result()?;
+    relayw::x(&alice, &vault, "fund", json!({"flow_id": f, "node": 0, "amount": (100 * ONE).to_string()})).await?.into_result()?;
     wait_until(&w, t + 60).await?;
     alice.call(pyth.id(), "set_price").args_json(json!({"price_id": NEAR_ID, "price": "200000000", "conf": "100000", "expo": -8, "ema": "200000000", "age_s": 0}))
         .transact().await?.into_result()?;

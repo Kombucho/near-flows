@@ -1,11 +1,13 @@
 //! The NVDA take-profit ladder shared by the sandbox test (remote.rs) and the
-//! Robinhood Chain fork run (ladder_fork_robinhood.rs): one vault, one flow definition.
+//! Robinhood Chain fork run (ladder_fork_robinhood.rs): one relay vault, one flow
+//! definition. Files that use it also need `mod relayw;` (the world it builds on).
 #![allow(dead_code)]
 
 use crate::common::{num, wasm, Fork};
+use crate::relayw::{relay_world, view, x, RelayWorld};
 use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
-use near_workspaces::{Account, Contract, Worker};
+use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::{json, Value};
 
 pub const GWEI: u128 = 1_000_000_000;
@@ -18,37 +20,46 @@ pub const NVDA_FEED: &str = "a470c4ac46f44b547b2cba52338f311fb642b79375ce5f0cfd5
 pub const V4_QUOTER: &str = "0x8dc178efb8111bb0973dd9d722ebeff267c98f94";
 pub const ETH: &str = "0x0000000000000000000000000000000000000000";
 
+/// Alice's relay vault (its rules live in `brain`) and the NVDA price feed.
 pub struct World {
     pub worker: Worker<Sandbox>,
+    pub brain: Contract,
     pub alice: Account,
     pub keeper: Account,
+    pub signer: Contract,
     pub pyth: Contract,
-    pub vault: Contract,
+    pub vault: AccountId,
 }
 
 pub fn tok(addr: &str) -> String {
     format!("evm:4663:{addr}")
 }
 
-/// A vault on Robinhood Chain (mock signer) with the node library's templates and an NVDA price feed.
+/// A relay vault on Robinhood Chain (mock signer) with the node library's templates and an NVDA price feed.
 pub async fn world() -> anyhow::Result<World> {
-    let worker = near_workspaces::sandbox().await?;
-    let (alice, keeper) = (worker.dev_create_account().await?, worker.dev_create_account().await?);
-    let signer = worker.dev_deploy(&wasm("mock_signer")).await?;
+    let RelayWorld { worker, brain, alice, keeper, signer, vault } = relay_world().await?;
     let pyth = worker.dev_deploy(&wasm("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
-    let vault = worker.dev_deploy(&wasm("vault")).await?;
-    vault.call("new").args_json(json!({"owner": alice.id(), "keeper": keeper.id()})).transact().await?.into_result()?;
-    alice.call(vault.id(), "evm_setup").args_json(json!({"signer": signer.id(), "chain_id": 4663u64,
-        "max_fee": GWEI.to_string(), "max_tip": (GWEI / 10).to_string(), "gas_cap": 1_500_000u64})).max_gas().transact().await?.into_result()?;
+    x(&alice, &vault, "evm_setup", json!({"signer": signer.id(), "chain_id": 4663u64,
+        "max_fee": GWEI.to_string(), "max_tip": (GWEI / 10).to_string(), "gas_cap": 1_500_000u64})).await?.into_result()?;
     for t in crate::common::templates("robinhood") {
-        alice.call(vault.id(), "evm_template").args_json(json!({"template": t})).transact().await?.into_result()?;
+        x(&alice, &vault, "evm_template", json!({"template": t})).await?.into_result()?;
     }
-    alice.call(vault.id(), "oracle_setup").args_json(json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": {"kind": "ema"}}]}})).transact().await?.into_result()?;
-    let w = World { worker, alice, keeper, pyth, vault };
+    x(&alice, &vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
+        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+    let w = World { worker, brain, alice, keeper, signer, pyth, vault };
     nvda_price(&w, 180, 0).await?;
     Ok(w)
+}
+
+/// The vault's own address on Robinhood Chain (the brain derives it from the vault's MPC path).
+pub async fn evm_address(w: &World) -> anyhow::Result<String> {
+    Ok(view(&w.brain, &w.vault, "get_evm", Value::Null).await?["address"].as_str().unwrap().to_string())
+}
+
+/// A request to the vault through its `x` door (the brain decides).
+pub async fn req(w: &World, who: &Account, method: &str, args: Value) -> anyhow::Result<ExecutionFinalResult> {
+    x(who, &w.vault, method, args).await
 }
 
 /// NVDA at `usd` dollars (Pyth: x 1e-8, confidence 0.05%, EMA equal), published `age_s` ago.
@@ -95,15 +106,15 @@ pub fn evm_args(values: Vec<String>, nonce: u64) -> Value {
 }
 
 pub async fn step(w: &World, who: &Account, flow: u32, node: u16, args: Value) -> anyhow::Result<ExecutionFinalResult> {
-    Ok(who.call(w.vault.id(), "step_remote").args_json(json!({"flow_id": flow, "node": node, "args": args})).max_gas().transact().await?)
+    x(who, &w.vault, "step_remote", json!({"flow_id": flow, "node": node, "args": args})).await
 }
 
 pub async fn report(w: &World, who: &Account, flow: u32, node: u16, out: Option<u128>) -> anyhow::Result<ExecutionFinalResult> {
-    Ok(who.call(w.vault.id(), "remote_report").args_json(json!({"flow_id": flow, "node": node, "out": out.map(|o| o.to_string())})).transact().await?)
+    x(who, &w.vault, "remote_report", json!({"flow_id": flow, "node": node, "out": out.map(|o| o.to_string())})).await
 }
 
 pub async fn ledger(w: &World, flow: u32) -> anyhow::Result<Value> {
-    Ok(w.vault.view("get_flow").args_json(json!({"flow_id": flow})).await?.json::<Value>()?["ledger"].clone())
+    Ok(view(&w.brain, &w.vault, "get_flow", json!({"flow_id": flow})).await?["ledger"].clone())
 }
 
 pub fn inbox(l: &Value, i: usize) -> u128 {

@@ -1,4 +1,4 @@
-//! NEAR Intents, as vault/src/intents.rs. The vault's MPC-derived Ed25519 key
+//! NEAR Intents. The vault's MPC-derived Ed25519 key
 //! (path "intents-1", derived from the VAULT's account) is registered on the
 //! vault's own Intents account; only the vault can ask the MPC network to sign
 //! with it, and the brain only ever has it sign intents built here (intentsig).
