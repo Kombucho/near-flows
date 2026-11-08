@@ -54,3 +54,36 @@ pub async fn attested_board(w: &Worker<Sandbox>, owner: &Account, k: u8) -> anyh
 pub async fn push(who: &Account, board: &Contract, reports: Vec<Value>) -> anyhow::Result<ExecutionFinalResult> {
     Ok(who.call(board.id(), "push").args_json(json!({"feed": MEME, "reports": reports})).max_gas().transact().await?)
 }
+
+/// A board serves its average (a vault's `ema` backup) only on half a window of
+/// unbroken history, prices at most a third of a window apart (600 s window: 300 s,
+/// 200 s). So: `post(t)` at the chain's clock, then about every 150 s, until 300 s
+/// of history stand behind the average. Returns the last post's time.
+pub async fn history<F, Fut>(w: &Worker<Sandbox>, mut post: F) -> anyhow::Result<i64>
+where
+    F: FnMut(i64) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let start = now(w).await?;
+    post(start).await?;
+    let mut last = start;
+    while last - start < 300 {
+        while now(w).await? < last + 150 {
+            w.fast_forward(20).await?;
+        }
+        last = now(w).await?;
+        post(last).await?;
+    }
+    Ok(last)
+}
+
+/// MEME at `price` (x 1e-12), signed by attesters 0 and 1, with the history a vault's backup needs.
+pub async fn meme_history(w: &Worker<Sandbox>, who: &Account, board: &Contract, price: i64) -> anyhow::Result<i64> {
+    history(w, |t| async move {
+        let r = push(who, board, vec![report(&attester(0), MEME, price, t), report(&attester(1), MEME, price, t)]).await?;
+        println!("GAS attested push (2 reports): {:.2} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
+        r.into_result()?;
+        Ok(())
+    })
+    .await
+}

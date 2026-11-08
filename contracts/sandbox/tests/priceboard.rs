@@ -72,11 +72,11 @@ async fn attested_prices_need_k_fresh_signatures_from_real_attesters() -> anyhow
     // An old signed price replayed can't roll the board back.
     refused(push(&keeper, &board, vec![report(&a, MEME, 40_000, t - 90), report(&b, MEME, 40_000, t - 90)]).await?, "not newer");
 
-    // The average moves toward a new price by the time elapsed: 60 s of a 600 s window = 10% of the way.
+    // A new price 60 s later: 60 s of history is too little for the average to vouch for it (300 s needed).
     let r = push(&keeper, &board, vec![report(&a, MEME, 61_300, t - 5), report(&b, MEME, 61_300, t - 5)]).await?;
     assert!(r.is_success(), "{:?}", r.failures());
-    let ema = price(&board, "get_ema_price_no_older_than", 600).await?.unwrap();
-    assert_eq!(ema["price"].as_str(), Some("52300")); // 51,300 + (61,300 - 51,300) x 60 / 600
+    assert!(price(&board, "get_ema_price_no_older_than", 600).await?.is_none(), "no average on 60 s of history");
+    assert_eq!(board.view("get_ema_window_s").await?.json::<u64>()?, 600);
 
     // Stale: once it's older than the reader's limit, there is no price.
     wait_until(&w, t + 30).await?;
@@ -124,10 +124,11 @@ async fn a_vault_swap_floor_follows_an_attested_memecoin_price() -> anyhow::Resu
         {"name": "meme", "contract": board.id(), "price_id": MEME, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
     alice.call(pyth.id(), "set_price").args_json(json!({"price_id": NEAR_ID, "price": "200000000", "conf": "100000", "expo": -8, "ema": "200000000", "age_s": 0}))
         .transact().await?.into_result()?;
-    // The attesters say $5.1204e-8 (the live curve's price at SOL $89.92).
-    let t = now(&w).await?;
-    let r = push(&keeper, &board, vec![report(&attester(0), MEME, 51_204, t), report(&attester(1), MEME, 51_204, t)]).await?;
-    assert!(r.is_success(), "{:?}", r.failures());
+    // The attesters say $5.1204e-8 (the live curve's price at SOL $89.92), every ~150 s for 5 minutes:
+    // the history the board's average needs before it vouches for the price.
+    let t = meme_history(&w, &keeper, &board, 51_204).await?;
+    alice.call(pyth.id(), "set_price").args_json(json!({"price_id": NEAR_ID, "price": "200000000", "conf": "100000", "expo": -8, "ema": "200000000", "age_s": 0}))
+        .transact().await?.into_result()?;
 
     // Sell 100 wNEAR for MEME, at most 1% under the market.
     let node = json!({"input": wnear.id(), "when": {"when": "now"}, "action": {"label": "Buy MEME", "out": meme.id(), "min_out_per_in": null, "price": null,
@@ -157,6 +158,21 @@ async fn a_vault_swap_floor_follows_an_attested_memecoin_price() -> anyhow::Resu
         .transact().await?.into_result()?;
     let r = step().await?;
     assert!(format!("{:?}", r.failures()).contains("meme: no price fresher than 60 s"), "{:?}", r.failures());
+    assert!(!r.logs().join("\n").contains(r#""event":"step""#), "it didn't run");
+
+    // The on-demand exploit: after a quiet spell longer than the window, one pumped price
+    // (+60%, e.g. a curve read at the slot the keeper just bought into) is posted right
+    // before the step, with a pool 37.5% under the market waiting. The board's average
+    // used to jump all the way to it and "agree"; now it moves a third of the way at
+    // most (the feed is seasoned, so the gap doesn't re-anchor it): they disagree, no trade.
+    wait_until(&w, t + 601).await?;
+    let t2 = now(&w).await?;
+    push(&keeper, &board, vec![report(&attester(0), MEME, 81_926, t2), report(&attester(1), MEME, 81_926, t2)]).await?.into_result()?;
+    alice.call(pyth.id(), "set_price").args_json(json!({"price_id": NEAR_ID, "price": "200000000", "conf": "100000", "expo": -8, "ema": "200000000", "age_s": 0}))
+        .transact().await?.into_result()?;
+    rate(24_412_274_491_614_383_712).await?.into_result()?; // fair x 51204 / 81926
+    let r = step().await?;
+    assert!(format!("{:?}", r.failures()).contains("meme: price and backup disagree"), "{:?} {:?}", r.logs(), r.failures());
     assert!(!r.logs().join("\n").contains(r#""event":"step""#), "it didn't run");
     Ok(())
 }

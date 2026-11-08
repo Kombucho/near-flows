@@ -35,7 +35,7 @@ The total is about 20.4 NEAR across 5 faucet accounts. Every account fits inside
 
 ## Price feeds: all five from our price board
 
-The vault reads every feed (`near usdc eth sol nvda`) from `nf-board-$SUFFIX`, each confirmed by the board's own EMA (10-minute window) within 2%, fresh under 60 s, confidence under 1%. Two reasons, both found on 2026-11-06:
+The vault reads every feed (`near usdc eth sol nvda`) from `nf-board-$SUFFIX`, fresh under 60 s, confidence under 1%, each within 2% of its backup. NEAR's backup is an independent feed, Chainlink NEAR/USD on Optimism (`near-op`, posted with NEAR). The others are confirmed by the board's own average (10-minute window). The board serves a new feed's average only after 5 minutes of prices at most 200 s apart, and any one price moves it a third of the way at most, so one price posted right before a step (a pump.fun curve read at the slot someone just bought into, say) can't vouch for itself. The keeper with `--board` posts every 150 s for vaults with flows to keep it current. Two reasons for the board, both found on 2026-11-06:
 
 1. **Pyth's NEAR receiver is out of date.** `pyth-oracle.testnet` refuses every Hermes update today ("Source for attestation is not allowed"). Read-only check: `pyth-oracle.near` and `pyth-oracle.testnet` both accept only emitter `e101faedac5851e32b9b23b5f9411a8c2bac4aae3ed4dd7b811dd1a72ea4aa71` on chain 26. Today's Hermes update carries emitter `507974686e6574…` ("PythnetPythnet…") on chain 26, signed under guardian set index 1 with 3 signatures. That is Pyth's own signer set since the Aug 2026 Core upgrade, not Wormhole's 19 guardians. Until Pyth updates the NEAR receivers, Pyth-on-NEAR is unusable on mainnet too.
 2. **Our Pyth key isn't entitled to NEAR/USD or NVDA** (403 "Not entitled", standard and 24/7 feeds alike). Those come from Chainlink on other chains.
@@ -44,6 +44,7 @@ The vault reads every feed (`near usdc eth sol nvda`) from `nf-board-$SUFFIX`, e
 |---|---|---|---|
 | eth, usdc, sol | Pyth Hermes, relayed | Pyth's own ids | `npm run pyth -- --board $BOARD eth usdc sol` |
 | near | Chainlink NEAR / USD on Arbitrum | `0017…` + proxy | `npm run chainlink-price -- --board $BOARD near` |
+| near's backup | Chainlink NEAR / USD on Optimism | `0018…` + proxy | `npm run chainlink-price -- --board $BOARD near-op` |
 | nvda | Chainlink RHNVDA / USD on Robinhood Chain | `0048…` + proxy | `npm run chainlink-price -- --board $BOARD nvda` |
 
 A Chainlink price id is the Wormhole chain id (2 bytes), 10 zero bytes, then the feed's proxy address. Anyone can read off the id where a price comes from, and the same id works on an attested board and an Evm board.

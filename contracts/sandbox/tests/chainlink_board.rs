@@ -152,8 +152,12 @@ async fn a_market_floor_and_a_ladder_rung_run_off_chainlink_prices_on_the_board(
     let w = relay_world().await?;
     let (evm, att) = boards(&w.worker, &w.alice).await?;
     let anyone = w.worker.dev_create_account().await?;
-    post_chainlink(&w.worker, &anyone, &evm).await?;
-    post_usdc(&w.worker, &anyone, &att).await?;
+    // Every ~150 s for 5 minutes: the history each board's average needs before it vouches for a price.
+    board::history(&w.worker, |_| async {
+        post_chainlink(&w.worker, &anyone, &evm).await?;
+        post_usdc(&w.worker, &anyone, &att).await
+    })
+    .await?;
     let p: Value = evm.view("get_price_no_older_than").args_json(json!({"price_id": NEAR_ID, "age": 60})).await?.json()?;
     assert_eq!((p["price"].as_str(), p["conf"].as_str(), p["expo"].as_i64()), (Some("375297364"), Some("1876486"), Some(-8)), "NEAR $3.75297364 +-0.5%");
 
