@@ -37,7 +37,7 @@ pub fn tok(addr: &str) -> String {
 
 /// A relay vault on Robinhood Chain (mock signer) with the node library's templates and an NVDA price feed.
 pub async fn world() -> anyhow::Result<World> {
-    let RelayWorld { worker, brain, alice, keeper, signer, vault } = relay_world().await?;
+    let RelayWorld { worker, brain, alice, keeper, signer, vault, .. } = relay_world().await?;
     let pyth = worker.dev_deploy(&wasm("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
     x(&alice, &vault, "evm_setup", json!({"signer": signer.id(), "chain_id": 4663u64,

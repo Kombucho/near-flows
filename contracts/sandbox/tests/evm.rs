@@ -56,7 +56,7 @@ fn call(name: &str, values: &[u128], nonce: u64, fee_gwei: u128) -> Value {
 
 #[tokio::test]
 async fn the_vault_builds_and_signs_evm_calls_only_from_its_templates() -> anyhow::Result<()> {
-    let RelayWorld { worker, brain, alice, keeper, signer, vault } = relay_world().await?;
+    let RelayWorld { worker, brain, alice, keeper, signer, vault, .. } = relay_world().await?;
     let mallory = worker.dev_create_account().await?;
     x(&alice, &vault, "evm_setup", json!({"signer": signer.id(), "chain_id": 11155111u64,
         "max_fee": (50 * GWEI).to_string(), "max_tip": (3 * GWEI).to_string(), "gas_cap": 300_000u64})).await?.into_result()?;
