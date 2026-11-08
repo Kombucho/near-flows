@@ -52,7 +52,8 @@ async fn a_solana_template_with_a_market_floor_refuses_a_price_off_the_market() 
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.encode(Tx::new(me).ix(BUY_PROGRAM, vec![me], d).bytes())
     };
-    let sign = |msg: String| x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": msg}));
+    // The direct door is the owner's; the keeper signs through the flow node below.
+    let sign = |msg: String| x(&w.alice, &w.vault, "sol_sign_tx", json!({"message": msg}));
     // 1 SOL at $200, 1% slippage: at least 198 USDC. 150 USDC clears the fixed floor (1 USDC) but not the market.
     let r = sign(sell(1_000_000_000, 150_000_000)).await?;
     assert!(fails_with(&r, "under the floor 198000000"), "{:?} {:?}", r.logs(), r.failures());
