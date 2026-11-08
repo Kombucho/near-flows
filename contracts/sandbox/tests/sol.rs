@@ -21,7 +21,7 @@ const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 
 #[tokio::test]
 async fn the_vault_signs_only_swaps_its_owner_allows() -> anyhow::Result<()> {
-    let RelayWorld { worker, brain, alice, keeper, signer, vault } = relay_world().await?;
+    let RelayWorld { worker, brain, alice, keeper, signer, vault, .. } = relay_world().await?;
     let mallory = worker.dev_create_account().await?;
 
     // 1. The vault asks the signer for its own Solana address (nobody can hand it a fake one).

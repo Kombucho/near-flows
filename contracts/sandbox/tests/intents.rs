@@ -60,7 +60,7 @@ async fn execute(who: &Account, verifier: &Contract, signed: Vec<Value>) -> anyh
 
 #[tokio::test]
 async fn a_keyless_vault_swaps_on_real_intents_with_intents_it_signed_itself() -> anyhow::Result<()> {
-    let relayw::RelayWorld { worker, brain, alice, keeper, signer, vault } = relayw::relay_world().await?;
+    let relayw::RelayWorld { worker, brain, alice, keeper, signer, vault, .. } = relayw::relay_world().await?;
     let root = worker.dev_create_account().await?;
     let solver = worker.dev_create_account().await?;
     let (a, b) = (token(&worker, &root, "AAA").await?, token(&worker, &root, "BBB").await?);
