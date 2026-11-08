@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 pub struct RelayWorld {
     pub worker: Worker<Sandbox>,
     pub brain: Contract,
+    pub factory: Account,
     pub alice: Account,
     pub keeper: Account,
     pub signer: Contract,
@@ -41,7 +42,24 @@ pub async fn relay_world_fees(fees: impl Fn(&AccountId) -> Value) -> anyhow::Res
     assert!(made, "the vault was made");
     let vault: AccountId = format!("alice.{}", factory.id()).parse()?;
     let signer = worker.dev_deploy(&wasm("mock_signer")).await?;
-    Ok(RelayWorld { worker, brain, alice, keeper, signer, vault })
+    Ok(RelayWorld { worker, brain, factory, alice, keeper, signer, vault })
+}
+
+/// Send away all of `acc`'s NEAR but what its storage locks and `spare`: a contract
+/// out of storage stake, as if others had used its spare NEAR up.
+pub async fn drain(acc: &Account, sink: &AccountId, spare: u128) -> anyhow::Result<()> {
+    let v = acc.view_account().await?;
+    let locked = v.storage_usage as u128 * 10_000_000_000_000_000_000;
+    let gas = 300_000_000_000_000_000_000; // 0.0003 NEAR: the transfer's own gas
+    let amount = v.balance.as_yoctonear() - locked - spare - gas;
+    acc.transfer_near(sink, NearToken::from_yoctonear(amount)).await?.into_result()?;
+    Ok(())
+}
+
+/// NEAR an account holds beyond what its storage locks.
+pub async fn spare(w: &RelayWorld, who: &AccountId) -> anyhow::Result<i128> {
+    let v = w.worker.view_account(who).await?;
+    Ok(v.balance.as_yoctonear() as i128 - v.storage_usage as i128 * 10_000_000_000_000_000_000)
 }
 
 /// A request to the relay vault: `{"<method>": <args>}`, the vault's own method names.

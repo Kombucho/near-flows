@@ -52,7 +52,11 @@
 //! Storage: the brain pays for every vault's record and charges it back: when a
 //! record grows past what its vault paid, the answer includes a `pay` call
 //! from the vault for the difference (plus a small buffer). A vault that can't
-//! afford it is refused the change.
+//! afford it is refused the change, also ahead of a read (`finish`): a read's
+//! callback may fail and leave the growth stored, so it must be growth the vault
+//! can pay for, and anyone may then have it paid (`pay_storage`). The brain
+//! keeps STORAGE_MARGIN spare for growth whose `pay` hasn't landed yet, and
+//! refuses growth below it.
 
 mod close;
 pub mod fees;
@@ -97,6 +101,8 @@ const PAY_BUFFER_BYTES: u128 = 500;
 /// the answer's transfer leaves the vault 1 block after. 8 blocks is a margin;
 /// a network so congested that receipts wait longer could still race.
 const SPENT_BLOCKS: u64 = 8;
+/// The brain's own NEAR kept spare beyond its storage, for records grown and not yet paid (`require_room`).
+const STORAGE_MARGIN: u128 = 10_000_000_000_000_000_000_000;
 
 // Gas. Mainnet caps a transaction at 300 Tgas prepaid, and a recipe's own calls
 // may ask for most of it (the library's Borrow on Rhea: 60 + 120), so every
@@ -355,6 +361,8 @@ pub enum Req {
     ApplyLimit { token: String },
     /// Send a token's owed protocol fees to the treasury (fees.rs).
     SettleFees { token: AccountId },
+    /// Have the vault pay what its record owes the brain (e.g. growth a failed read left).
+    PayStorage {},
     /// Delete the empty vault (close.rs): anyone with auto-close on, else the owner.
     Close { #[serde(default)] confirm_remote: bool, #[serde(default)] to: Option<AccountId> },
     /// A stealth owner's signed command (see stealth.rs).
@@ -409,6 +417,8 @@ pub(crate) enum Read {
     RemotePrices(remote::Begin),
     /// Closing: the vault's token balances (then its Intents balances) came back.
     Close { to: AccountId, tokens: Vec<(AccountId, bool)>, intents: Vec<String> },
+    /// Closing: the factory's tombstone of the name returned; only then the delete.
+    Tombstoned { to: AccountId },
     /// Settling fees: the vault's balance of the token.
     Settle { token: AccountId },
     /// A Solana template transaction with a market field: the oracle answered.
@@ -570,6 +580,7 @@ impl Brain {
             Read::SolPrices(m) => t.on_sol_prices(m),
             Read::RemotePrices(b) => t.on_remote_prices(b),
             Read::Close { to, tokens, intents } => t.on_close(to, tokens, intents, &self.factory),
+            Read::Tombstoned { to } => t.on_tombstoned(to),
             Read::Settle { token } => t.on_settle(token),
             Read::SolTxPrices(m) => t.on_sol_tx_prices(m),
         };
@@ -634,6 +645,11 @@ impl Brain {
         fingerprint(&node, &salt)
     }
 
+    /// Whether `vault` was closed here (its name never gets a record again).
+    pub fn is_closed(&self, vault: AccountId) -> bool {
+        env::storage_has_key(&tomb_key(&vault))
+    }
+
     /// What this vault's record costs and what it has paid.
     pub fn get_storage(&self, vault: AccountId) -> (U128, U128) {
         let vs = must_load(&vault);
@@ -649,6 +665,7 @@ impl Brain {
         let name = vault.as_str().strip_suffix(&format!(".{}", self.factory)).unwrap_or("");
         require!(!name.is_empty() && !name.contains('.'), "not one of the factory's vaults");
         require!(load(&vault).is_none(), "already a vault");
+        require!(!env::storage_has_key(&tomb_key(&vault)), "that name belonged to a closed vault: it is never reused");
         let vs = VaultState {
             owner,
             keeper,
@@ -689,9 +706,14 @@ impl Talk {
     pub(crate) fn finish(self, r: Reply) {
         match r {
             Reply::Answer(a) => self.save(a).send(),
-            // The read's callback saves again and asks for any payment then.
+            // The read's callback saves again and asks for the payment then. It
+            // may still fail, so the record is stored ahead of it only if the
+            // vault can pay for it now: that NEAR can't leave the vault without
+            // paying (every answer that moves it is `save`d), and anyone may
+            // have it paid (`pay_storage`). Never growth nobody can collect.
             Reply::Read(p) => {
                 store(&self.vault, &self.vs);
+                self.storage_due();
                 let _ = p.as_return();
             }
             Reply::Final(a) => a.send(),
@@ -730,6 +752,20 @@ impl Talk {
             Some(j) => j.then(cb),
             None => cb,
         })
+    }
+
+    /// What the vault pays now for its stored record (what it owes plus the
+    /// buffer), 0 if nothing. Refused if its free NEAR can't cover it, or if the
+    /// brain's own spare is below the margin it floats growth on.
+    fn storage_due(&self) -> u128 {
+        let owed = record_cost(&self.vault, &self.vs).saturating_sub(self.vs.paid.0);
+        if owed == 0 {
+            return 0;
+        }
+        let pay = owed + PAY_BUFFER_BYTES * env::storage_byte_cost().as_yoctonear();
+        require!(pay <= self.free_near(), "the vault can't pay for its storage in the brain: add NEAR");
+        require_room();
+        pay
     }
 
     pub(crate) fn balance_view(&self, token: &AccountId) -> (AccountId, String, String) {
@@ -787,6 +823,7 @@ impl Talk {
             Req::RemoteReport { flow_id, node, out } => return self.remote_report(&sender, flow_id, node, out).into(),
             Req::ApplyLimit { token } => self.apply_limit(token),
             Req::SettleFees { token } => return self.settle_fees(token),
+            Req::PayStorage {} => {} // `save` asks for what's owed
             Req::Exec { method, args, nonce, expires_ns, tgas, signature } => return self.exec(method, args, nonce.0, expires_ns.0, tgas, signature).into(),
             other => {
                 owner_only();
@@ -1069,15 +1106,12 @@ impl Talk {
     pub(crate) fn save(mut self, ans: Answer) -> Answer {
         let now = env::block_height();
         self.vs.spent.retain(|(h, _)| now < h + SPENT_BLOCKS);
-        let owed = record_cost(&self.vault, &self.vs).saturating_sub(self.vs.paid.0);
-        if owed == 0 {
-            store(&self.vault, &self.vs);
-            return ans;
-        }
-        let pay = owed + PAY_BUFFER_BYTES * env::storage_byte_cost().as_yoctonear();
-        require!(pay <= self.free_near(), "the vault can't pay for its storage in the brain: add NEAR");
+        let pay = self.storage_due();
         self.spend(pay);
         store(&self.vault, &self.vs);
+        if pay == 0 {
+            return ans;
+        }
         ans.call(&env::current_account_id(), "pay", b"", pay, GAS_PAY)
     }
 
@@ -1103,6 +1137,16 @@ pub(crate) fn key(vault: &AccountId) -> Vec<u8> {
     [b"v:".as_slice(), vault.as_bytes()].concat()
 }
 
+/// A closed vault's tombstone (close.rs): the name never gets a record again.
+pub(crate) fn tomb_key(vault: &AccountId) -> Vec<u8> {
+    [b"t:".as_slice(), vault.as_bytes()].concat()
+}
+
+/// What a tombstone costs the brain's storage, kept out of the close's refund.
+pub(crate) fn tomb_cost(vault: &AccountId) -> u128 {
+    (RECORD_OVERHEAD + tomb_key(vault).len() as u64) as u128 * env::storage_byte_cost().as_yoctonear()
+}
+
 fn load(vault: &AccountId) -> Option<VaultState> {
     env::storage_read(&key(vault)).map(|b| VaultState::try_from_slice(&b).unwrap_or_else(|_| env::panic_str("bad record")))
 }
@@ -1113,6 +1157,14 @@ fn must_load(vault: &AccountId) -> VaultState {
 
 fn store(vault: &AccountId, vs: &VaultState) {
     env::storage_write(&key(vault), &borsh::to_vec(vs).unwrap());
+}
+
+/// Growth floats on the brain's own NEAR until its vault's `pay` lands (a later
+/// receipt), and several may be in flight at once. Below this much spare, growth
+/// is refused with a clear message, before the brain's storage stake runs out.
+fn require_room() {
+    let locked = env::storage_byte_cost().as_yoctonear() * env::storage_usage() as u128;
+    require!(env::account_balance().as_yoctonear() >= locked + STORAGE_MARGIN, "the brain is short of NEAR for its storage: its operator must top it up");
 }
 
 fn record_cost(vault: &AccountId, vs: &VaultState) -> u128 {

@@ -19,12 +19,22 @@
 //! one's addresses. The brain tells this factory when it closes a vault
 //! (`on_vault_closed`, accepted only from the brain); after that the name can
 //! never be created here again, and only this factory can create it at all.
+//! The brain deletes a vault only once this tombstone succeeded, and every vault
+//! leaves VAULT_SHARE here to pay for it.
+//!
+//! A vault the brain refuses at birth (no record: it could never run) deletes
+//! itself, its NEAR back to the payer, and the create call returns false.
 
 use near_sdk::store::{LookupMap, LookupSet, Vector};
-use near_sdk::{env, near, require, AccountId, CryptoHash, CurveType, Gas, NearToken, PanicOnDefault, Promise, PromiseError, PublicKey};
+use near_sdk::{env, near, require, AccountId, CryptoHash, CurveType, Gas, NearToken, PanicOnDefault, Promise, PublicKey};
 
 /// A new vault's funding: its own few bytes, the 0.05 NEAR reserve, its record in the brain, headroom.
 pub const MIN_VAULT_DEPOSIT: NearToken = NearToken::from_millinear(100);
+/// Kept here out of every deposit, for good: what this vault costs the factory's
+/// storage (its list entry, its owner's map entry, one day its tombstone: ~400
+/// bytes at most). So no stream of vaults made and closed can use up the
+/// factory's own NEAR and leave a closed name without its tombstone.
+pub const VAULT_SHARE: NearToken = NearToken::from_millinear(5);
 /// The relay's `new` asks the brain, which answers; that whole round runs on this.
 const GAS_INIT: Gas = Gas::from_tgas(150);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
@@ -79,57 +89,67 @@ impl Factory {
         Promise::new(env::current_account_id()).deploy_global_contract(code)
     }
 
-    /// Create your vault `<name>.<factory>`, funded with the attached NEAR.
+    /// Create your vault `<name>.<factory>`, funded with the attached NEAR (less
+    /// VAULT_SHARE). `expected_code_hash` (base58, optional): refuse unless the
+    /// published relay is exactly that code (pin the relay you audited).
     #[payable]
-    pub fn create_vault(&mut self, name: String, keeper: Option<AccountId>) -> Promise {
+    pub fn create_vault(&mut self, name: String, keeper: Option<AccountId>, expected_code_hash: Option<String>) -> Promise {
         let owner = env::predecessor_account_id();
         let deposit = env::attached_deposit();
         require!(deposit >= MIN_VAULT_DEPOSIT, "attach at least 0.1 NEAR");
         require!(!self.vaults.contains_key(&owner), "you already have a vault");
         let vault = self.vault_id(&name);
         self.vaults.insert(owner.clone(), vault.clone());
-        self.deploy(&vault, deposit, near_sdk::serde_json::json!({"init": {"owner": owner, "keeper": keeper}}))
+        self.deploy(&vault, deposit, &owner, expected_code_hash, near_sdk::serde_json::json!({"init": {"owner": owner, "keeper": keeper}}))
             .then(Self::ext(env::current_account_id()).with_static_gas(GAS_CALLBACK).on_created(owner, vault, deposit))
     }
 
     /// Create a stealth vault `<name>.<factory>` owned by `owner_key` (`ed25519:<base58>`).
     /// The caller (anyone, e.g. a relayer) is not recorded; a taken name refunds it.
     #[payable]
-    pub fn create_stealth_vault(&mut self, name: String, owner_key: PublicKey, keeper: Option<AccountId>) -> Promise {
+    pub fn create_stealth_vault(&mut self, name: String, owner_key: PublicKey, keeper: Option<AccountId>, expected_code_hash: Option<String>) -> Promise {
         let deposit = env::attached_deposit();
         require!(deposit >= MIN_VAULT_DEPOSIT, "attach at least 0.1 NEAR");
         require!(owner_key.curve_type() == CurveType::ED25519, "the owner key must be ed25519");
         let vault = self.vault_id(&name);
-        self.deploy(&vault, deposit, near_sdk::serde_json::json!({"init_stealth": {"owner_key": owner_key, "keeper": keeper}}))
-            .then(Self::ext(env::current_account_id()).with_static_gas(GAS_CALLBACK).on_created_stealth(env::predecessor_account_id(), vault, deposit))
+        let payer = env::predecessor_account_id();
+        self.deploy(&vault, deposit, &payer, expected_code_hash, near_sdk::serde_json::json!({"init_stealth": {"owner_key": owner_key, "keeper": keeper}}))
+            .then(Self::ext(env::current_account_id()).with_static_gas(GAS_CALLBACK).on_created_stealth(payer, vault, deposit))
     }
 
     /// Like `on_created`, but the payer is neither kept nor logged: it's only here to refund.
     #[private]
-    pub fn on_created_stealth(&mut self, payer: AccountId, vault: AccountId, deposit: NearToken, #[callback_result] r: Result<(), PromiseError>) -> bool {
-        if r.is_ok() {
-            self.list.push(vault.clone());
-            env::log_str(&format!(r#"EVENT_JSON:{{"standard":"flows","version":"1.0.0","event":"vault_created","data":[{{"stealth":true,"vault":"{vault}"}}]}}"#));
-            return true;
+    pub fn on_created_stealth(&mut self, payer: AccountId, vault: AccountId, deposit: NearToken) -> bool {
+        match created() {
+            Some(true) => {
+                self.list.push(vault.clone());
+                env::log_str(&format!(r#"EVENT_JSON:{{"standard":"flows","version":"1.0.0","event":"vault_created","data":[{{"stealth":true,"vault":"{vault}"}}]}}"#));
+                true
+            }
+            refused => {
+                refund(payer, deposit, refused);
+                false
+            }
         }
-        Promise::new(payer).transfer(deposit).detach();
-        false
     }
 
-    /// If the vault couldn't be made (e.g. the name is taken), forget it and
-    /// refund. The failed creation already returned the deposit to us. (The
-    /// relay's `new` doesn't return the brain's round, so this result is only
-    /// about the account; the brain accepts any vault this factory makes.)
+    /// If the vault couldn't be made (e.g. the name is taken) or the brain refused
+    /// it (the vault deleted itself, its NEAR back to the owner), forget it and
+    /// refund what's still here.
     #[private]
-    pub fn on_created(&mut self, owner: AccountId, vault: AccountId, deposit: NearToken, #[callback_result] r: Result<(), PromiseError>) -> bool {
-        if r.is_ok() {
-            self.list.push(vault.clone());
-            env::log_str(&format!(r#"EVENT_JSON:{{"standard":"flows","version":"1.0.0","event":"vault_created","data":[{{"owner":"{owner}","vault":"{vault}"}}]}}"#));
-            return true;
+    pub fn on_created(&mut self, owner: AccountId, vault: AccountId, deposit: NearToken) -> bool {
+        match created() {
+            Some(true) => {
+                self.list.push(vault.clone());
+                env::log_str(&format!(r#"EVENT_JSON:{{"standard":"flows","version":"1.0.0","event":"vault_created","data":[{{"owner":"{owner}","vault":"{vault}"}}]}}"#));
+                true
+            }
+            refused => {
+                self.vaults.remove(&owner);
+                refund(owner, deposit, refused);
+                false
+            }
         }
-        self.vaults.remove(&owner);
-        Promise::new(owner).transfer(deposit).detach();
-        false
     }
 
     pub fn get_brain(&self) -> AccountId {
@@ -164,17 +184,37 @@ impl Factory {
         id
     }
 
-    /// Make the keyless account on the published relay; its `new` gets the brain's
-    /// account (u8 length + bytes) followed by the init request the brain sees.
-    fn deploy(&self, vault: &AccountId, deposit: NearToken, request: near_sdk::serde_json::Value) -> Promise {
+    /// Make the keyless account on the published relay, funded with the deposit
+    /// less VAULT_SHARE; its `new` gets the brain's account and the payer (each
+    /// u8 length + bytes) followed by the init request the brain sees.
+    fn deploy(&self, vault: &AccountId, deposit: NearToken, payer: &AccountId, expected: Option<String>, request: near_sdk::serde_json::Value) -> Promise {
         let hash = self.code_hash.unwrap_or_else(|| env::panic_str("no vault code published yet"));
+        if let Some(e) = expected {
+            require!(e == near_sdk::bs58::encode(hash).into_string(), "the published relay isn't the relay code you expected");
+        }
         let mut init = vec![self.brain.len() as u8];
         init.extend(self.brain.as_bytes());
+        init.push(payer.len() as u8);
+        init.extend(payer.as_bytes());
         init.extend(request.to_string().into_bytes());
         Promise::new(vault.clone())
             .create_account()
-            .transfer(deposit)
+            .transfer(deposit.saturating_sub(VAULT_SHARE))
             .use_global_contract(hash)
             .function_call("new".to_string(), init, NearToken::from_yoctonear(0), GAS_INIT)
     }
+}
+
+/// What the vault's creation came to, as its `new` returned it: Some(true) made;
+/// Some(false) the brain refused it (the vault deleted itself, its NEAR back to
+/// the payer); None never made (e.g. the name is taken: the NEAR came back here).
+fn created() -> Option<bool> {
+    env::promise_result_checked(0, 16).ok().map(|v| v != b"false")
+}
+
+/// Give the payer back what's here: the whole deposit if no vault was made, the
+/// share kept from it if the vault already sent the rest back.
+fn refund(payer: AccountId, deposit: NearToken, refused: Option<bool>) {
+    let back = if refused.is_some() { VAULT_SHARE } else { deposit };
+    Promise::new(payer).transfer(back).detach();
 }
