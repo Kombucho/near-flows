@@ -324,14 +324,16 @@ pub enum Req {
     SolOwnerWallet { wallet: Option<String> },
     SolTemplate { template: sol::SolTemplate },
     SolTemplateRemove { name: String },
-    // Owner or keeper.
-    Step { flow_id: u32, node: u16 },
-    StepHidden { flow_id: u32, node: u16, reveal: Node<Recipe>, salt: String },
+    // Owner only: direct signatures, outside any flow.
     IntentsSignSwap { token_in: AccountId, token_out: AccountId, amount_in: U128, min_out: U128, valid_secs: u64 },
-    IntentsWithdraw { token: AccountId, amount: U128 },
     EvmCall { name: String, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64 },
     SolSignSwap { message: String },
     SolSignTx { message: String },
+    // Owner or keeper.
+    /// Bring tokens back from the vault's Intents account (always to the vault).
+    IntentsWithdraw { token: AccountId, amount: U128 },
+    Step { flow_id: u32, node: u16 },
+    StepHidden { flow_id: u32, node: u16, reveal: Node<Recipe>, salt: String },
     StepRemote { flow_id: u32, node: u16, args: remote::RemoteArgs, #[serde(default)] reveal: Option<Node<Recipe>>, #[serde(default)] salt: Option<String> },
     RemoteReport { flow_id: u32, node: u16, out: Option<U128> },
     // Anyone.
@@ -739,8 +741,11 @@ impl Talk {
                 return self.begin_step(&sender, flow_id, node, n, false);
             }
             Req::StepHidden { flow_id, node, reveal, salt } => return self.step_hidden(&sender, flow_id, node, reveal, salt),
+            // The direct signing doors skip every flow rule (trigger, inbox, the node's caps):
+            // only the owner may use them. The keeper reaches other chains through remote
+            // nodes (step_remote), which check all of that first.
             Req::IntentsSignSwap { token_in, token_out, amount_in, min_out, valid_secs } => {
-                crew_only();
+                owner_only();
                 return self.intents_sign_swap(owner, token_in, token_out, amount_in.0, min_out.0, valid_secs);
             }
             Req::IntentsWithdraw { token, amount } => {
@@ -748,15 +753,15 @@ impl Talk {
                 return self.intents_withdraw(token, amount.0).into();
             }
             Req::EvmCall { name, values, nonce, max_fee, max_tip, gas } => {
-                crew_only();
+                owner_only();
                 return self.evm_call(evm::EvmArgs { name, values, nonce, max_fee, max_tip, gas });
             }
             Req::SolSignSwap { message } => {
-                crew_only();
+                owner_only();
                 return self.sol_sign_swap(message);
             }
             Req::SolSignTx { message } => {
-                crew_only();
+                owner_only();
                 return self.sol_sign_tx(message);
             }
             Req::StepRemote { flow_id, node, args, reveal, salt } => return self.step_remote(&sender, flow_id, node, args, reveal, salt),

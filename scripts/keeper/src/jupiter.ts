@@ -12,7 +12,7 @@
 //    checked by the validator), or broadcast it with --broadcast.
 // The helper never holds keys or funds: the worst it can do is not show up.
 //
-// Environment: KEEPER_ACCOUNT_ID, NEAR_RPC, KEEPER_PRIVATE_KEY (or near-cli key file),
+// Environment: KEEPER_ACCOUNT_ID (on a relay vault: the OWNER, sol_sign_swap is owner only), NEAR_RPC, KEEPER_PRIVATE_KEY (or near-cli key file),
 // SOLANA_RPC (default mainnet-beta), JUPITER_API (default https://api.jup.ag/swap/v1; lite-api is
 // being retired). Instructions are pinned to V1: the vault refuses Jupiter's *_v2 instructions.
 // The blockhash expires ~150 blocks after the quote: the MPC round trip has to fit (it does, ~10s).
