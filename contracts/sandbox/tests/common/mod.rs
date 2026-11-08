@@ -51,8 +51,9 @@ impl Drop for Fork {
 }
 
 impl Fork {
-    /// Fork `url` on `port`. None (test skipped) when Foundry isn't installed.
+    /// Fork `url` on `port` (ANVIL_PORT overrides it). None (test skipped) when Foundry isn't installed.
     pub async fn start(url: &str, port: u16) -> Option<Fork> {
+        let port = std::env::var("ANVIL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(port);
         if Command::new(foundry("anvil")).arg("--version").output().is_err() {
             println!("SKIPPED: install Foundry (anvil) to run fork tests");
             return None;
@@ -131,8 +132,9 @@ impl Drop for SolFork {
 }
 
 impl SolFork {
-    /// None (test skipped) when surfpool isn't installed.
+    /// On `port` and `port` + 1 (SURFPOOL_PORT overrides it). None (test skipped) when surfpool isn't installed.
     pub async fn start(port: u16) -> Option<SolFork> {
+        let port = std::env::var("SURFPOOL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(port);
         let bin = format!("{}/.local/bin/surfpool", std::env::var("HOME").unwrap_or_default());
         let bin = if std::path::Path::new(&bin).exists() { bin } else { "surfpool".to_string() };
         if Command::new(&bin).arg("--version").output().is_err() {
