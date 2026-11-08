@@ -28,6 +28,8 @@ const STEPS: &str = "accounts,brain,factory,publish,priceboard,vault,oracle,flow
 /// Chainlink NEAR/USD on Arbitrum (Wormhole chain 23) and RHNVDA/USD on Robinhood Chain (72), as board ids.
 const NEAR_ID: &str = "001700000000000000000000bf5c3fb2633e924598a46b9d07a174a9dbcf57c0";
 const NVDA_ID: &str = "004800000000000000000000379ec4f7c378f34a1b47e4f3cbebcbac3e8e9f15";
+/// Chainlink NEAR/USD on Optimism (24): NEAR's independent backup.
+const NEAR_OP_ID: &str = "001800000000000000000000ca6fa4b8cb365c02cd3ba70544efffe78f63ac82";
 const ETH_ID: &str = "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace";
 
 fn script() -> String {
@@ -225,6 +227,8 @@ async fn the_testnet_deploy_script_runs_as_written() -> anyhow::Result<()> {
         assert_eq!(f["contract"], json!(id("board")), "every feed reads the board: {f}");
     }
     assert_eq!((oracle["feeds"][0]["price_id"].as_str(), oracle["feeds"][4]["price_id"].as_str()), (Some(NEAR_ID), Some(NVDA_ID)));
+    // NEAR is confirmed by an independent feed (Chainlink NEAR/USD on Optimism), not its own average.
+    assert_eq!(oracle["feeds"][0]["backup"], json!({"kind": "other", "contract": id("board"), "price_id": NEAR_OP_ID}));
 
     // The keeper's key, as the keeper scripts use it, gets a Chainlink price (NEAR, chainlink-price)
     // and a Pyth one (ETH, pyth --board) onto the deployed board; the vault's feeds then have a price.

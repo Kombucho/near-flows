@@ -344,7 +344,7 @@ fn a_guardian_signed_chainlink_read_becomes_a_pyth_format_price() {
     // $189.55682289, +-0.5% (the feed's deviation threshold), published at the block's time.
     assert_eq!(b.get_price_no_older_than(nvda, 60), Some(Price { price: I64(18_955_682_289), conf: U64(94_778_411), expo: -8, publish_time: n.time as i64 }));
     assert_eq!(b.get_price_no_older_than(near.clone(), 60), Some(Price { price: I64(375_297_364), conf: U64(1_876_486), expo: -8, publish_time: a.time as i64 }));
-    assert_eq!(b.get_ema_price_no_older_than(near.clone(), 60).unwrap().price, I64(375_297_364), "a first price is its own average");
+    assert_eq!(b.get_ema_price_no_older_than(near.clone(), 60), None, "a first price is no history: no average yet");
     // The same response again: nothing newer.
     assert!(refusal(|| { b.push_evm(hex::encode(&resp), sign(&resp, &[0, 1, 2])); }).unwrap().contains("not newer"));
     // A minute later the reader's 60 s limit says: no price.
@@ -409,4 +409,75 @@ fn only_the_owner_lists_feeds_and_bad_listings_are_refused() {
     assert!(refusal(|| b.set_evm_feeds(vec![EvmFeed { deviation_bps: 0, ..f.clone() }])).unwrap().contains("deviation_bps"));
     b.set_evm_feeds(vec![f]);
     assert!(matches!(b.get_source(), Source::Evm { feeds, .. } if feeds.len() == 1));
+}
+
+// ---------- the average a vault checks the price against ----------
+
+const SOL_ID: &str = "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
+
+/// A pump.fun board (10 min average) at unix time `t`, SOL-quoted curves.
+fn pump_board(t: u64) -> Board {
+    clock(t);
+    let quotes = vec![Quote { mint: "00".repeat(32), pyth_id: SOL_ID.into(), decimals: 9 }];
+    Board::new(None, Source::Wormhole { guardian_set: 0, guardians: vec!["11".repeat(20)], pyth: "pyth.near".parse().unwrap(), quotes, quote_age_s: 60 }, 600)
+}
+
+/// The board prices the live curve with `extra` lamports bought into it (constant product), read at `t`.
+fn post_curve(b: &mut Board, t: u64, extra: u64) {
+    let (vt, vq) = (1_079_397_334_145_264u128, 614_682_791u128);
+    let q = vq + extra as u128;
+    let pending = vec![Pending { feed: hex::encode(real_curve().mint), virtual_token: U64((vt * vq / q) as u64), virtual_quote: U64(q as u64), time: t as i64 }];
+    clock_as(t, "alice.near"); // on_quote is the board's own callback
+    let sol = Price { price: I64(8_991_598_560), conf: U64(4_495_799), expo: -8, publish_time: t as i64 };
+    b.on_quote(pending, 9, Ok(Some(sol)));
+    clock(t);
+}
+
+#[test]
+fn a_pumped_curve_read_after_a_quiet_spell_is_not_its_own_backup() {
+    // The exploit: the keeper posts prices on demand, so a feed can sit quiet for
+    // longer than the averaging window. It buys into the curve, has the guardians
+    // read that slot and posts it. With the old rule the average jumped all the
+    // way to the new price (a full window elapsed), so "price and backup agree"
+    // compared the pumped price with itself and the vault's floor followed it.
+    let t = 1_793_960_000;
+    let mut b = pump_board(t);
+    let feed = hex::encode(real_curve().mint);
+    post_curve(&mut b, t, 0);
+    let honest = b.get_price_no_older_than(feed.clone(), 60).unwrap().price.0;
+    post_curve(&mut b, t + 700, 184_404_837); // 0.18 SOL bought into the curve
+    let pumped = b.get_price_no_older_than(feed.clone(), 60).unwrap().price.0;
+    assert!(pumped > honest * 16 / 10, "the spot follows the curve: {honest} -> {pumped}");
+    assert_eq!(b.get_ema_price_no_older_than(feed, 60), None, "one fresh read after a gap vouches for nothing: no backup, no floor");
+}
+
+#[test]
+fn the_average_vouches_only_for_a_steady_history_and_a_pump_then_disagrees() {
+    let t = 1_793_960_000;
+    let mut b = pump_board(t);
+    let feed = hex::encode(real_curve().mint);
+    let ema = |b: &Board| b.get_ema_price_no_older_than(feed.clone(), 60);
+    // Reads every 200 s (a third of the window): not yet half a window of history.
+    post_curve(&mut b, t, 0);
+    assert_eq!(ema(&b), None, "one read is no history");
+    post_curve(&mut b, t + 200, 0);
+    assert_eq!(ema(&b), None, "200 s of history, 300 needed");
+    post_curve(&mut b, t + 400, 0);
+    let honest = b.get_price_no_older_than(feed.clone(), 60).unwrap();
+    assert_eq!(ema(&b).map(|p| p.price), Some(honest.price), "400 s of steady reads: the average stands for the price");
+    // Now the pump, 200 s later: the average moves a third of the way at most, so
+    // spot and average stay far apart and a vault (2% tolerance) refuses it.
+    post_curve(&mut b, t + 600, 184_404_837);
+    let (spot, avg) = (b.get_price_no_older_than(feed.clone(), 60).unwrap().price.0 as i128, ema(&b).unwrap().price.0 as i128);
+    assert!((spot - avg) * 10_000 > avg * 200, "spot {spot} vs average {avg}: they disagree");
+    // A read more than a third of a window after the last one breaks the history: no average again.
+    post_curve(&mut b, t + 802, 0);
+    assert_eq!(ema(&b), None, "a 202 s gap: history starts over");
+    // Bursts don't buy history faster: 299 s of reads one second apart is still short.
+    for s in 1..=299 {
+        post_curve(&mut b, t + 802 + s, 0);
+    }
+    assert_eq!(ema(&b), None);
+    post_curve(&mut b, t + 802 + 300, 0);
+    assert!(ema(&b).is_some(), "300 s of history");
 }

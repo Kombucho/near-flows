@@ -132,9 +132,9 @@ async fn one_relay_vault_buys_memecoins_on_near_and_solana_sweeps_lp_fees_and_la
         rhea::register(&lp, t, &w.vault).await?;
     }
     set_pyth(&w, &pyth, NEAR_ID, 200_000_000, 0).await?;
-    let t = board::now(&w.worker).await?;
-    board::push(&w.keeper, &board, vec![board::report(&board::attester(0), board::MEME, 51_204, t), board::report(&board::attester(1), board::MEME, 51_204, t)])
-        .await?.into_result()?;
+    // Every ~150 s for 5 minutes: the history the board's average needs before it vouches for the price.
+    board::meme_history(&w.worker, &w.keeper, &board, 51_204).await?;
+    set_pyth(&w, &pyth, NEAR_ID, 200_000_000, 0).await?;
     say!("prices: NEAR $2.00 (Pyth), MEME $0.000000051204 (price board, 2 of 3 attesters signed)");
     x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": dex.wrap.id(), "methods": ["near_deposit"]}, {"contract": meme.id()}, {"contract": dex.dex.id()}], "remove": []}))
         .await?.into_result()?;

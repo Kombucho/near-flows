@@ -125,7 +125,8 @@ impl Talk {
                 let usd = usd_e18(&p).unwrap_or_else(|| env::panic_str(&format!("refused: {name}: bad price")));
                 require!((p.conf.0 as u128) * BPS <= (p.price.0 as u128) * cfg.max_conf_bps as u128, format!("refused: {name}: price too uncertain"));
                 if f.backup.is_some() {
-                    let b = usd_e18(&next(name)).unwrap_or_else(|| env::panic_str(&format!("refused: {name}: bad backup price")));
+                    // Named apart: a price board serves its average only on steady history.
+                    let b = usd_e18(&next(&format!("{name} backup"))).unwrap_or_else(|| env::panic_str(&format!("refused: {name}: bad backup price")));
                     let diff = usd.abs_diff(b);
                     require!(diff * BPS <= usd.min(b) * cfg.tolerance_bps as u128, format!("refused: {name}: price and backup disagree"));
                 }

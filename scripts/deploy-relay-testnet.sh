@@ -64,6 +64,7 @@ ETH_ID="ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"
 SOL_ID="ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
 NEAR_ID="001700000000000000000000bf5c3fb2633e924598a46b9d07a174a9dbcf57c0" # Chainlink NEAR/USD, Arbitrum (23)
 NVDA_ID="004800000000000000000000379ec4f7c378f34a1b47e4f3cbebcbac3e8e9f15" # Chainlink RHNVDA/USD, Robinhood Chain (72)
+NEAR_OP_ID="001800000000000000000000ca6fa4b8cb365c02cd3ba70544efffe78f63ac82" # Chainlink NEAR/USD, Optimism (24): NEAR's backup
 
 want() { [ "$STEP" = all ] && [ "$1" != costs ] && return 0; [[ ",$STEP," == *",$1,"* ]]; }
 size() { wc -c <"$WASM/$1/$1.wasm" | tr -d ' '; }
@@ -244,12 +245,20 @@ fi
 
 if want oracle; then
   # Also for a vault that already exists: replaces its whole oracle config (owner only, through `x`).
-  # Feeds for market floors and price triggers, all on the board; each confirmed by the board's
-  # own EMA (10 min window) within 2%; fresh = under 60 s, so the keeper re-posts every ~30 s.
+  # Feeds for market floors and price triggers, all on the board, fresh = under 60 s, within 2% of
+  # their backup. NEAR's backup is an INDEPENDENT feed (Chainlink NEAR/USD on Optimism). The others
+  # are confirmed by the board's own average (10 min window), which the board serves only on 5 min
+  # of unbroken history (prices at most 200 s apart): the keeper with --board posts before each step
+  # and every 150 s for vaults with flows (scripts/keeper/src/flows-main.ts).
   echo "== oracle: $VAULT reads near usdc eth sol nvda from $BOARD"
   need "$OWNER" 0.05
-  feed() { echo "{\"name\":\"$1\",\"contract\":\"$BOARD\",\"price_id\":\"$2\",\"backup\":{\"kind\":\"ema\"}}"; }
-  x "$OWNER" oracle_setup "{\"config\":{\"max_age_s\":60,\"max_conf_bps\":100,\"tolerance_bps\":200,\"feeds\":[$(feed near $NEAR_ID),$(feed usdc $USDC_ID),$(feed eth $ETH_ID),$(feed sol $SOL_ID),$(feed nvda $NVDA_ID)]}}"
+  feed() { # feed <name> <price id> [backup json, default: the board's average]
+    local b="${3:-}"
+    [ -n "$b" ] || b='{"kind":"ema"}'
+    echo "{\"name\":\"$1\",\"contract\":\"$BOARD\",\"price_id\":\"$2\",\"backup\":$b}"
+  }
+  NEAR_BACKUP="{\"kind\":\"other\",\"contract\":\"$BOARD\",\"price_id\":\"$NEAR_OP_ID\"}"
+  x "$OWNER" oracle_setup "{\"config\":{\"max_age_s\":60,\"max_conf_bps\":100,\"tolerance_bps\":200,\"feeds\":[$(feed near $NEAR_ID "$NEAR_BACKUP"),$(feed usdc $USDC_ID),$(feed eth $ETH_ID),$(feed sol $SOL_ID),$(feed nvda $NVDA_ID)]}}"
 fi
 
 if want flow; then
