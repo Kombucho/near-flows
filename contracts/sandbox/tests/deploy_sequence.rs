@@ -30,7 +30,12 @@ const NEAR_ID: &str = "001700000000000000000000bf5c3fb2633e924598a46b9d07a174a9d
 const NVDA_ID: &str = "004800000000000000000000379ec4f7c378f34a1b47e4f3cbebcbac3e8e9f15";
 /// Chainlink NEAR/USD on Optimism (24): NEAR's independent backup.
 const NEAR_OP_ID: &str = "001800000000000000000000ca6fa4b8cb365c02cd3ba70544efffe78f63ac82";
+/// Pyth's ETH, and its backup: Chainlink ETH/USD on Arbitrum (23).
 const ETH_ID: &str = "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace";
+const ETH_ARB_ID: &str = "001700000000000000000000639fe6ab55c921f74e7fac1ee960c0b6293ba612";
+/// Chainlink SOL/USD and USDC/USD on Arbitrum (23): the backups of Pyth's SOL and USDC.
+const SOL_ARB_ID: &str = "00170000000000000000000024cea4b8ce57cda5058b924b9b9987992450590c";
+const USDC_ARB_ID: &str = "00170000000000000000000050834f3163758fcc1df9973b6e91f0f0f0434ad3";
 
 fn script() -> String {
     format!("{}/../../scripts/deploy-relay-testnet.sh", env!("CARGO_MANIFEST_DIR"))
@@ -227,15 +232,17 @@ async fn the_testnet_deploy_script_runs_as_written() -> anyhow::Result<()> {
         assert_eq!(f["contract"], json!(id("board")), "every feed reads the board: {f}");
     }
     assert_eq!((oracle["feeds"][0]["price_id"].as_str(), oracle["feeds"][4]["price_id"].as_str()), (Some(NEAR_ID), Some(NVDA_ID)));
-    // NEAR is confirmed by an independent feed (Chainlink NEAR/USD on Optimism), not its own average.
-    assert_eq!(oracle["feeds"][0]["backup"], json!({"kind": "other", "contract": id("board"), "price_id": NEAR_OP_ID}));
+    // Every feed is confirmed by a different publisher on the board; NVDA has none and says so.
+    let backups: Vec<Value> = oracle["feeds"].as_array().unwrap().iter().map(|f| f["backup"].clone()).collect();
+    let other = |pid: &str| json!({"kind": "other", "contract": id("board"), "price_id": pid});
+    assert_eq!(backups, [other(NEAR_OP_ID), other(USDC_ARB_ID), other(ETH_ARB_ID), other(SOL_ARB_ID), json!({"kind": "single_source"})]);
 
-    // The keeper's key, as the keeper scripts use it, gets a Chainlink price (NEAR, chainlink-price)
-    // and a Pyth one (ETH, pyth --board) onto the deployed board; the vault's feeds then have a price.
+    // The keeper's key, as the keeper scripts use it, gets a Chainlink price (NEAR, chainlink-price),
+    // a Pyth one (ETH, pyth --board) and ETH's backup (Chainlink on Arbitrum) onto the deployed board.
     let seed: [u8; 32] = bs58::decode(keys[&keeper_id].to_string().trim_start_matches("ed25519:")).into_vec()?[..32].try_into()?;
     let attester = ed25519_dalek::SigningKey::from_bytes(&seed);
     let t = (w.view_block().await?.timestamp() / 1_000_000_000) as i64;
-    for (feed, price) in [(NEAR_ID, 375_297_364i64), (ETH_ID, 222_468_500_879)] {
+    for (feed, price) in [(NEAR_ID, 375_297_364i64), (ETH_ID, 222_468_500_879), (ETH_ARB_ID, 223_415_696_641)] {
         let mut m = b"NEARFLOWS_PRICE_V1".to_vec();
         m.extend(hex::decode(feed)?);
         m.extend(price.to_be_bytes());

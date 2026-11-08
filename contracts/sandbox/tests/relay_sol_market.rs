@@ -24,7 +24,7 @@ async fn a_solana_template_with_a_market_floor_refuses_a_price_off_the_market() 
     let set = |id: &'static str, usd_e8: i64, age: i64| {
         let (a, p) = (w.alice.clone(), pyth.clone());
         async move {
-            a.call(p.id(), "set_price").args_json(json!({"price_id": id, "price": usd_e8.to_string(), "conf": "0", "expo": -8, "ema": usd_e8.to_string(), "age_s": age}))
+            a.call(p.id(), "set_price").args_json(json!({"price_id": id, "price": usd_e8.to_string(), "conf": "0", "expo": -8, "backup": usd_e8.to_string(), "age_s": age}))
                 .transact().await?.into_result()?;
             anyhow::Ok(())
         }
@@ -32,8 +32,8 @@ async fn a_solana_template_with_a_market_floor_refuses_a_price_off_the_market() 
     set(SOL_ID, 20_000_000_000, 0).await?; // SOL $200
     set(USDC_ID, 100_000_000, 0).await?; // USDC $1
     x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "sol", "contract": pyth.id(), "price_id": SOL_ID, "backup": {"kind": "ema"}},
-        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_ID, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "sol", "contract": pyth.id(), "price_id": SOL_ID, "backup": common::backup(pyth.id(), SOL_ID)},
+        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_ID, "backup": common::backup(pyth.id(), USDC_ID)}]}})).await?.into_result()?;
     x(&w.alice, &w.vault, "sol_setup", json!({"signer": w.signer.id(), "max_cu_price": 1_000_000u64, "max_cu_limit": 1_400_000u32})).await?.into_result()?;
     let me = pubkey(w.brain.view("get_sol").args_json(json!({"vault": w.vault})).await?.json::<Value>()?["address"].as_str().unwrap());
     // Sell at most 1 SOL for USDC: at least 0.001 USDC per lamport... and at least the market less 1%.

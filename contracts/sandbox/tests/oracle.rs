@@ -43,10 +43,11 @@ async fn balance(t: &Contract, who: &AccountId) -> anyhow::Result<u128> {
     Ok(t.view("ft_balance_of").args_json(json!({"account_id": who})).await?.json::<String>()?.parse()?)
 }
 
-/// Pyth-style price: `usd_e8` x 1e-8, confidence `conf_bps`, EMA `ema_e8`, published `age_s` ago.
-async fn price(w: &World, id: &str, usd_e8: i64, conf_bps: i64, ema_e8: i64, age_s: i64) -> anyhow::Result<()> {
+/// Pyth-style price: `usd_e8` x 1e-8, confidence `conf_bps`, and what the second publisher says
+/// (`backup_e8`, the vault's backup), both published `age_s` ago.
+async fn price(w: &World, id: &str, usd_e8: i64, conf_bps: i64, backup_e8: i64, age_s: i64) -> anyhow::Result<()> {
     w.alice.call(w.pyth.id(), "set_price").args_json(json!({"price_id": id, "price": usd_e8.to_string(), "conf": (usd_e8 * conf_bps / 10_000).to_string(),
-        "expo": -8, "ema": ema_e8.to_string(), "age_s": age_s})).transact().await?.into_result()?;
+        "expo": -8, "backup": backup_e8.to_string(), "age_s": age_s})).transact().await?.into_result()?;
     Ok(())
 }
 
@@ -66,12 +67,12 @@ async fn setup() -> anyhow::Result<World> {
     }
     root.call(wnear.id(), "ft_transfer").args_json(json!({"receiver_id": vault, "amount": (1_000 * ONE).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
     x(&alice, &vault, "trust", json!({"add": [{"contract": wnear.id()}, {"contract": usdc.id()}, {"contract": dex.id()}], "remove": []})).await?.into_result()?;
-    // Feeds: NEAR and USDC from Pyth, each confirmed by its EMA within 2%; fresh = under 60 s; confidence under 1%.
+    // Feeds: NEAR and USDC from Pyth, each confirmed by a second publisher within 2%; fresh = under 60 s; confidence under 1%.
     x(&alice, &vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "near", "contract": pyth.id(), "price_id": NEAR_ID, "backup": {"kind": "ema"}},
-        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_ID, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "near", "contract": pyth.id(), "price_id": NEAR_ID, "backup": common::backup(pyth.id(), NEAR_ID)},
+        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_ID, "backup": common::backup(pyth.id(), USDC_ID)}]}})).await?.into_result()?;
     let w = World { brain, alice, keeper, wnear, usdc, dex, pyth, vault };
-    price(&w, NEAR_ID, 200_000_000, 5, 199_000_000, 0).await?; // NEAR $2.00 (EMA $1.99)
+    price(&w, NEAR_ID, 200_000_000, 5, 199_000_000, 0).await?; // NEAR $2.00 (the second publisher: $1.99)
     price(&w, USDC_ID, 100_000_000, 5, 100_000_000, 0).await?; // USDC $1.00
     Ok(w)
 }
@@ -136,11 +137,11 @@ async fn no_fresh_tight_confirmed_price_no_trade() -> anyhow::Result<()> {
     let cases = [
         ("stale: published 2 minutes ago", 200_000_000i64, 5i64, 199_000_000i64, 120i64, "no price fresher"),
         ("uncertain: confidence 3%", 200_000_000, 300, 199_000_000, 0, "too uncertain"),
-        ("jumpy: spot 10% off its average", 200_000_000, 5, 180_000_000, 0, "disagree"),
+        ("the second publisher says 10% less", 200_000_000, 5, 180_000_000, 0, "near: price and backup disagree"),
         ("no price at all", -1, 0, -1, 0, "bad price"),
     ];
-    for (name, p, conf, ema, age, why) in cases {
-        price(&w, NEAR_ID, p, conf, ema, age).await?;
+    for (name, p, conf, backup, age, why) in cases {
+        price(&w, NEAR_ID, p, conf, backup, age).await?;
         let r = step(&w, f).await?;
         let failures = format!("{:?}", r.failures());
         assert!(failures.contains(why), "{name}: {failures}");
@@ -156,5 +157,33 @@ async fn no_fresh_tight_confirmed_price_no_trade() -> anyhow::Result<()> {
     // Fresh again: it runs.
     price(&w, NEAR_ID, 200_000_000, 5, 199_000_000, 0).await?;
     assert!(step(&w, f).await?.logs().join("\n").contains(r#""event":"step""#));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_market_floor_needs_two_publishers_and_a_single_source_feed_says_so() -> anyhow::Result<()> {
+    let w = setup().await?;
+    rate(&w, 2 * SCALE).await?;
+    let f = flow(&w, swap(&w, true), 100 * ONE).await?;
+    // A feed can't be its own backup: that would be one publisher counted twice.
+    let own = json!({"kind": "other", "contract": w.pyth.id(), "price_id": NEAR_ID});
+    let r = x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
+        {"name": "near", "contract": w.pyth.id(), "price_id": NEAR_ID, "backup": own}]}})).await?;
+    assert!(format!("{:?}", r.failures()).contains("a feed can't be its own backup"), "{:?}", r.failures());
+    // NEAR said to be single-source: the vault logs it plainly, and refuses a market floor on it.
+    let r = x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
+        {"name": "near", "contract": w.pyth.id(), "price_id": NEAR_ID, "backup": common::single_source()},
+        {"name": "usdc", "contract": w.pyth.id(), "price_id": USDC_ID, "backup": common::backup(w.pyth.id(), USDC_ID)}]}})).await?.into_result()?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""event":"single_source_feed""#) && l.contains("fixed floor + size caps apply")), "{:?}", r.logs());
+    let r = step(&w, f).await?;
+    assert!(format!("{:?}", r.failures()).contains("near: single-source feed: fixed floor + size caps apply (no market floor)"), "{:?}", r.failures());
+    assert_eq!(inbox(&w, f).await?, 100 * ONE, "nothing taken");
+    assert!(view(&w.brain, &w.vault, "get_vault", Value::Null).await?["busy"].is_null(), "the vault isn't left busy");
+    // The same swap with only the owner's fixed floor runs.
+    let mut fixed = swap(&w, false);
+    fixed["action"]["min_out_per_in"] = json!((19 * SCALE / 10).to_string());
+    let f2 = flow(&w, fixed, 100 * ONE).await?;
+    let r = step(&w, f2).await?;
+    assert!(r.logs().join("\n").contains(r#""event":"step""#), "{:?} {:?}", r.logs(), r.failures());
     Ok(())
 }

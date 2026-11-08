@@ -236,11 +236,14 @@ impl Talk {
             out.push(p.feed.clone());
             out.extend(p.quote.clone());
         }
-        match &r.call {
-            RemoteCall::Evm { template, .. } => out.extend(crate::evm::market_feeds(&crate::evm::leaves(&self.evm_template_named(template)))),
+        let market = match &r.call {
+            RemoteCall::Evm { template, .. } => crate::evm::market_feeds(&crate::evm::leaves(&self.evm_template_named(template))),
             // The node's template; a template riding along with a market field finds no price and is refused.
-            RemoteCall::Sol { template, .. } => out.extend(self.sol_feeds(&[template.as_str()])),
-        }
+            RemoteCall::Sol { template, .. } => self.sol_feeds(&[template.as_str()]),
+        };
+        // A trigger may read a single-source feed; a market floor may not.
+        self.require_confirmed(&market);
+        out.extend(market);
         let mut seen = Vec::new();
         out.retain(|f| if seen.contains(f) { false } else { seen.push(f.clone()); true });
         out

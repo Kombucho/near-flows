@@ -46,7 +46,7 @@ pub async fn world() -> anyhow::Result<World> {
         x(&alice, &vault, "evm_template", json!({"template": t})).await?.into_result()?;
     }
     x(&alice, &vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": crate::common::single_source()}]}})).await?.into_result()?;
     let w = World { worker, brain, alice, keeper, signer, pyth, vault };
     nvda_price(&w, 180, 0).await?;
     Ok(w)
@@ -66,7 +66,7 @@ pub async fn req(w: &World, who: &Account, method: &str, args: Value) -> anyhow:
 pub async fn nvda_price(w: &World, usd: i64, age_s: i64) -> anyhow::Result<()> {
     let p = usd * 100_000_000;
     w.alice.call(w.pyth.id(), "set_price").args_json(json!({"price_id": NVDA_FEED, "price": p.to_string(), "conf": (p / 2000).to_string(),
-        "expo": -8, "ema": p.to_string(), "age_s": age_s})).transact().await?.into_result()?;
+        "expo": -8, "backup": p.to_string(), "age_s": age_s})).transact().await?.into_result()?;
     Ok(())
 }
 

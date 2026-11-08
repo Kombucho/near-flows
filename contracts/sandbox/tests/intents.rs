@@ -146,14 +146,14 @@ async fn a_keyless_vault_swaps_on_real_intents_with_intents_it_signed_itself() -
     //    the hard floor says 95; the market says 99: the vault signs for 99.
     let pyth = worker.dev_deploy(&ours("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
-    let ids = ["1111111111111111111111111111111111111111111111111111111111111111", "2222222222222222222222222222222222222222222222222222222222222222"];
+    let ids = ["111111111111111111111111111111111111111111111111111111111111111a", "222222222222222222222222222222222222222222222222222222222222222b"]; // not palindromes: the backup is the id reversed
     for id in ids {
-        alice.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": "100000000", "conf": "0", "expo": -8, "ema": "100000000", "age_s": 0}))
+        alice.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": "100000000", "conf": "0", "expo": -8, "backup": "100000000", "age_s": 0}))
             .transact().await?.into_result()?;
     }
     x(&alice, &vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "a", "contract": pyth.id(), "price_id": ids[0], "backup": {"kind": "ema"}},
-        {"name": "b", "contract": pyth.id(), "price_id": ids[1], "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "a", "contract": pyth.id(), "price_id": ids[0], "backup": common::backup(pyth.id(), ids[0])},
+        {"name": "b", "contract": pyth.id(), "price_id": ids[1], "backup": common::backup(pyth.id(), ids[1])}]}})).await?.into_result()?;
     x(&alice, &vault, "intents_allow", json!({"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": (200 * ONE).to_string(), "floor_out": "95", "floor_per_in": "100",
         "market": {"sell": "a", "buy": "b", "dec_in": 18, "dec_out": 18, "slippage_bps": 100}}})).await?.into_result()?;
     let r = x(&keeper, &vault, "intents_sign_swap", json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600})).await?;

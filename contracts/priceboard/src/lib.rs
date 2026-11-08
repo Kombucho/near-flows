@@ -1,10 +1,11 @@
 //! A price board: prices Pyth doesn't carry for us (fresh pump.fun memecoins;
-//! NEAR and NVDA, which our Pyth key isn't entitled to), behind Pyth's own read
-//! interface (get_price_no_older_than / get_ema_price_no_older_than, same Price
-//! format), so a vault's oracle treats it as just another Pyth-compatible
-//! contract: a feed's `contract` (or its `Backup::Other`). The price id is
-//! 32 bytes, hex: a coin's Solana mint, or for a Chainlink feed its chain and
-//! proxy address (chainlink::price_id).
+//! NEAR and NVDA, which our Pyth key isn't entitled to; Chainlink's ETH, SOL and
+//! USDC as the second publisher behind Pyth's), behind Pyth's own read interface
+//! (get_price_no_older_than, same Price format), so a vault's oracle treats it as
+//! just another Pyth-compatible contract: a feed's `contract` (or its backup's).
+//! The price id is 32 bytes, hex: a coin's Solana mint, Pyth's own id for a
+//! relayed Pyth price, or for a Chainlink feed its chain and proxy address
+//! (chainlink::price_id).
 //!
 //! One board, one source of truth, chosen when it's created:
 //! - Attested: prices signed (Ed25519) by k of n attesters, e.g. keepers that
@@ -25,8 +26,12 @@
 //!   guardians and Chainlink's feed (its node operators, and the multisig that
 //!   can repoint its proxy), not any keeper.
 //!
-//! Whatever the source, the board keeps, per coin, the latest price and a time-weighted
-//! average (EMA over `ema_window_s`) for the vault's "price and backup agree" check.
+//! Whatever the source, the board keeps one thing per feed: its latest price. It
+//! keeps no average of its own. WHY: prices are posted on demand (just before a
+//! step), so an average of them is only as honest as the poster's timing, and a
+//! vault's "price and backup agree" check needs a second, independent publisher
+//! (Chainlink for a Pyth feed, Chainlink on another chain for Chainlink), read at
+//! the same moment, not the first publisher's own past.
 
 pub mod chainlink;
 pub mod pump;
@@ -54,13 +59,6 @@ pub struct Price {
     pub conf: U64,
     pub expo: i32,
     pub publish_time: i64,
-}
-
-#[near(serializers = [borsh])]
-#[derive(Clone)]
-struct Entry {
-    spot: Price,
-    ema: Price,
 }
 
 /// A curve's quote token: its mint (hex; all zero = SOL), its Pyth USD feed and decimals.
@@ -131,42 +129,26 @@ pub struct Board {
     /// May change attesters or quotes; None = nobody, for good.
     owner: Option<AccountId>,
     source: Source,
-    ema_window_s: u64,
-    prices: LookupMap<String, Entry>,
+    prices: LookupMap<String, Price>,
 }
 
 #[near]
 impl Board {
     #[init]
-    pub fn new(owner: Option<AccountId>, source: Source, ema_window_s: u64) -> Self {
-        require!(ema_window_s >= 1, "ema_window_s >= 1");
+    pub fn new(owner: Option<AccountId>, source: Source) -> Self {
         check_source(&source);
-        Self { owner, source, ema_window_s, prices: LookupMap::new(b"p") }
+        Self { owner, source, prices: LookupMap::new(b"p") }
     }
 
     // ---------- Pyth's read interface ----------
 
     pub fn get_price_no_older_than(&self, price_id: String, age: u64) -> Option<Price> {
-        self.prices.get(&price_id.to_lowercase()).map(|e| e.spot.clone()).filter(|p| fresh(p, age))
-    }
-
-    /// The average, only once the feed has been seasoned: half a window of
-    /// unbroken history (prices at most a third of a window apart), see `store`.
-    pub fn get_ema_price_no_older_than(&self, price_id: String, age: u64) -> Option<Price> {
-        self.seasoned_ema(&price_id.to_lowercase()).filter(|p| fresh(p, age))
-    }
-
-    /// The averaging window (s). A new feed's average is served once it has half of
-    /// this in unbroken history, prices at most a third of it apart. After that,
-    /// a price after a gap moves it a third of the way at most, so post at least
-    /// that often or a real move outruns the average (no floor until it catches up).
-    pub fn get_ema_window_s(&self) -> u64 {
-        self.ema_window_s
+        self.prices.get(&price_id.to_lowercase()).cloned().filter(|p| fresh(p, age))
     }
 
     /// The latest price, however old (check `publish_time`).
     pub fn get_price_unsafe(&self, price_id: String) -> Option<Price> {
-        self.prices.get(&price_id.to_lowercase()).map(|e| e.spot.clone())
+        self.prices.get(&price_id.to_lowercase()).cloned()
     }
 
     pub fn get_source(&self) -> Source {
@@ -403,79 +385,14 @@ impl Board {
         require!(self.owner.as_ref() == Some(&env::predecessor_account_id()), "owner only");
     }
 
-    /// Keep `p` if it's newer than what the board has, and move the average
-    /// toward it by the time elapsed since the last price, at most `max_gap` (a
-    /// third of the window): one price can't drag the average along, however long
-    /// the board sat quiet. Until a feed is seasoned (half a window of history,
-    /// no gap over `max_gap`), a gap starts its history over at `p`; once seasoned,
-    /// the average keeps its anchor across gaps (the poster can't re-anchor it by
-    /// going quiet and posting a price of its choosing).
+    /// Keep `p` if it's newer than what the board has.
     fn store(&mut self, feed: &str, p: Price) -> bool {
-        let prev = self.prices.get(feed).cloned();
-        let (ema, since) = match prev {
-            Some(e) if p.publish_time <= e.spot.publish_time => return false,
-            Some(e) if e.ema.expo == p.expo => {
-                // A board deployed before histories were kept: its history starts at its last price.
-                let since = history_since(feed).unwrap_or(e.spot.publish_time);
-                let gap = p.publish_time - e.spot.publish_time;
-                if gap > max_gap(self.ema_window_s) && !self.seasoned(e.spot.publish_time, since) {
-                    (p.clone(), p.publish_time)
-                } else {
-                    let w = gap.min(max_gap(self.ema_window_s)) as i128;
-                    let win = self.ema_window_s as i128;
-                    let mv = |old: i128, new: i128| old + (new - old) * w / win;
-                    let ema = Price {
-                        price: I64(mv(e.ema.price.0 as i128, p.price.0 as i128) as i64),
-                        conf: U64(mv(e.ema.conf.0 as i128, p.conf.0 as i128) as u64),
-                        expo: p.expo,
-                        publish_time: p.publish_time,
-                    };
-                    (ema, since)
-                }
-            }
-            _ => (p.clone(), p.publish_time),
-        };
-        set_history_since(feed, since);
-        self.prices.insert(feed.to_string(), Entry { spot: p, ema });
+        if self.prices.get(feed).is_some_and(|e| p.publish_time <= e.publish_time) {
+            return false;
+        }
+        self.prices.insert(feed.to_string(), p);
         true
     }
-
-    /// Half a window of history behind the price published at `last`.
-    fn seasoned(&self, last: i64, since: i64) -> bool {
-        last - since >= (self.ema_window_s / 2) as i64
-    }
-
-    /// The average, if it rests on an unbroken history at least half a window long.
-    fn seasoned_ema(&self, feed: &str) -> Option<Price> {
-        let e = self.prices.get(feed)?;
-        let since = history_since(feed).unwrap_or(e.spot.publish_time);
-        self.seasoned(e.spot.publish_time, since).then(|| e.ema.clone())
-    }
-}
-
-/// The longest gap between two prices that keeps a new feed's history unbroken,
-/// and the most time any one price is credited with: a third of the averaging
-/// window. WHY: the average moves toward a new price by gap / window, so this caps
-/// any one price's pull at a third. Prices posted only
-/// on demand (minutes or hours apart) would otherwise let a single price, e.g. a
-/// pump.fun curve read at the one slot someone just bought into, become its own
-/// average and pass a vault's "price and backup agree" check.
-pub fn max_gap(window_s: u64) -> i64 {
-    (window_s / 3).max(1) as i64
-}
-
-/// When a feed's unbroken history began. Kept under its own storage key, outside
-/// `Entry`, so a board deployed before this keeps its state across an upgrade.
-fn history_key(feed: &str) -> Vec<u8> {
-    [b"h".as_slice(), feed.as_bytes()].concat()
-}
-
-fn history_since(feed: &str) -> Option<i64> {
-    env::storage_read(&history_key(feed)).and_then(|b| b.try_into().ok()).map(i64::from_le_bytes)
-}
-
-fn set_history_since(feed: &str, since: i64) {
-    env::storage_write(&history_key(feed), &since.to_le_bytes());
 }
 
 pub fn attestation_bytes(feed: &[u8; 32], price: i64, expo: i32, publish_time: i64) -> Vec<u8> {

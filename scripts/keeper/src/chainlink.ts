@@ -6,6 +6,10 @@
 // WHY Chainlink on other chains: our Pyth key covers ETH, BTC, SOL and USDC but
 // not NEAR/USD or NVDA ("Not entitled"). Chainlink publishes both on chains that
 // Wormhole Queries can read, so an Evm board can check them without trusting us.
+// And every feed needs a backup from a DIFFERENT publisher (a vault checks the two
+// agree, read in the same round): Chainlink on Arbitrum backs Pyth's ETH, SOL and
+// USDC, and Chainlink's NEAR/USD on Optimism backs the one on Arbitrum. NVDA has
+// no independent second source; a vault names it single_source.
 
 /** keccak256("latestRoundData()")[..4] and keccak256("decimals()")[..4]. */
 export const LATEST_ROUND_DATA = "feaf968c";
@@ -27,8 +31,11 @@ export type Feed = {
   deviationBps: number;
 };
 
-// Verified 2026-11-06 by eth_call of description(), decimals() and latestRoundData()
-// against these RPCs (scripts/DEPLOY-RELAY.md has the values read).
+// Verified by eth_call of description(), decimals() and latestRoundData() against
+// these RPCs: near, near-op, nvda on 2026-11-06, the -arb backups on 2026-11-08
+// (scripts/DEPLOY-RELAY.md has the values read). Heartbeat and deviation from
+// Chainlink's reference data directory (reference-data-directory.vercel.app/
+// feeds-ethereum-mainnet-arbitrum-1.json), the primary (non-SVR) proxy of each pair.
 export const FEEDS: Record<string, Feed> = {
   // NEAR/USD on Arbitrum: Chainlink's NEAR/USD feed, 8 decimals.
   near: { description: "NEAR / USD", chain: 23, evmChainId: 42161, address: "0xbf5c3fb2633e924598a46b9d07a174a9dbcf57c0",
@@ -36,6 +43,13 @@ export const FEEDS: Record<string, Feed> = {
   // The same pair on Optimism: a second, separately updated feed, for a vault's Backup::Other.
   "near-op": { description: "NEAR / USD", chain: 24, evmChainId: 10, address: "0xca6fa4b8cb365c02cd3ba70544efffe78f63ac82",
     rpc: "https://mainnet.optimism.io", rpcEnv: "OPTIMISM_RPC", heartbeatS: 86_400, deviationBps: 50 },
+  // Backups for Pyth's ETH, SOL and USDC (the board serves Pyth's price under Pyth's id, these under theirs).
+  "eth-arb": { description: "ETH / USD", chain: 23, evmChainId: 42161, address: "0x639fe6ab55c921f74e7fac1ee960c0b6293ba612",
+    rpc: "https://arb1.arbitrum.io/rpc", rpcEnv: "ARBITRUM_RPC", heartbeatS: 1_755, deviationBps: 5 },
+  "sol-arb": { description: "SOL / USD", chain: 23, evmChainId: 42161, address: "0x24cea4b8ce57cda5058b924b9b9987992450590c",
+    rpc: "https://arb1.arbitrum.io/rpc", rpcEnv: "ARBITRUM_RPC", heartbeatS: 86_400, deviationBps: 10 },
+  "usdc-arb": { description: "USDC / USD", chain: 23, evmChainId: 42161, address: "0x50834f3163758fcc1df9973b6e91f0f0f0434ad3",
+    rpc: "https://arb1.arbitrum.io/rpc", rpcEnv: "ARBITRUM_RPC", heartbeatS: 255, deviationBps: 10 },
   // Robinhood's NVDA token on Robinhood Chain (Chainlink is the chain's official oracle).
   // Its answer is the TOKEN's price: NVDA's market price x the token's uiMultiplier
   // (dividends reinvested, splits), which is what a vault holding the token trades.

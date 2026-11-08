@@ -83,11 +83,11 @@ async fn the_vault_signs_only_swaps_its_owner_allows() -> anyhow::Result<()> {
     let pyth = worker.dev_deploy(&wasm("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
     let (sol_id, usdc_id) = ("ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d", "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a");
-    let set = |id: &str, p: i64| json!({"price_id": id, "price": p.to_string(), "conf": "0", "expo": -8, "ema": p.to_string(), "age_s": 0});
+    let set = |id: &str, p: i64| json!({"price_id": id, "price": p.to_string(), "conf": "0", "expo": -8, "backup": p.to_string(), "age_s": 0});
     alice.call(pyth.id(), "set_price").args_json(set(usdc_id, 100_000_000)).transact().await?.into_result()?;
     x(&alice, &vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "sol", "contract": pyth.id(), "price_id": sol_id, "backup": {"kind": "ema"}},
-        {"name": "usdc", "contract": pyth.id(), "price_id": usdc_id, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "sol", "contract": pyth.id(), "price_id": sol_id, "backup": common::backup(pyth.id(), sol_id)},
+        {"name": "usdc", "contract": pyth.id(), "price_id": usdc_id, "backup": common::backup(pyth.id(), usdc_id)}]}})).await?.into_result()?;
     x(&alice, &vault, "sol_allow", json!({"pair": {"in_mint": USDC_MINT, "out_mint": WSOL_MINT, "max_in": "50000000", "min_out_per_in_e12": "4000000000000",
         "market": {"sell": "usdc", "buy": "sol", "dec_in": 6, "dec_out": 9, "slippage_bps": 100}}})).await?.into_result()?;
     // 1 USDC for 0.005 SOL, accepting 0.5% slippage: min 0.004975 SOL.

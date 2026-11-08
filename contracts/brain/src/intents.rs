@@ -99,7 +99,9 @@ impl Talk {
         // the oracle: all read by the brain, in one round.
         let mut views = vec![(cfg.verifier, "current_salt".into(), "{}".into())];
         if let Some(m) = &pair.market {
-            views.extend(self.feed_views(&[m.sell.clone(), m.buy.clone()]));
+            let feeds = [m.sell.clone(), m.buy.clone()];
+            self.require_confirmed(&feeds);
+            views.extend(self.feed_views(&feeds));
         }
         self.read(views, Read::IntentsSalt(pending), GAS_READ)
     }

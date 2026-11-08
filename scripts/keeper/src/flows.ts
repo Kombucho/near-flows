@@ -104,20 +104,6 @@ export function canPayKeeper(fee: bigint, free: bigint): boolean {
   return fee === 0n || free >= fee;
 }
 
-/** How often to post a vault's board prices besides just before its steps. A board
- *  serves a feed's average (a vault's `ema` backup) only on half a window of history
- *  with prices at most a third of a window apart, so prices posted only on demand
- *  would leave the backup missing: no backup, no floor. A quarter window leaves room
- *  for a post's own delay. At least a second. */
-export function warmEveryMs(windowS: number): number {
-  return Math.max(1, Math.floor(windowS / 4)) * 1000;
-}
-
-/** Is a keep-warm post due, the last one having gone at `lastMs` (undefined: never)? */
-export function warmDue(lastMs: number | undefined, nowMs: number, windowS: number): boolean {
-  return lastMs === undefined || nowMs - lastMs >= warmEveryMs(windowS);
-}
-
 /** The same pointer the brain's refusal carries. */
 export function keeperUnpaid(vault: string, fee: bigint, free: bigint): string {
   return `${vault}: keeper fee unpaid (price ${fee}, free NEAR ${free} yocto): skipped. Top up NEAR, or run your own keeper for free: ${REPO_URL} (AGENTS.md)`;

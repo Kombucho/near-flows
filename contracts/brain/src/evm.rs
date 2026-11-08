@@ -157,6 +157,7 @@ impl Talk {
             return self.evm_build(a, &[]);
         }
         // Market minimums: the brain reads the prices, then builds in `on_read`.
+        self.require_confirmed(&feeds);
         let views = self.feed_views(&feeds);
         self.need_after = GAS_SIGN.as_tgas() + GAS_SIGNED.as_tgas() + crate::RELAY_TGAS;
         self.read(views, Read::EvmPrices(a), GAS_BUILD)

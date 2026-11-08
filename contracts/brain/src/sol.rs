@@ -264,7 +264,9 @@ impl Talk {
         match pair.market {
             None => self.sol_sign(&message, None),
             Some(m) => {
-                let views = self.feed_views(&[m.sell.clone(), m.buy.clone()]);
+                let feeds = [m.sell.clone(), m.buy.clone()];
+                self.require_confirmed(&feeds);
+                let views = self.feed_views(&feeds);
                 self.need_after = GAS_SIGN.as_tgas() + GAS_SIGNED.as_tgas() + crate::RELAY_TGAS;
                 self.read(views, Read::SolPrices(message), GAS_CHECK)
             }
@@ -411,6 +413,7 @@ impl Talk {
         if feeds.is_empty() {
             return self.sol_sign_tx_at(message, &[]);
         }
+        self.require_confirmed(&feeds);
         let views = self.feed_views(&feeds);
         self.need_after = GAS_SIGN.as_tgas() + GAS_SIGNED.as_tgas() + crate::RELAY_TGAS;
         self.read(views, Read::SolTxPrices(message), GAS_CHECK)

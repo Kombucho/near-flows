@@ -128,7 +128,7 @@ impl Talk {
     pub(crate) fn feed_count(&self, n: &Node<Recipe>) -> usize {
         let Some(m) = n.action.market.as_ref() else { return 0 };
         let feeds = self.vs.oracle.as_ref().map(|c| c.feeds.clone()).unwrap_or_default();
-        [&m.sell, &m.buy].iter().map(|name| feeds.iter().find(|f| f.name == **name).map_or(2, |f| 1 + f.backup.is_some() as usize)).sum()
+        [&m.sell, &m.buy].iter().map(|name| feeds.iter().find(|f| f.name == **name).map_or(2, |f| 1 + matches!(f.backup, crate::oracle::Backup::Other { .. }) as usize)).sum()
     }
 
     /// Refuse a node whose step can never fit in a mainnet transaction (300 Tgas):
@@ -158,7 +158,9 @@ impl Talk {
         match n.action.market {
             None => self.start_now(flow_id, node, price, by_owner, revealed, None),
             Some(m) => {
-                let views = self.feed_views(&[m.sell.clone(), m.buy.clone()]);
+                let feeds = [m.sell.clone(), m.buy.clone()];
+                self.require_confirmed(&feeds);
+                let views = self.feed_views(&feeds);
                 let read = Read::StepPrices { flow_id, node, price, by_owner, revealed };
                 self.read(views, read, Gas::from_tgas(feeds_cb()))
             }

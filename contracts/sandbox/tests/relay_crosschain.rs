@@ -31,7 +31,7 @@ async fn ladder_world() -> anyhow::Result<(RelayWorld, Contract)> {
         x(&w.alice, &w.vault, "evm_template", json!({"template": t})).await?.into_result()?;
     }
     x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": common::single_source()}]}})).await?.into_result()?;
     price(&w, &pyth, 180, 0).await?;
     Ok((w, pyth))
 }
@@ -39,7 +39,7 @@ async fn ladder_world() -> anyhow::Result<(RelayWorld, Contract)> {
 async fn price(w: &RelayWorld, pyth: &Contract, usd: i64, age_s: i64) -> anyhow::Result<()> {
     let p = usd * 100_000_000;
     w.alice.call(pyth.id(), "set_price").args_json(json!({"price_id": NVDA_FEED, "price": p.to_string(), "conf": (p / 2000).to_string(),
-        "expo": -8, "ema": p.to_string(), "age_s": age_s})).transact().await?.into_result()?;
+        "expo": -8, "backup": p.to_string(), "age_s": age_s})).transact().await?.into_result()?;
     Ok(())
 }
 
@@ -173,7 +173,7 @@ async fn a_recipe_with_a_market_floor_refuses_a_pool_pushed_off_the_market() -> 
     let set = |id: &'static str, usd_e8: i64, age: i64| {
         let (a, p) = (w.alice.clone(), pyth.clone());
         async move {
-            a.call(p.id(), "set_price").args_json(json!({"price_id": id, "price": usd_e8.to_string(), "conf": "0", "expo": -8, "ema": usd_e8.to_string(), "age_s": age}))
+            a.call(p.id(), "set_price").args_json(json!({"price_id": id, "price": usd_e8.to_string(), "conf": "0", "expo": -8, "backup": usd_e8.to_string(), "age_s": age}))
                 .transact().await?.into_result()?;
             anyhow::Ok(())
         }
@@ -182,8 +182,8 @@ async fn a_recipe_with_a_market_floor_refuses_a_pool_pushed_off_the_market() -> 
     set(USDC_ID, 100_000_000, 0).await?; // USDC $1
     x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": wnear.id()}, {"contract": usdc.id()}, {"contract": dex.id()}], "remove": []})).await?.into_result()?;
     x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "near", "contract": pyth.id(), "price_id": NEAR_ID, "backup": {"kind": "ema"}},
-        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_ID, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "near", "contract": pyth.id(), "price_id": NEAR_ID, "backup": common::backup(pyth.id(), NEAR_ID)},
+        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_ID, "backup": common::backup(pyth.id(), USDC_ID)}]}})).await?.into_result()?;
     let node = json!({"input": wnear.id(), "when": {"when": "now"}, "action": {"label": "Swap at market", "calls": [{"call": "ft", "receiver": dex.id(), "tgas": 50,
         "msg": format!(r#"{{"token_out":"{}","min_out":"{{min_out}}"}}"#, usdc.id())}], "out": usdc.id(), "min_out_per_in": null, "price": null,
         "market": {"sell": "near", "buy": "usdc", "dec_in": 18, "dec_out": 18, "slippage_bps": 100}}});

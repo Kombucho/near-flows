@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canPayKeeper, due, fired, freeNear, keeperUnpaid, priceOf, REPO_URL, runnable, warmDue, warmEveryMs, type Flow, type FlowNode, type NodeState, type VaultState } from "./flows.ts";
+import { canPayKeeper, due, fired, freeNear, keeperUnpaid, priceOf, REPO_URL, runnable, type Flow, type FlowNode, type NodeState, type VaultState } from "./flows.ts";
 
 const MIN = 60_000_000_000;
 const node = (when: FlowNode["when"], input = "wrap.testnet", price: FlowNode["action"]["price"] = null): FlowNode => ({ input, when, action: { label: "x", price } });
@@ -79,14 +79,3 @@ test("no free work: a vault that can't pay its keeper's price is skipped, with t
   assert.ok(m.includes(`run your own keeper for free: ${REPO_URL} (AGENTS.md)`), m);
 });
 
-test("board prices keep their history: a post every quarter window, besides the one before a step", () => {
-  // A board serves a feed's average only on half a window of history with prices at most
-  // a third of a window apart (600 s: 300 s, 200 s). Posting only before steps would leave
-  // the average missing (no backup, no floor), so the keeper posts every 150 s too.
-  assert.equal(warmEveryMs(600), 150_000);
-  assert.ok(warmEveryMs(600) < (600 / 3) * 1000, "under the board's longest gap, with room for the post's own delay");
-  assert.ok(warmDue(undefined, 0, 600), "never posted: post now");
-  assert.ok(!warmDue(1_000, 1_000 + 149_999, 600));
-  assert.ok(warmDue(1_000, 1_000 + 150_000, 600));
-  assert.equal(warmEveryMs(1), 1_000, "a tiny window still waits a second");
-});

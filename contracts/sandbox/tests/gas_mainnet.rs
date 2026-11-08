@@ -25,7 +25,7 @@ use solguard::*;
 const ONE: u128 = 1_000_000_000_000_000_000;
 const NEAR_FEED: &str = "c415de8d2eba7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750";
 const USDC_FEED: &str = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a";
-const LST_FEED: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+const LST_FEED: &str = "333333333333333333333333333333333333333333333333333333333333333c"; // not a palindrome: its backup is the id reversed
 const SOL_FEED: &str = "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
 const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
@@ -88,7 +88,7 @@ async fn give(from: &Account, t: &Contract, to: &AccountId, amount: u128) -> any
 }
 
 async fn set_price(w: &RelayWorld, pyth: &Contract, id: &str, usd_e8: i64) -> anyhow::Result<()> {
-    w.alice.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": usd_e8.to_string(), "conf": "0", "expo": -8, "ema": usd_e8.to_string(), "age_s": 0}))
+    w.alice.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": usd_e8.to_string(), "conf": "0", "expo": -8, "backup": usd_e8.to_string(), "age_s": 0}))
         .transact().await?.into_result()?;
     Ok(())
 }
@@ -120,9 +120,9 @@ async fn market() -> anyhow::Result<Market> {
     x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": wnear.id()}, {"contract": usdc.id()}, {"contract": lst.id()},
         {"contract": dex.id(), "methods": ["get_return", "deposit_and_stake"]}], "remove": []})).await?.into_result()?;
     x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "near", "contract": pyth.id(), "price_id": NEAR_FEED, "backup": {"kind": "ema"}},
-        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_FEED, "backup": {"kind": "ema"}},
-        {"name": "lst", "contract": pyth.id(), "price_id": LST_FEED, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "near", "contract": pyth.id(), "price_id": NEAR_FEED, "backup": common::backup(pyth.id(), NEAR_FEED)},
+        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_FEED, "backup": common::backup(pyth.id(), USDC_FEED)},
+        {"name": "lst", "contract": pyth.id(), "price_id": LST_FEED, "backup": common::backup(pyth.id(), LST_FEED)}]}})).await?.into_result()?;
     Ok(Market { w, minter, wnear, usdc, lst, dex, pyth })
 }
 
@@ -327,8 +327,8 @@ async fn a_stealth_exec_step_with_a_market_floor_fits_in_300_tgas() -> anyhow::R
     };
     exec(owner.sign(&sv, "trust", json!({"add": [{"contract": m.wnear.id()}, {"contract": m.usdc.id()}, {"contract": m.dex.id()}], "remove": []}), 50)).await?.into_result()?;
     exec(owner.sign(&sv, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "near", "contract": m.pyth.id(), "price_id": NEAR_FEED, "backup": {"kind": "ema"}},
-        {"name": "usdc", "contract": m.pyth.id(), "price_id": USDC_FEED, "backup": {"kind": "ema"}}]}}), 50)).await?.into_result()?;
+        {"name": "near", "contract": m.pyth.id(), "price_id": NEAR_FEED, "backup": common::backup(m.pyth.id(), NEAR_FEED)},
+        {"name": "usdc", "contract": m.pyth.id(), "price_id": USDC_FEED, "backup": common::backup(m.pyth.id(), USDC_FEED)}]}}), 50)).await?.into_result()?;
     let node = json!({"input": m.wnear.id(), "when": {"when": "manual"}, "action": market_swap(&m, 50)});
     exec(owner.sign(&sv, "save_flow", json!({"name": "s", "nodes": [node]}), 50)).await?.into_result()?;
     exec(owner.sign(&sv, "fund", json!({"flow_id": 0, "node": 0, "amount": (10 * ONE).to_string()}), 50)).await?.into_result()?;
@@ -350,12 +350,12 @@ async fn an_oracle_triggered_remote_evm_step_fits_in_300_tgas() -> anyhow::Resul
         x(&w.alice, &w.vault, "evm_template", json!({"template": t})).await?.into_result()?;
     }
     x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": common::single_source()}]}})).await?.into_result()?;
     let nvda = |usd: i64| {
         let (a, p) = (w.alice.clone(), pyth.clone());
         async move {
             let p8 = usd * 100_000_000;
-            a.call(p.id(), "set_price").args_json(json!({"price_id": NVDA_FEED, "price": p8.to_string(), "conf": (p8 / 2000).to_string(), "expo": -8, "ema": p8.to_string(), "age_s": 0}))
+            a.call(p.id(), "set_price").args_json(json!({"price_id": NVDA_FEED, "price": p8.to_string(), "conf": (p8 / 2000).to_string(), "expo": -8, "backup": p8.to_string(), "age_s": 0}))
                 .transact().await?.into_result()?;
             anyhow::Ok(())
         }
@@ -426,8 +426,8 @@ async fn solana_signing_fits_in_300_tgas() -> anyhow::Result<()> {
     set_price(&w, &pyth, USDC_FEED, 100_000_000).await?;
     set_price(&w, &pyth, SOL_FEED, 20_000_000_000).await?;
     x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "sol", "contract": pyth.id(), "price_id": SOL_FEED, "backup": {"kind": "ema"}},
-        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_FEED, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "sol", "contract": pyth.id(), "price_id": SOL_FEED, "backup": common::backup(pyth.id(), SOL_FEED)},
+        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_FEED, "backup": common::backup(pyth.id(), USDC_FEED)}]}})).await?.into_result()?;
     x(&w.alice, &w.vault, "sol_allow", json!({"pair": {"in_mint": USDC_MINT, "out_mint": WSOL_MINT, "max_in": "50000000", "min_out_per_in_e12": "4000000000000",
         "market": {"sell": "usdc", "buy": "sol", "dec_in": 6, "dec_out": 9, "slippage_bps": 100}}})).await?.into_result()?;
     let r = x300(&w.alice, &w.vault, "sol_sign_swap", json!({"message": b64(&honest_for(me, pubkey(USDC_MINT), pubkey(WSOL_MINT), 1_000_000, 5_000_000))})).await?;

@@ -137,12 +137,12 @@ async fn the_vault_builds_and_signs_evm_calls_only_from_its_templates() -> anyho
     let pyth = worker.dev_deploy(&wasm("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
     let (eth_id, usdc_id) = ("ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace", "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a");
-    let set = |id: &str, p: i64, age: i64| json!({"price_id": id, "price": p.to_string(), "conf": "0", "expo": -8, "ema": p.to_string(), "age_s": age});
+    let set = |id: &str, p: i64, age: i64| json!({"price_id": id, "price": p.to_string(), "conf": "0", "expo": -8, "backup": p.to_string(), "age_s": age});
     alice.call(pyth.id(), "set_price").args_json(set(eth_id, 222_450_000_000, 0)).transact().await?.into_result()?;
     alice.call(pyth.id(), "set_price").args_json(set(usdc_id, 100_010_000, 0)).transact().await?.into_result()?;
     x(&alice, &vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "eth", "contract": pyth.id(), "price_id": eth_id, "backup": {"kind": "ema"}},
-        {"name": "usdc", "contract": pyth.id(), "price_id": usdc_id, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "eth", "contract": pyth.id(), "price_id": eth_id, "backup": common::backup(pyth.id(), eth_id)},
+        {"name": "usdc", "contract": pyth.id(), "price_id": usdc_id, "backup": common::backup(pyth.id(), usdc_id)}]}})).await?.into_result()?;
     let mut t = swap_t();
     t["name"] = json!("swap_usdc_weth_market");
     t["args"][0]["args"][5] = json!({"rule": "market", "of": 4, "num": "0", "den": "1",

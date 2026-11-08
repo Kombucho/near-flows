@@ -20,17 +20,14 @@
 // price is skipped (the brain would refuse it): its owner can top up, or run
 // their own keeper for free (AGENTS.md).
 //
-// Prices (--board <board>): just before a step goes, the keeper posts fresh prices
-// for the feeds that vault reads from the board (Chainlink feeds always, Pyth's if
-// PYTH_API_KEY is set), so its market floor reads a price seconds old. A price
-// trigger that reads the board gets one post before it is checked. Besides that,
-// every quarter of the board's averaging window (150 s for 600 s) it posts them for
-// each vault that names this keeper and has a flow: WHY the board serves a new feed's
-// average (a vault's `ema` backup) only on half a window of unbroken history, and any
-// one price moves it a third of the way at most, so a lone on-demand price can't be
-// its own backup (contracts/priceboard `store`). Without these posts a real move
-// between steps would outrun the average and the vault's floor would refuse.
-// A vault with no flows costs nothing.
+// Prices (--board <board>): ON DEMAND only. Just before a step goes, the keeper
+// posts fresh prices for the feeds that vault reads from the board, each feed's
+// price AND its backup (a different publisher: Chainlink for a Pyth price, Chainlink
+// on another chain for Chainlink), so its market floor reads prices seconds old that
+// the vault checks against each other. Chainlink feeds always, Pyth's if
+// PYTH_API_KEY is set. A price trigger that reads the board gets one post before
+// it is checked. Nothing is posted between steps: the board keeps no average, so
+// there is nothing to keep warm, and a vault with nothing due costs nothing.
 //
 // Environment: FACTORY_ID (the relay factory), KEEPER_ACCOUNT_ID, NEAR_NETWORK (default testnet),
 // NEAR_RPC (default FastNEAR testnet), KEEPER_PRIVATE_KEY (or a near-cli key file), PYTH_API_KEY.
@@ -38,7 +35,7 @@
 import { execFile } from "node:child_process";
 import { parseArgs, promisify } from "node:util";
 import { Chain, loadKey } from "./chain.ts";
-import { canPayKeeper, due, fired, keeperUnpaid, priceOf, runnable, warmDue, type Flow, type FlowNode, type VaultState } from "./flows.ts";
+import { canPayKeeper, due, fired, keeperUnpaid, priceOf, runnable, type Flow, type FlowNode, type VaultState } from "./flows.ts";
 import { loadStore, unlock, type Node } from "./hidden.ts";
 
 const { values: opt } = parseArgs({
@@ -61,9 +58,6 @@ const log = (s: string) => console.log(`${new Date().toISOString().slice(11, 19)
 
 // Feeds posted for a vault this round (one post per vault per round is enough).
 let fresh = new Set<string>();
-// When each vault's board prices last went, and the board's averaging window (s).
-const posted = new Map<string, number>();
-const windowS = opt.board ? await chain.view<number>(opt.board, "get_ema_window_s").catch(() => 600) : 600;
 const run = promisify(execFile);
 /** Post fresh board prices for every feed `vault` reads from the board. Never throws:
  *  a vault with no board feeds, or a source that's down, just gets no post (the
@@ -71,7 +65,6 @@ const run = promisify(execFile);
 async function freshen(vault: string) {
   if (!opt.board || !opt.send || fresh.has(vault)) return;
   fresh.add(vault);
-  posted.set(vault, Date.now());
   const scripts = ["chainlink-price", ...(process.env.PYTH_API_KEY ? ["pyth"] : [])];
   for (const s of scripts) {
     try {
@@ -112,8 +105,6 @@ async function round() {
       }
       flows.push([id, f]);
     }
-    // Keep the board's averages fed for vaults that may step (see the header).
-    if (state?.keeper === keeperId && flows.length && warmDue(posted.get(vault), Date.now(), windowS)) await freshen(vault);
     const todo = due(flows, now);
     // The owner's price for this keeper's runs (paid by the vault if a step works).
     // A vault that can't pay it gets no free work: the brain would refuse the step.

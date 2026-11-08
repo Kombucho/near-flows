@@ -1,8 +1,10 @@
-// Post Chainlink prices from other chains (NEAR/USD on Arbitrum, NVDA on Robinhood
-// Chain) to a price board (contracts/priceboard), so vaults' market floors and
-// price triggers have them where our Pyth key isn't entitled.
+// Post Chainlink prices from other chains to a price board (contracts/priceboard), so
+// vaults' market floors and price triggers have them: NEAR/USD on Arbitrum and NVDA on
+// Robinhood Chain (where our Pyth key isn't entitled), and every feed's backup from a
+// different publisher (NEAR/USD on Optimism; ETH, SOL, USDC/USD on Arbitrum behind Pyth's).
+// Run on demand, just before a step (flows --board does): the board keeps no average.
 //
-//   npm run chainlink-price -- --board <board> near nvda       read, sign (or query), post
+//   npm run chainlink-price -- --board <board> near near-op nvda   read, sign (or query), post
 //   npm run chainlink-price -- --board <board> --vault <vault>  every feed that vault reads from the board
 //   ... --dry                         read and print, send nothing (without --board: just read, no NEAR account needed)
 //   ... --out mine.json               attested board: only sign, write this attester's reports

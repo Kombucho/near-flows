@@ -26,7 +26,7 @@ Deployed 2026-11-06 with `SUFFIX=fl06 scripts/deploy-relay-testnet.sh` (testnet 
 
 The demo vault's flow ran on the real testnet contracts through the keeper: 1 NEAR staked with LiNEAR (0.4378 LiNEAR), 2 NEAR wrapped and split into two Rhea swaps (about 1.24 testnet USDT, and 157,967.84 of a meme.cooking coin), and 0.5 NEAR waiting to DCA into LiNEAR every 10 minutes. The 0.1% protocol fee was taken on each step.
 
-Prices: Pyth's NEAR receiver currently rejects Pyth's post-2026-08-26 updates ("Source for attestation is not allowed"), so prices on testnet come from the price board, attested by the keeper from Pyth's Hermes and Chainlink, with every source logged.
+Prices: Pyth's NEAR receiver currently rejects Pyth's post-2026-08-26 updates ("Source for attestation is not allowed"), so prices on testnet come from the price board, attested by the keeper from Pyth's Hermes and Chainlink, with every source logged (keeper-vouched until the board reads Chainlink through Wormhole Queries). They are posted on demand, just before a step, and each feed is checked against a second, independent publisher (Chainlink on another chain); NVDA has no second source and its vault says so (no market floor on it, fixed floor and size caps apply). The testnet board deployed above predates this and needs a redeploy.
 
 ## Build and test
 

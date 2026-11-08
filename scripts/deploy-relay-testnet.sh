@@ -57,14 +57,20 @@ E24="000000000000000000000000"
 # NEAR receiver wasn't updated). WHY not Pyth at all for NEAR and NVDA: our Pyth key isn't
 # entitled to them, so those come from Chainlink on other chains.
 #   ETH, USDC, SOL: Pyth's own ids; the keeper relays Hermes prices (npm run pyth -- --board).
-#   NEAR, NVDA: Chainlink feeds, id = Wormhole chain (2 B) + 10 zero bytes + proxy address
-#   (npm run chainlink-price -- --board). The same ids work on an Evm (Wormhole-verified) board.
+#   NEAR, NVDA and every backup: Chainlink feeds, id = Wormhole chain (2 B) + 10 zero bytes +
+#   proxy address (npm run chainlink-price -- --board). The same ids work on an Evm board.
+# Every feed's backup is a DIFFERENT publisher, read at step time (the board keeps no average):
+# Pyth's ETH/USDC/SOL by Chainlink on Arbitrum, Chainlink NEAR on Arbitrum by Chainlink NEAR on
+# Optimism. NVDA has no second source: single_source (no market floor reads it; fixed floor + caps).
 USDC_ID="eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
 ETH_ID="ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"
 SOL_ID="ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
 NEAR_ID="001700000000000000000000bf5c3fb2633e924598a46b9d07a174a9dbcf57c0" # Chainlink NEAR/USD, Arbitrum (23)
 NVDA_ID="004800000000000000000000379ec4f7c378f34a1b47e4f3cbebcbac3e8e9f15" # Chainlink RHNVDA/USD, Robinhood Chain (72)
 NEAR_OP_ID="001800000000000000000000ca6fa4b8cb365c02cd3ba70544efffe78f63ac82" # Chainlink NEAR/USD, Optimism (24): NEAR's backup
+ETH_ARB_ID="001700000000000000000000639fe6ab55c921f74e7fac1ee960c0b6293ba612"  # Chainlink ETH/USD, Arbitrum (23): ETH's backup
+SOL_ARB_ID="00170000000000000000000024cea4b8ce57cda5058b924b9b9987992450590c"  # Chainlink SOL/USD, Arbitrum (23): SOL's backup
+USDC_ARB_ID="00170000000000000000000050834f3163758fcc1df9973b6e91f0f0f0434ad3" # Chainlink USDC/USD, Arbitrum (23): USDC's backup
 
 want() { [ "$STEP" = all ] && [ "$1" != costs ] && return 0; [[ ",$STEP," == *",$1,"* ]]; }
 size() { wc -c <"$WASM/$1/$1.wasm" | tr -d ' '; }
@@ -226,7 +232,7 @@ if want priceboard; then
     KEY="ed25519:11111111111111111111111111111111"; echo "  (DRY: $KEEPER has no key yet, placeholder used)"
   fi
   need "$BOARD" "$(python3 -c "print(round($(size priceboard)/1e5 + 0.04, 2))")"
-  deploy "$BOARD" priceboard "{\"owner\":\"$OWNER\",\"ema_window_s\":600,\"source\":{\"kind\":\"attested\",\"attesters\":[\"$KEY\"],\"k\":1,\"max_skew_s\":60}}"
+  deploy "$BOARD" priceboard "{\"owner\":\"$OWNER\",\"source\":{\"kind\":\"attested\",\"attesters\":[\"$KEY\"],\"k\":1,\"max_skew_s\":60}}"
 fi
 
 if want vault; then
@@ -245,20 +251,18 @@ fi
 
 if want oracle; then
   # Also for a vault that already exists: replaces its whole oracle config (owner only, through `x`).
-  # Feeds for market floors and price triggers, all on the board, fresh = under 60 s, within 2% of
-  # their backup. NEAR's backup is an INDEPENDENT feed (Chainlink NEAR/USD on Optimism). The others
-  # are confirmed by the board's own average (10 min window), which the board serves only on 5 min
-  # of unbroken history (prices at most 200 s apart): the keeper with --board posts before each step
-  # and every 150 s for vaults with flows (scripts/keeper/src/flows-main.ts).
+  # Feeds for market floors and price triggers, all on the board, fresh = under 60 s, each within 2%
+  # of its backup: the same asset from a different publisher, posted with it just before a step
+  # (the keeper with --board; nothing is posted between steps). NVDA is single-source, said so:
+  # it fires price triggers, but no market floor reads it.
   echo "== oracle: $VAULT reads near usdc eth sol nvda from $BOARD"
   need "$OWNER" 0.05
-  feed() { # feed <name> <price id> [backup json, default: the board's average]
-    local b="${3:-}"
-    [ -n "$b" ] || b='{"kind":"ema"}'
+  feed() { # feed <name> <price id> <backup price id, or single_source>
+    local b="{\"kind\":\"single_source\"}"
+    [ "$3" = single_source ] || b="{\"kind\":\"other\",\"contract\":\"$BOARD\",\"price_id\":\"$3\"}"
     echo "{\"name\":\"$1\",\"contract\":\"$BOARD\",\"price_id\":\"$2\",\"backup\":$b}"
   }
-  NEAR_BACKUP="{\"kind\":\"other\",\"contract\":\"$BOARD\",\"price_id\":\"$NEAR_OP_ID\"}"
-  x "$OWNER" oracle_setup "{\"config\":{\"max_age_s\":60,\"max_conf_bps\":100,\"tolerance_bps\":200,\"feeds\":[$(feed near $NEAR_ID "$NEAR_BACKUP"),$(feed usdc $USDC_ID),$(feed eth $ETH_ID),$(feed sol $SOL_ID),$(feed nvda $NVDA_ID)]}}"
+  x "$OWNER" oracle_setup "{\"config\":{\"max_age_s\":60,\"max_conf_bps\":100,\"tolerance_bps\":200,\"feeds\":[$(feed near $NEAR_ID $NEAR_OP_ID),$(feed usdc $USDC_ID $USDC_ARB_ID),$(feed eth $ETH_ID $ETH_ARB_ID),$(feed sol $SOL_ID $SOL_ARB_ID),$(feed nvda $NVDA_ID single_source)]}}"
 fi
 
 if want flow; then
@@ -310,12 +314,14 @@ if want check; then
   echo "  brain allocated NEAR:     $(rpc view "$BRAIN" get_allocated "$alloc_args")"
   echo "  board.get_source:         $(rpc view "$BOARD" get_source)"
   echo "  vault oracle (first 300): $(rpc view "$BRAIN" get_oracle "{\"vault\":\"$VAULT\"}")"
-  for f in "near $NEAR_ID" "usdc $USDC_ID" "eth $ETH_ID" "sol $SOL_ID" "nvda $NVDA_ID"; do
+  for f in "near $NEAR_ID" "near-op $NEAR_OP_ID" "usdc $USDC_ID" "usdc-arb $USDC_ARB_ID" "eth $ETH_ID" "eth-arb $ETH_ARB_ID" \
+           "sol $SOL_ID" "sol-arb $SOL_ARB_ID" "nvda $NVDA_ID"; do
     set -- $f
     echo "  board $1: $(rpc view "$BOARD" get_price_unsafe "{\"price_id\":\"$2\"}")"
   done
-  echo "  (missing or stale: cd scripts/keeper && KEEPER_ACCOUNT_ID=$KEEPER, then"
-  echo "     PYTH_API_KEY=... npm run pyth -- --board $BOARD eth usdc sol     and     npm run chainlink-price -- --board $BOARD near nvda)"
+  echo "  (missing or stale is normal between steps: prices are posted on demand. To post now:"
+  echo "     cd scripts/keeper && KEEPER_ACCOUNT_ID=$KEEPER PYTH_API_KEY=... npm run pyth -- --board $BOARD --vault $VAULT"
+  echo "     and npm run chainlink-price -- --board $BOARD --vault $VAULT)"
 fi
 
 echo

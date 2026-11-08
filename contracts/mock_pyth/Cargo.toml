@@ -2,7 +2,7 @@
 name = "mock_pyth"
 version = "0.1.0"
 edition = "2021"
-description = "Test-only stand-in for the Pyth receiver on NEAR: the same price views (get_price_no_older_than, get_ema_price_no_older_than), prices set by hand."
+description = "Test-only stand-in for the Pyth receiver on NEAR: the same price view (get_price_no_older_than), prices set by hand, plus a second publisher per feed for a vault backup."
 
 [lib]
 crate-type = ["cdylib", "rlib"]

@@ -1,14 +1,19 @@
-//! Prices from other chains drive a relay vault: NEAR/USD (Chainlink on
-//! Arbitrum) and NVDA (Chainlink RHNVDA/USD on Robinhood Chain) reach an Evm
-//! price board as a Wormhole Query (eth_call) response, USDC reaches an attested
-//! board the way `npm run pyth -- --board` relays Hermes; the brain reads both
-//! through Pyth's interface. A market floor on a NEAR -> USDC swap and a rung of
-//! the NVDA take-profit ladder then run off those prices.
+//! Prices from other chains drive a relay vault, every feed confirmed by a
+//! different publisher, all posted on demand (no history, no average):
+//! - NEAR: Chainlink NEAR/USD on Arbitrum, backed by the same pair on Optimism,
+//!   both reaching an Evm price board as one Wormhole Query (eth_call) response;
+//! - USDC: Pyth's price as `npm run pyth -- --board` relays Hermes to an attested
+//!   board, backed by Chainlink USDC/USD on Arbitrum as `npm run chainlink-price
+//!   -- --board` attests it to the same board;
+//! - NVDA: Chainlink RHNVDA/USD on Robinhood Chain, single-source (said so).
+//! The brain reads them through Pyth's interface. A market floor on a NEAR ->
+//! USDC swap and a rung of the NVDA take-profit ladder then run off those prices.
 //!
 //! The Chainlink answers are the real bytes read on 2026-11-06
 //! (priceboard/tests-data/chainlink_reads.json: NEAR $3.75297364, NVDA
 //! $189.55682289); only the block time and updatedAt are moved to the sandbox's
-//! clock (same 528 s gap), and the guardians are test keys (a real signed
+//! clock (same 528 s gap). The Optimism read is the Arbitrum one moved to
+//! Optimism's feed at $3.7509 (what that feed read on 2026-11-06). The guardians are test keys (a real signed
 //! response needs WORMHOLE_QUERY_API_KEY; real signatures are checked in
 //! priceboard's unit tests). Build the wasm first: make build
 
@@ -30,7 +35,10 @@ use serde_json::{json, Value};
 const ONE: u128 = 1_000_000_000_000_000_000;
 const NEAR_ID: &str = "001700000000000000000000bf5c3fb2633e924598a46b9d07a174a9dbcf57c0";
 const NVDA_ID: &str = "004800000000000000000000379ec4f7c378f34a1b47e4f3cbebcbac3e8e9f15";
+const NEAR_OP_ID: &str = "001800000000000000000000ca6fa4b8cb365c02cd3ba70544efffe78f63ac82";
 const USDC_ID: &str = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a";
+/// Chainlink USDC/USD on Arbitrum (23), USDC's backup.
+const USDC_ARB_ID: &str = "00170000000000000000000050834f3163758fcc1df9973b6e91f0f0f0434ad3";
 
 fn guardian(i: u8) -> Secp {
     Secp::from_slice(&[i + 1; 32]).unwrap()
@@ -63,6 +71,15 @@ fn read(name: &str, t: i64) -> Read {
     let gap = f["block_time"].as_u64().unwrap() - u64::from_be_bytes(round[120..128].try_into().unwrap());
     round[120..128].copy_from_slice(&(t as u64 - gap).to_be_bytes()); // updatedAt: word 3
     Read { chain: f["wormhole_chain"].as_u64().unwrap() as u16, address: h("address"), block: f["block_number"].as_u64().unwrap(), round, decimals: h("decimals") }
+}
+
+/// NEAR/USD on Optimism (24) at $3.7509: the Arbitrum read, moved to Optimism's feed.
+fn read_near_op(t: i64) -> Read {
+    let mut r = read("near_arbitrum", t);
+    r.chain = 24;
+    r.address = hex::decode("ca6fa4b8cb365c02cd3ba70544efffe78f63ac82").unwrap();
+    r.round[32..64].copy_from_slice(&[[0u8; 24].as_slice(), &375_090_000u64.to_be_bytes()].concat()); // answer: word 1
+    r
 }
 
 /// An eth_call query response (proxy format): per read, latestRoundData() then decimals(), at time `t`.
@@ -112,38 +129,42 @@ fn sign(resp: &[u8]) -> Vec<String> {
     }).collect()
 }
 
-/// The Evm board with both feeds (0.5% deviation, 24 h heartbeat), and the attested one (one attester).
+/// The Evm board with the three Chainlink feeds (0.5% deviation, 24 h heartbeat), and the attested one (one attester).
 async fn boards(w: &Worker<Sandbox>, owner: &near_workspaces::Account) -> anyhow::Result<(Contract, Contract)> {
     let evm = w.dev_deploy(&wasm("priceboard")).await?;
     let feed = |chain: u16, a: &str| json!({"chain": chain, "address": a, "deviation_bps": 50, "heartbeat_s": 86_400});
-    evm.call("new").args_json(json!({"owner": owner.id(), "ema_window_s": 600, "source": {"kind": "evm", "guardian_set": 0,
+    evm.call("new").args_json(json!({"owner": owner.id(), "source": {"kind": "evm", "guardian_set": 0,
         "guardians": (0..3).map(|i| guardian_addr(&guardian(i))).collect::<Vec<_>>(), "max_block_age_s": 60,
-        "feeds": [feed(23, "0xbf5c3fb2633e924598a46b9d07a174a9dbcf57c0"), feed(72, "0x379ec4f7c378f34a1b47e4f3cbebcbac3e8e9f15")]}}))
+        "feeds": [feed(23, "0xbf5c3fb2633e924598a46b9d07a174a9dbcf57c0"), feed(24, "0xca6fa4b8cb365c02cd3ba70544efffe78f63ac82"),
+            feed(72, "0x379ec4f7c378f34a1b47e4f3cbebcbac3e8e9f15")]}}))
         .transact().await?.into_result()?;
     let att = w.dev_deploy(&wasm("priceboard")).await?;
-    att.call("new").args_json(json!({"owner": owner.id(), "ema_window_s": 600, "source": {"kind": "attested", "attesters": [near_key(&attester(0))], "k": 1, "max_skew_s": 60}}))
+    att.call("new").args_json(json!({"owner": owner.id(), "source": {"kind": "attested", "attesters": [near_key(&attester(0))], "k": 1, "max_skew_s": 60}}))
         .transact().await?.into_result()?;
     Ok((evm, att))
 }
 
-/// Post both Chainlink feeds at the sandbox's clock; returns that time.
+/// Post the three Chainlink feeds at the sandbox's clock; returns that time.
 async fn post_chainlink(w: &Worker<Sandbox>, who: &near_workspaces::Account, evm: &Contract) -> anyhow::Result<i64> {
     let t = now(w).await?;
-    let resp = response(&[read("near_arbitrum", t), read("nvda_robinhood", t)], t);
+    let resp = response(&[read("near_arbitrum", t), read_near_op(t), read("nvda_robinhood", t)], t);
     let r = who.call(evm.id(), "push_evm").args_json(json!({"response": hex::encode(&resp), "signatures": sign(&resp)})).max_gas().transact().await?;
-    println!("GAS push_evm (2 feeds, 3 guardians): {:.1} Tgas", tgas(&r));
+    println!("GAS push_evm (3 feeds, 3 guardians): {:.1} Tgas", tgas(&r));
     assert!(r.logs().iter().any(|l| l.contains(r#""round_id":"36893488147419122532""#)), "the source is in the log: {:?} {:?}", r.logs(), r.failures());
     r.into_result()?;
     Ok(t)
 }
 
-/// USDC at $0.99981068 as `npm run pyth -- --board` relays it (Pyth's id, Pyth's expo).
+/// USDC at $0.99981068 as `npm run pyth -- --board` relays it (Pyth's id, Pyth's expo), and
+/// at $0.99975901 as `npm run chainlink-price -- --board` attests Chainlink USDC/USD on Arbitrum.
 async fn post_usdc(w: &Worker<Sandbox>, who: &near_workspaces::Account, att: &Contract) -> anyhow::Result<()> {
     use ed25519_dalek::Signer;
     let t = now(w).await?;
-    let m = board::message(USDC_ID, 99_981_068, -8, t);
-    let report = json!({"attester": near_key(&attester(0)), "price": "99981068", "expo": -8, "publish_time": t, "signature": hex::encode(attester(0).sign(&m).to_bytes())});
-    who.call(att.id(), "push").args_json(json!({"feed": USDC_ID, "reports": [report]})).max_gas().transact().await?.into_result()?;
+    for (id, price) in [(USDC_ID, 99_981_068i64), (USDC_ARB_ID, 99_975_901)] {
+        let m = board::message(id, price, -8, t);
+        let report = json!({"attester": near_key(&attester(0)), "price": price.to_string(), "expo": -8, "publish_time": t, "signature": hex::encode(attester(0).sign(&m).to_bytes())});
+        who.call(att.id(), "push").args_json(json!({"feed": id, "reports": [report]})).max_gas().transact().await?.into_result()?;
+    }
     Ok(())
 }
 
@@ -152,19 +173,19 @@ async fn a_market_floor_and_a_ladder_rung_run_off_chainlink_prices_on_the_board(
     let w = relay_world().await?;
     let (evm, att) = boards(&w.worker, &w.alice).await?;
     let anyone = w.worker.dev_create_account().await?;
-    // Every ~150 s for 5 minutes: the history each board's average needs before it vouches for a price.
-    board::history(&w.worker, |_| async {
-        post_chainlink(&w.worker, &anyone, &evm).await?;
-        post_usdc(&w.worker, &anyone, &att).await
-    })
-    .await?;
+    // On demand: one post each, right before the vault reads them.
+    post_chainlink(&w.worker, &anyone, &evm).await?;
+    post_usdc(&w.worker, &anyone, &att).await?;
     let p: Value = evm.view("get_price_no_older_than").args_json(json!({"price_id": NEAR_ID, "age": 60})).await?.json()?;
     assert_eq!((p["price"].as_str(), p["conf"].as_str(), p["expo"].as_i64()), (Some("375297364"), Some("1876486"), Some(-8)), "NEAR $3.75297364 +-0.5%");
 
-    // The vault's feeds: NEAR and NVDA from the Evm board, USDC from the attested one; each confirmed by its board's EMA.
-    let feed = |name: &str, board: &Contract, id: &str| json!({"name": name, "contract": board.id(), "price_id": id, "backup": {"kind": "ema"}});
-    x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200,
-        "feeds": [feed("near", &evm, NEAR_ID), feed("usdc", &att, USDC_ID), feed("nvda", &evm, NVDA_ID)]}})).await?.into_result()?;
+    // The vault's feeds, each confirmed by a different publisher: NEAR (Arbitrum) by NEAR on Optimism,
+    // USDC (Pyth) by Chainlink on Arbitrum; NVDA has no second source and says so.
+    let other = |board: &Contract, id: &str| json!({"kind": "other", "contract": board.id(), "price_id": id});
+    let feed = |name: &str, board: &Contract, id: &str, backup: Value| json!({"name": name, "contract": board.id(), "price_id": id, "backup": backup});
+    x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
+        feed("near", &evm, NEAR_ID, other(&evm, NEAR_OP_ID)), feed("usdc", &att, USDC_ID, other(&att, USDC_ARB_ID)),
+        feed("nvda", &evm, NVDA_ID, common::single_source())]}})).await?.into_result()?;
 
     // ---- a market floor: sell 10 wNEAR for USDC at most 1% under the board's price ----
     let minter = w.worker.dev_create_account().await?;
@@ -198,7 +219,9 @@ async fn a_market_floor_and_a_ladder_rung_run_off_chainlink_prices_on_the_board(
         async move { a.call(d.id(), "set_rate").args_json(json!({"token_in": i, "token_out": o, "rate": r.to_string()})).transact().await?.into_result()?; anyhow::Ok(()) }
     };
     // Floor per NEAR = $3.75297364 / $0.99981068 x 0.99 = 3.7161474... USDC (Python fractions, x 1e24, floored):
-    // 3716147444634218150180192. A pool paying 3.60 is refused, nothing sold.
+    // 3716147444634218150180192. A pool paying 3.60 is refused, nothing sold. Prices posted just before.
+    post_chainlink(&w.worker, &anyone, &evm).await.ok(); // refused if the same second: not newer
+    post_usdc(&w.worker, &anyone, &att).await.ok();
     rate(36 * E24 / 10).await?;
     let r = x(&w.keeper, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
     let logs = r.logs().join("\n");

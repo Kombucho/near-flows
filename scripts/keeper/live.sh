@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # The live keeper for a deployment: every TICK seconds it runs the steps whose
 # triggers fired, and posts prices only when a step needs them (flows --board):
-# just before a vault's step goes, fresh prices for the feeds that vault reads
-# (NEAR and NVDA from Chainlink, ETH/USDC/SOL from Pyth's Hermes). Nothing due,
-# nothing posted, no gas.
+# just before a vault's step goes, fresh prices for the feeds that vault reads and
+# their backups from a different publisher (ETH/USDC/SOL from Pyth's Hermes, backed by
+# Chainlink on Arbitrum; NEAR from Chainlink on Arbitrum, backed by Optimism; NVDA from
+# Chainlink, single-source). The board keeps no average: nothing due, nothing posted, no gas.
 #
 #   SUFFIX=fl06 ./live.sh                  # testnet deployment fl06
 #   SUFFIX=fl06 TICK=30 ./live.sh

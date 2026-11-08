@@ -1,6 +1,6 @@
 //! An attested price board (contracts/priceboard) for a memecoin: k of n
 //! attesters sign each price (Ed25519), the board keeps the median. Shared by
-//! priceboard.rs and demo.rs. The attester keys are test keys.
+//! priceboard.rs and chainlink_board.rs. The attester keys are test keys.
 #![allow(dead_code)]
 
 use crate::common::wasm;
@@ -42,10 +42,10 @@ pub async fn now(w: &Worker<Sandbox>) -> anyhow::Result<i64> {
     Ok((w.view_block().await?.timestamp() / 1_000_000_000) as i64)
 }
 
-/// A board of three attesters, `k` of them needed; its EMA follows over 10 minutes.
+/// A board of three attesters, `k` of them needed.
 pub async fn attested_board(w: &Worker<Sandbox>, owner: &Account, k: u8) -> anyhow::Result<Contract> {
     let b = w.dev_deploy(&wasm("priceboard")).await?;
-    b.call("new").args_json(json!({"owner": owner.id(), "ema_window_s": 600,
+    b.call("new").args_json(json!({"owner": owner.id(),
         "source": {"kind": "attested", "attesters": (0..3).map(|i| near_key(&attester(i))).collect::<Vec<_>>(), "k": k, "max_skew_s": 60}}))
         .transact().await?.into_result()?;
     Ok(b)
@@ -53,37 +53,4 @@ pub async fn attested_board(w: &Worker<Sandbox>, owner: &Account, k: u8) -> anyh
 
 pub async fn push(who: &Account, board: &Contract, reports: Vec<Value>) -> anyhow::Result<ExecutionFinalResult> {
     Ok(who.call(board.id(), "push").args_json(json!({"feed": MEME, "reports": reports})).max_gas().transact().await?)
-}
-
-/// A board serves its average (a vault's `ema` backup) only on half a window of
-/// unbroken history, prices at most a third of a window apart (600 s window: 300 s,
-/// 200 s). So: `post(t)` at the chain's clock, then about every 150 s, until 300 s
-/// of history stand behind the average. Returns the last post's time.
-pub async fn history<F, Fut>(w: &Worker<Sandbox>, mut post: F) -> anyhow::Result<i64>
-where
-    F: FnMut(i64) -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<()>>,
-{
-    let start = now(w).await?;
-    post(start).await?;
-    let mut last = start;
-    while last - start < 300 {
-        while now(w).await? < last + 150 {
-            w.fast_forward(20).await?;
-        }
-        last = now(w).await?;
-        post(last).await?;
-    }
-    Ok(last)
-}
-
-/// MEME at `price` (x 1e-12), signed by attesters 0 and 1, with the history a vault's backup needs.
-pub async fn meme_history(w: &Worker<Sandbox>, who: &Account, board: &Contract, price: i64) -> anyhow::Result<i64> {
-    history(w, |t| async move {
-        let r = push(who, board, vec![report(&attester(0), MEME, price, t), report(&attester(1), MEME, price, t)]).await?;
-        println!("GAS attested push (2 reports): {:.2} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
-        r.into_result()?;
-        Ok(())
-    })
-    .await
 }

@@ -13,6 +13,11 @@ const reads = data("chainlink_reads.json").feeds;
 test("a feed's price id is its Wormhole chain, ten zero bytes and its proxy, as the board computes it", () => {
   assert.equal(priceId(72, "0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15"), "004800000000000000000000379ec4f7c378f34a1b47e4f3cbebcbac3e8e9f15");
   assert.equal(priceId(FEEDS.near.chain, FEEDS.near.address), "001700000000000000000000bf5c3fb2633e924598a46b9d07a174a9dbcf57c0");
+  // The backups the deploy script names (scripts/deploy-relay-testnet.sh): Chainlink on Arbitrum behind Pyth's ETH, SOL, USDC.
+  assert.equal(priceId(FEEDS["eth-arb"].chain, FEEDS["eth-arb"].address), "001700000000000000000000639fe6ab55c921f74e7fac1ee960c0b6293ba612");
+  assert.equal(priceId(FEEDS["sol-arb"].chain, FEEDS["sol-arb"].address), "00170000000000000000000024cea4b8ce57cda5058b924b9b9987992450590c");
+  assert.equal(priceId(FEEDS["usdc-arb"].chain, FEEDS["usdc-arb"].address), "00170000000000000000000050834f3163758fcc1df9973b6e91f0f0f0434ad3");
+  assert.equal(priceId(FEEDS["near-op"].chain, FEEDS["near-op"].address), "001800000000000000000000ca6fa4b8cb365c02cd3ba70544efffe78f63ac82");
   assert.throws(() => priceId(0, FEEDS.near.address));
   assert.throws(() => priceId(23, "0x1234"));
 });
@@ -62,4 +67,14 @@ test("an attested Chainlink price signs the feed's id, the answer, -decimals and
   const id = priceId(72, FEEDS.nvda.address);
   assert.equal(Buffer.from(attestation(id, 18955682289n, -8, 1793980513)).toString("hex"),
     "4e454152464c4f57535f50524943455f5631" + id + "0000000469d8c1f1" + "fffffff8" + "000000006aedf861");
+});
+
+test("every backup is a different publisher's feed from its primary, and no two feeds share an id", () => {
+  const ids = Object.values(FEEDS).map((f) => priceId(f.chain, f.address));
+  assert.equal(new Set(ids).size, ids.length);
+  // NEAR's backup is the same pair on another chain: its own proxy, its own updates.
+  assert.notEqual(FEEDS.near.chain, FEEDS["near-op"].chain);
+  for (const n of ["eth-arb", "sol-arb", "usdc-arb"]) assert.match(FEEDS[n].description, /^(ETH|SOL|USDC) \/ USD$/);
+  // NVDA has no second feed here: it stays single-source.
+  assert.deepEqual(Object.values(FEEDS).filter((f) => /NVDA/.test(f.description)).length, 1);
 });
