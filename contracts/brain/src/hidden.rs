@@ -32,6 +32,9 @@ impl Talk {
             let ok = t == NEAR || t == flow::NO_INPUT || crate::remote::is_remote(t) || t.parse::<AccountId>().ok().is_some_and(|a| self.trusted(&a).is_some());
             require!(ok, format!("untrusted: contract {t}"));
         }
+        for t in &inputs {
+            self.note_token(t, true);
+        }
         self.add_flow(FlowRec { name, ledger: Ledger::new(inputs.len()), nodes: Vec::new(), inputs, hidden: fingerprints })
     }
 
@@ -60,6 +63,7 @@ impl Talk {
         }
         for n in &nodes {
             self.check_node(n);
+            self.note_node(n);
         }
         let f = self.flow_mut(flow_id);
         f.nodes = nodes;

@@ -139,7 +139,10 @@ impl Talk {
     }
 
     /// Bring tokens back from the vault's Intents account: always to the vault itself.
+    /// Never during a step: tokens landing between its two balance reads would
+    /// count as the step's output.
     pub(crate) fn intents_withdraw(&mut self, token: AccountId, amount: u128) -> Answer {
+        self.idle();
         let cfg = self.vs.intents.clone().unwrap_or_else(|| env::panic_str("run intents_setup first"));
         let args = near_sdk::serde_json::json!({"token": token, "receiver_id": self.vault, "amount": amount.to_string()}).to_string();
         Answer::default().call(&cfg.verifier, "ft_withdraw", args.as_bytes(), 1, Gas::from_tgas(60))

@@ -109,6 +109,9 @@ impl Talk {
         self.need_after = need;
         // Trust can be withdrawn after a flow was saved: check again before every step.
         self.check_node(&n);
+        // A fixed deposit is the vault's own NEAR, never a flow's or the reserve.
+        let fixed = fixed_deposits(&n);
+        require!(fixed <= self.free_near(), format!("refused: the recipe attaches {fixed} yoctoNEAR and the vault's free NEAR is {}: add NEAR", self.free_near()));
         let revealed = hidden.then(|| n.clone());
         if matches!(n.when, flow::Trigger::PriceBelow { .. } | flow::Trigger::PriceAbove { .. }) {
             let src = n.action.price.clone().unwrap_or_else(|| env::panic_str("price trigger without a price source"));
@@ -179,6 +182,9 @@ impl Talk {
         let amount = f.ledger.begin_node(&n, node, now, price, by_owner).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
         self.need_after = need_tgas(&n);
         self.charge(&n.input, amount);
+        // Its tokens are read on close; what an out: null node did isn't measured (close.rs).
+        self.note_node(&n);
+        self.vs.elsewhere |= n.action.out.is_none();
         let id = self.vs.next_step;
         self.vs.next_step += 1;
         self.vs.busy = Some(StepCtx {
@@ -202,6 +208,8 @@ impl Talk {
         let ctx = self.vs.busy.clone().unwrap_or_else(|| env::panic_str("nothing running"));
         require!(env::block_timestamp() >= ctx.started_ns + crate::STUCK_NS, "the step may still finish");
         self.vs.busy = None;
+        // Out of gas halfway: what its calls did is unknown (close.rs).
+        self.vs.elsewhere = true;
         let n = self.node(&ctx);
         let f = self.flow_mut(ctx.flow);
         let _ = f.ledger.finish_node(&n, ctx.node, Err(0));
@@ -322,6 +330,15 @@ impl Talk {
             self.vs.busy = Some(ctx);
             return self.measure(false);
         }
+        // The fixed deposit was checked when the step began; the free NEAR may have left since.
+        if let Call::Fn { deposit: Deposit::Fixed { yocto }, .. } = call {
+            if yocto.0 > self.free_near() {
+                ctx.failed = true;
+                self.vs.busy = Some(ctx);
+                return self.measure(false);
+            }
+            self.spend(yocto.0);
+        }
         let amount = ctx.amount.0;
         let min_out = mul_div(amount, min_per_in(&node.action, &ctx), PRICE_SCALE);
         let scaled = node.action.scale_per_in.map_or(0, |m| mul_div(amount, m.0, PRICE_SCALE));
@@ -359,8 +376,20 @@ impl Talk {
         let min = mul_div(extra, min_per_in(&node.action, &ctx), PRICE_SCALE);
         // A collector finding nothing yet is normal; only spenders must get something back.
         let promises_output = node.action.out.is_some() && node.input != flow::NO_INPUT;
+        // Input spent for nothing measured back (a deposit the receiver keeps), or lost
+        // on a failure: it may sit inside another contract now (close.rs).
+        match result {
+            Ok(out) if extra > 0 && out == 0 => self.vs.elsewhere = true,
+            Err(left) if left < ctx.amount.0 => self.vs.elsewhere = true,
+            _ => {}
+        }
         let f = self.flow_mut(ctx.flow);
-        f.ledger.finish_node(&node, ctx.node, result).unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
+        let done = match result {
+            // A partial fill: what the step didn't use stays the node's.
+            Ok(out) => f.ledger.finish_node_partial(&node, ctx.node, out, ctx.amount.0.saturating_sub(extra)),
+            Err(_) => f.ledger.finish_node(&node, ctx.node, result),
+        };
+        done.unwrap_or_else(|e| env::panic_str(&format!("{e:?}")));
         let mut paused = false;
         if let Ok(out) = result {
             if out < min || (promises_output && out == 0) {
@@ -380,9 +409,20 @@ impl Talk {
         );
         self.emit(if ok { "step" } else { "step_failed" }, &data);
         let ans = Answer::default().ret(&format!("{{{data}}}"));
-        // Fees only for a step that did its job: the protocol's share of what it used, the keeper's price.
-        if ok { self.step_fees(ans, &node.input, extra, ctx.by_keeper).into() } else { ans.into() }
+        // Fees only for a step that did its job: the protocol's share of what it used,
+        // the keeper's price if it spent input or collected something (a collector
+        // that found nothing did no work worth paying for).
+        let produced = extra > 0 || matches!(result, Ok(out) if out > 0);
+        if ok { self.step_fees(ans, &node.input, extra, ctx.by_keeper && produced).into() } else { ans.into() }
     }
+}
+
+/// NEAR the recipe attaches of its own (fixed deposits), outside the node's input.
+fn fixed_deposits(n: &Node<Recipe>) -> u128 {
+    n.action.calls.iter().map(|c| match c {
+        Call::Fn { deposit: Deposit::Fixed { yocto }, .. } => yocto.0,
+        _ => 0,
+    }).sum()
 }
 
 /// The least output per unit of input (1e24): the owner's floor or the market's, whichever is higher.

@@ -1,7 +1,9 @@
 //! Vault auto-close: an empty vault deletes itself and its NEAR goes back to the
 //! owner; the name is tombstoned at the factory. Refused while anything is
-//! still in it, while a step runs, for a stranger without auto-close, and for a
-//! vault that ever touched another chain unless its owner confirms.
+//! still in it (every token the vault ever used: hidden and deleted flows,
+//! removed trust), while a step runs, for a stranger without auto-close, and
+//! for a vault that ever touched another chain or may hold funds inside
+//! another contract unless its owner confirms.
 //! Build the wasm first: make build
 
 mod common;
@@ -46,11 +48,53 @@ async fn dex(w: &RelayWorld) -> anyhow::Result<(Contract, Contract, Account)> {
     Ok((dex, lst, minter))
 }
 
+/// Two tokens, A and B, and a dex paying 2 B per A from its B reserves; `who` registered with both.
+async fn pair(w: &RelayWorld, who: &[&AccountId]) -> anyhow::Result<(Contract, Contract, Contract, Account)> {
+    let minter = w.worker.dev_create_account().await?;
+    let mut ts = Vec::new();
+    for sym in ["A", "B"] {
+        let t = w.worker.dev_deploy(&wasm("mock_ft")).await?;
+        t.call("new").args_json(json!({"owner_id": minter.id(), "total_supply": (1_000_000 * ONE).to_string(), "name": sym, "symbol": sym, "decimals": 18, "call_fee_bps": 0}))
+            .transact().await?.into_result()?;
+        ts.push(t);
+    }
+    let (a, b) = (ts.remove(0), ts.remove(0));
+    let dex = w.worker.dev_deploy(&wasm("mock_dex")).await?;
+    dex.call("new").args_json(json!({"lst": b.id()})).transact().await?.into_result()?;
+    dex.call("set_rate").args_json(json!({"token_in": a.id(), "token_out": b.id(), "rate": (2 * NEAR).to_string()})).transact().await?.into_result()?;
+    for t in [&a, &b] {
+        for acc in who.iter().copied().chain([dex.id()]) {
+            reg(&minter, t, acc).await?;
+        }
+    }
+    give(&minter, &b, dex.id(), 100_000 * ONE).await?;
+    Ok((a, b, dex, minter))
+}
+
+async fn reg(minter: &Account, t: &Contract, who: &AccountId) -> anyhow::Result<()> {
+    minter.call(t.id(), "storage_deposit").args_json(json!({"account_id": who})).deposit(NearToken::from_millinear(10)).transact().await?.into_result()?;
+    Ok(())
+}
+
+async fn give(from: &Account, t: &Contract, to: &AccountId, amount: u128) -> anyhow::Result<()> {
+    from.call(t.id(), "ft_transfer").args_json(json!({"receiver_id": to, "amount": amount.to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
+    Ok(())
+}
+
+async fn bal(t: &Contract, who: &AccountId) -> anyhow::Result<u128> {
+    Ok(t.view("ft_balance_of").args_json(json!({"account_id": who})).await?.json::<String>()?.parse()?)
+}
+
+/// A swap of A for B on the dex: `out` names B, or null (B still arrives: "out" is only what the brain measures).
+fn swap_node(a: &Contract, b: &Contract, dex: &Contract, out: bool) -> Value {
+    json!({"input": a.id(), "when": {"when": "now"}, "action": {"label": "Swap", "calls": [{"call": "ft", "receiver": dex.id(), "tgas": 50,
+        "msg": format!(r#"{{"token_out":"{}","min_out":"1"}}"#, b.id())}], "out": if out { json!(b.id()) } else { Value::Null }, "min_out_per_in": null, "price": null}})
+}
+
 #[tokio::test]
-async fn a_near_only_vault_auto_closes_after_its_flow_and_its_owner_gets_the_near_back() -> anyhow::Result<()> {
+async fn a_swap_only_vault_auto_closes_after_its_flow_and_its_owner_gets_the_near_back() -> anyhow::Result<()> {
     let w = relay_world().await?;
     let factory = factory_of(&w);
-    let (dex, _, _) = dex(&w).await?;
     let bob = w.worker.dev_create_account().await?;
     let start = bob.view_account().await?.balance.as_yoctonear();
     let r = bob.call(&factory, "create_vault").args_json(json!({"name": "bob", "keeper": w.keeper.id()}))
@@ -59,12 +103,19 @@ async fn a_near_only_vault_auto_closes_after_its_flow_and_its_owner_gets_the_nea
     let vault: AccountId = format!("bob.{factory}").parse()?;
     let created = start - bob.view_account().await?.balance.as_yoctonear();
     bob.transfer_near(&vault, NearToken::from_near(1)).await?.into_result()?;
-    x(&bob, &vault, "trust", json!({"add": [{"contract": dex.id(), "methods": ["deposit_and_stake"]}], "remove": []})).await?.into_result()?;
-    let f: u32 = x(&bob, &vault, "save_flow", json!({"name": "spend", "nodes": [{"input": "near", "action": spend_near(&dex), "when": {"when": "now"}}]})).await?.json()?;
-    x(&bob, &vault, "fund", json!({"flow_id": f, "node": 0, "amount": (NEAR / 2).to_string()})).await?.into_result()?;
+    let (a, b, dex, minter) = pair(&w, &[&vault, bob.id()]).await?;
+    give(&minter, &a, &vault, 10 * ONE).await?;
+    // The dex is trusted only as a receiver (no method list): its balance read fails, it's no token.
+    x(&bob, &vault, "trust", json!({"add": [{"contract": a.id()}, {"contract": b.id()}, {"contract": dex.id()}], "remove": []})).await?.into_result()?;
+    let f: u32 = x(&bob, &vault, "save_flow", json!({"name": "swap", "nodes": [swap_node(&a, &b, &dex, true)]})).await?.json()?;
+    x(&bob, &vault, "fund", json!({"flow_id": f, "node": 0, "amount": (10 * ONE).to_string()})).await?.into_result()?;
     x(&bob, &vault, "set_auto_close", json!({"on": true})).await?.into_result()?;
     let r = x(&w.keeper, &vault, "step", json!({"flow_id": f, "node": 0})).await?;
     assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?} {:?}", r.logs(), r.failures());
+    // The output is still in the vault: nobody closes it until the owner takes it.
+    let r = x(&w.keeper, &vault, "close", json!({})).await?;
+    assert!(fails_with(&r, &format!("holds {} of {}", 20 * ONE, b.id())), "{:?}", r.failures());
+    x(&bob, &vault, "withdraw", json!({"token": b.id(), "amount": (20 * ONE).to_string()})).await?.into_result()?;
 
     // The job is done: the keeper closes it; the NEAR can only go to bob.
     let before = bob.view_account().await?.balance.as_yoctonear();
@@ -76,7 +127,7 @@ async fn a_near_only_vault_auto_closes_after_its_flow_and_its_owner_gets_the_nea
     assert!(w.brain.view("get_vault").args_json(json!({"vault": vault})).await?.json::<Option<Value>>()?.is_none(), "its record is gone");
     let back = bob.view_account().await?.balance.as_yoctonear() - before;
     let end = bob.view_account().await?.balance.as_yoctonear();
-    let net = start - end - NEAR / 2; // what bob spent, but the half NEAR the flow staked
+    let net = start - end; // what bob spent, every tx's gas included
     println!("CLOSE create {:.4} NEAR (deposit + gas), record refund {:.4}, back on close {:.4}, net cost {:.4} NEAR incl. every tx's gas",
         near(created), near(paid.parse()?), near(back), near(net));
     assert!(net < NEAR / 50, "net cost {:.4} NEAR", near(net));
@@ -97,12 +148,12 @@ async fn a_near_only_vault_auto_closes_after_its_flow_and_its_owner_gets_the_nea
 async fn close_is_refused_while_a_token_a_flow_or_a_step_still_holds_anything() -> anyhow::Result<()> {
     let w = relay_world().await?;
     let (dex, lst, minter) = dex(&w).await?;
-    x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": dex.id(), "methods": ["deposit_and_stake"]}, {"contract": lst.id()}], "remove": []})).await?.into_result()?;
     // A stranger can't close a vault whose owner never turned auto-close on.
     let stranger = w.worker.dev_create_account().await?;
     assert!(fails_with(&x(&stranger, &w.vault, "close", json!({})).await?, "auto-close is off"));
     x(&w.alice, &w.vault, "set_auto_close", json!({"on": true})).await?.into_result()?;
     assert!(fails_with(&x(&stranger, &w.vault, "close", json!({"to": stranger.id()})).await?, "only where its owner said"));
+    x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": dex.id(), "methods": ["deposit_and_stake"]}, {"contract": lst.id()}], "remove": []})).await?.into_result()?;
 
     // A flow holding NEAR.
     let f: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "s", "nodes": [{"input": "near", "action": spend_near(&dex), "when": {"when": "now"}}]})).await?.json()?;
@@ -115,21 +166,122 @@ async fn close_is_refused_while_a_token_a_flow_or_a_step_still_holds_anything() 
     assert!(fails_with(&r, "a step is running"), "{:?}", r.failures());
     step.await?.into_result()?;
 
-    // A token balance: 5 LST in the vault (lst is trusted, so the brain reads it).
+    // The vault called a contract's own methods (a stake, out: null): what it holds there
+    // can't be read from here, so only its owner closes it now, saying it swept it.
+    assert!(fails_with(&x(&stranger, &w.vault, "close", json!({})).await?, "may hold funds inside other contracts"));
+    assert!(fails_with(&x(&w.alice, &w.vault, "close", json!({})).await?, "confirm_remote"));
+    assert!(fails_with(&x(&w.alice, &w.vault, "set_auto_close", json!({"on": true})).await?, "may hold funds inside other contracts"));
+
+    // A token balance: 5 LST in the vault (lst is trusted, so the brain reads it), even on the owner's close.
     minter.call(lst.id(), "storage_deposit").args_json(json!({"account_id": w.vault})).deposit(NearToken::from_millinear(10)).transact().await?.into_result()?;
     minter.call(lst.id(), "ft_transfer").args_json(json!({"receiver_id": w.vault, "amount": (5 * ONE).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
-    let r = x(&stranger, &w.vault, "close", json!({})).await?;
+    let r = x(&w.alice, &w.vault, "close", json!({"confirm_remote": true})).await?;
     assert!(fails_with(&r, &format!("holds {} of {}", 5 * ONE, lst.id())), "{:?}", r.failures());
     assert!(exists(&w, &w.vault).await);
-    // Withdrawn, and the step's NEAR spent: now anyone may close it, to its owner.
+    // Withdrawn, and the step's NEAR spent: the owner closes it.
     minter.call(lst.id(), "storage_deposit").args_json(json!({"account_id": w.alice.id()})).deposit(NearToken::from_millinear(10)).transact().await?.into_result()?;
     x(&w.alice, &w.vault, "withdraw", json!({"token": lst.id(), "amount": (5 * ONE).to_string()})).await?.into_result()?;
     let before = w.alice.view_account().await?.balance.as_yoctonear();
-    let r = x(&stranger, &w.vault, "close", json!({})).await?;
+    let r = x(&w.alice, &w.vault, "close", json!({"confirm_remote": true})).await?;
     assert!(r.is_success(), "{:?}", r.failures());
     assert!(!exists(&w, &w.vault).await);
     println!("closed: {:.4} NEAR back to the owner", near(w.alice.view_account().await?.balance.as_yoctonear() - before));
     assert!(w.alice.view_account().await?.balance.as_yoctonear() > before + NEAR, "the vault's ~1.9 NEAR went to alice");
+    Ok(())
+}
+
+/// Security report PoC: a token trusted WITH a method list (as the deploy script trusts
+/// wNEAR and LiNEAR) was never read on close, so a stranger closed the vault over it.
+#[tokio::test]
+async fn a_token_trusted_with_a_method_list_keeps_a_stranger_from_closing_over_it() -> anyhow::Result<()> {
+    let w = relay_world().await?;
+    let (_, lst, minter) = dex(&w).await?;
+    x(&w.alice, &w.vault, "set_auto_close", json!({"on": true})).await?.into_result()?;
+    x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": lst.id(), "methods": ["deposit_and_stake"]}], "remove": []})).await?.into_result()?;
+    reg(&minter, &lst, &w.vault).await?;
+    give(&minter, &lst, &w.vault, 5 * ONE).await?;
+    let stake = json!({"label": "Stake", "calls": [{"call": "fn", "contract": lst.id(), "method": "deposit_and_stake", "args": "{}", "deposit": {"kind": "input"}, "tgas": 30}],
+        "out": null, "min_out_per_in": null, "price": null});
+    x(&w.alice, &w.vault, "save_flow", json!({"name": "stake", "nodes": [{"input": "near", "action": stake, "when": {"when": "now"}}]})).await?.into_result()?;
+    let stranger = w.worker.dev_create_account().await?;
+    let r = x(&stranger, &w.vault, "close", json!({})).await?;
+    assert!(r.is_failure(), "a stranger closed a vault holding 5 LST");
+    assert!(exists(&w, &w.vault).await);
+    assert_eq!(bal(&lst, &w.vault).await?, 5 * ONE);
+    // The owner's own close reads it too.
+    let r = x(&w.alice, &w.vault, "close", json!({"confirm_remote": true})).await?;
+    assert!(fails_with(&r, &format!("holds {} of {}", 5 * ONE, lst.id())), "{:?}", r.failures());
+    Ok(())
+}
+
+/// Red-team PoC: an LST the vault never trusted, minted to it by a trusted dex's
+/// deposit_and_stake on an out: null node, was stranded by a stranger's close.
+#[tokio::test]
+async fn an_out_null_stake_keeps_a_stranger_from_closing_over_an_untrusted_lst() -> anyhow::Result<()> {
+    let w = relay_world().await?;
+    let (dex, lst, minter) = dex(&w).await?;
+    x(&w.alice, &w.vault, "set_auto_close", json!({"on": true})).await?.into_result()?;
+    for who in [&w.vault, dex.id()] {
+        reg(&minter, &lst, who).await?;
+    }
+    give(&minter, &lst, dex.id(), 900_000 * ONE).await?;
+    x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": dex.id(), "methods": ["deposit_and_stake"]}], "remove": []})).await?.into_result()?;
+    let f: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "s", "nodes": [{"input": "near", "action": spend_near(&dex), "when": {"when": "now"}}]})).await?.json()?;
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": (NEAR / 2).to_string()})).await?.into_result()?;
+    let r = x(&w.keeper, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?} {:?}", r.logs(), r.failures());
+    assert_eq!(bal(&lst, &w.vault).await?, NEAR / 2, "the stake's LST landed in the vault");
+    let stranger = w.worker.dev_create_account().await?;
+    let r = x(&stranger, &w.vault, "close", json!({})).await?;
+    assert!(r.is_failure(), "a stranger closed the vault over its LST");
+    assert!(exists(&w, &w.vault).await);
+    assert_eq!(bal(&lst, &w.vault).await?, NEAR / 2);
+    Ok(())
+}
+
+/// The tokens of a hidden flow's revealed nodes, of a deleted flow and of a removed
+/// trust are still read on close: the vault remembers every token it ever used.
+#[tokio::test]
+async fn close_still_reads_the_tokens_of_hidden_and_deleted_flows_and_of_removed_trust() -> anyhow::Result<()> {
+    let w = relay_world().await?;
+    let (a, b, dex, minter) = pair(&w, &[&w.vault]).await?;
+    x(&w.alice, &w.vault, "set_auto_close", json!({"on": true})).await?.into_result()?;
+    give(&minter, &a, &w.vault, 10 * ONE).await?;
+    x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": a.id()}, {"contract": b.id()}, {"contract": dex.id()}], "remove": []})).await?.into_result()?;
+    let node = swap_node(&a, &b, &dex, true);
+    let salt = "11".repeat(32);
+    let print: String = w.brain.view("fingerprint_of").args_json(json!({"node": node, "salt": salt})).await?.json()?;
+    let f: u32 = x(&w.alice, &w.vault, "save_hidden_flow", json!({"name": "h", "inputs": [a.id()], "fingerprints": [print]})).await?.json()?;
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": (10 * ONE).to_string()})).await?.into_result()?;
+    let r = x(&w.keeper, &w.vault, "step_hidden", json!({"flow_id": f, "node": 0, "reveal": node, "salt": salt})).await?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?} {:?}", r.logs(), r.failures());
+    x(&w.alice, &w.vault, "delete_flow", json!({"flow_id": f})).await?.into_result()?;
+    x(&w.alice, &w.vault, "trust", json!({"add": [], "remove": [a.id(), b.id(), dex.id()]})).await?.into_result()?;
+    let stranger = w.worker.dev_create_account().await?;
+    let r = x(&stranger, &w.vault, "close", json!({})).await?;
+    assert!(fails_with(&r, &format!("holds {} of {}", 20 * ONE, b.id())), "{:?}", r.failures());
+    assert_eq!(bal(&b, &w.vault).await?, 20 * ONE);
+    Ok(())
+}
+
+/// A swap on an out: null node still sends its output to the vault; the brain never
+/// measured it, so a stranger's close is refused.
+#[tokio::test]
+async fn an_out_null_swap_keeps_a_stranger_from_closing() -> anyhow::Result<()> {
+    let w = relay_world().await?;
+    let (a, b, dex, minter) = pair(&w, &[&w.vault]).await?;
+    x(&w.alice, &w.vault, "set_auto_close", json!({"on": true})).await?.into_result()?;
+    give(&minter, &a, &w.vault, 10 * ONE).await?;
+    x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": a.id()}, {"contract": dex.id()}], "remove": []})).await?.into_result()?;
+    let f: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "s", "nodes": [swap_node(&a, &b, &dex, false)]})).await?.json()?;
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": (10 * ONE).to_string()})).await?.into_result()?;
+    let r = x(&w.keeper, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?} {:?}", r.logs(), r.failures());
+    x(&w.alice, &w.vault, "trust", json!({"add": [], "remove": [dex.id()]})).await?.into_result()?;
+    let stranger = w.worker.dev_create_account().await?;
+    let r = x(&stranger, &w.vault, "close", json!({})).await?;
+    assert!(fails_with(&r, "may hold funds inside other contracts"), "{:?}", r.failures());
+    assert_eq!(bal(&b, &w.vault).await?, 20 * ONE);
     Ok(())
 }
 
