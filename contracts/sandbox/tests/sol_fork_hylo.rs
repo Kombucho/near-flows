@@ -93,7 +93,7 @@ async fn a_relay_vault_mints_and_redeems_hylo_xsol_and_hyusd_on_a_solana_fork() 
     }
 
     let sign = |msg: &Value| {
-        let (k, v, m) = (w.keeper.clone(), w.vault.clone(), msg["message"].as_str().unwrap().to_string());
+        let (k, v, m) = (w.alice.clone(), w.vault.clone(), msg["message"].as_str().unwrap().to_string());
         async move { x(&k, &v, "sol_sign_tx", json!({"message": m})).await }
     };
     let refused = |r: &ExecutionFinalResult, why: &str| {

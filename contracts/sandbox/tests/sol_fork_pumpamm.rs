@@ -30,7 +30,7 @@ async fn the_vault_trades_a_graduated_coin_on_the_pump_amm_on_a_solana_fork() ->
 
     // A relay vault: the brain checks every byte, the vault (its own MPC path) signs.
     let w = relay_world().await?;
-    let (alice, keeper, vault) = (w.alice.clone(), w.keeper.clone(), w.vault.clone());
+    let (alice, vault) = (w.alice.clone(), w.vault.clone());
     x(&alice, &vault, "sol_setup", json!({"signer": w.signer.id(), "max_cu_price": 1_000_000u64, "max_cu_limit": 1_400_000u32})).await?.into_result()?;
     let me = view(&w.brain, &vault, "get_sol", Value::Null).await?["address"].as_str().unwrap().to_string();
     println!("relay vault's Solana address: {me}");
@@ -49,7 +49,7 @@ async fn the_vault_trades_a_graduated_coin_on_the_pump_amm_on_a_solana_fork() ->
     x(&alice, &vault, "set_limit", json!({"token": "sol:SOL", "max": "120000000", "window_ns": 86_400_000_000_000u64})).await?.into_result()?;
 
     let sign = |msg: String| {
-        let (k, v) = (keeper.clone(), vault.clone());
+        let (k, v) = (alice.clone(), vault.clone()); // the direct door is the owner's
         async move { x(&k, &v, "sol_sign_tx", json!({"message": msg})).await }
     };
     let refused = |r: &near_workspaces::result::ExecutionFinalResult, why: &str| {

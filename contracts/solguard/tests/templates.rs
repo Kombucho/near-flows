@@ -236,6 +236,28 @@ fn only_token_accounts_the_templates_use_can_be_created() {
 }
 
 #[test]
+fn no_durable_nonce_even_if_a_template_allows_it() {
+    // advance_nonce_account first makes a signed transaction valid until someone sends it: a keeper
+    // could hold a swap for hours and land it once its floor is stale. Refused even when the owner
+    // wrote a template for it; with a recent blockhash the transaction dies in ~1 minute.
+    let v = vault();
+    let mine = ata_of(&v, &pubkey(WSOL));
+    let nonce_acc = key(55);
+    let advance = Template { name: "advance".into(), program: pubkey(SYSTEM), prefix: vec![4, 0, 0, 0], fields: vec![],
+        accounts: vec![Acc::Any, Acc::Any, Acc::Vault], extra_accounts: 0, needs_owner: false };
+    let mut ts = wsol_templates();
+    ts.push(advance);
+    let wrap = { let mut d = vec![2, 0, 0, 0]; d.extend(1_000u64.to_le_bytes()); d };
+    let held = Tx::new(v).ix(pubkey(SYSTEM), vec![nonce_acc, pubkey("SysvarRecentB1ockHashes11111111111111111111"), v], vec![4, 0, 0, 0])
+        .ix(pubkey(SYSTEM), vec![v, mine], wrap.clone()).bytes();
+    match check_tx(&held, &ts, &policy()) {
+        Err(Refusal::Program(why)) => assert!(why.contains("durable nonce"), "{why}"),
+        r => panic!("a durable nonce passed: {r:?}"),
+    }
+    check_tx(&Tx::new(v).ix(pubkey(SYSTEM), vec![v, mine], wrap).bytes(), &ts, &policy()).expect("the same wrap on a recent blockhash");
+}
+
+#[test]
 fn templates_are_checked_when_saved() {
     let mut t = pump_buy();
     t.fields[1].rule = FieldRule::AtLeast { of: 2, num: 1, den: 1 };

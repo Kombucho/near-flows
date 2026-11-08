@@ -17,7 +17,7 @@ mod common;
 mod relayw;
 
 use common::{num, signed, Fork, ANVIL_KEY};
-use relayw::{relay_world, view, x, RelayWorld};
+use relayw::{pyth_feeds, relay_world, set_usd, view, x, RelayWorld, ETH_FEED, USDC_FEED};
 use serde_json::{json, Value};
 
 // Base mainnet: Uniswap QuoterV2, WETH, USDC, Aave's aUSDC (the router and pool are in the templates).
@@ -38,7 +38,7 @@ async fn the_vault_runs_uniswap_and_aave_templates_on_a_base_fork() -> anyhow::R
     println!("Base fork at block {}", cast(&["block-number"]));
 
     // NEAR side: Alice's relay vault, set up for Base with the test signer.
-    let RelayWorld { brain, alice, keeper, signer, vault, .. } = relay_world().await?;
+    let RelayWorld { worker, brain, alice, signer, vault, .. } = relay_world().await?;
     x(&alice, &vault, "evm_setup", json!({"signer": signer.id(), "chain_id": 8453u64,
         "max_fee": (2 * GWEI).to_string(), "max_tip": (GWEI / 10).to_string(), "gas_cap": 500_000u64})).await?.into_result()?;
     let me = view(&brain, &vault, "get_evm", Value::Null).await?["address"].as_str().unwrap().to_string();
@@ -59,6 +59,10 @@ async fn the_vault_runs_uniswap_and_aave_templates_on_a_base_fork() -> anyhow::R
     let quote = num(&cast(&["call", QUOTER, "quoteExactInputSingle((address,address,uint256,uint24,uint160))(uint256,uint160,uint32,uint256)",
         &format!("({WETH},{USDC},{amount},500,0)")]));
     println!("Uniswap quote: 0.1 WETH -> {:.2} USDC", quote as f64 / 1e6);
+    // The swap's market minimum reads ETH and USDC: the oracle where the pool is (USDC $1, ETH = 10 x the quote).
+    let pyth = pyth_feeds(&worker, &alice, &vault, &[("eth", ETH_FEED), ("usdc", USDC_FEED)]).await?;
+    set_usd(&alice, &pyth, ETH_FEED, (quote * 1_000) as i64, 0).await?;
+    set_usd(&alice, &pyth, USDC_FEED, 100_000_000, 0).await?;
 
     let mut nonce = 0u64;
     let mut call = |name: &'static str, values: Vec<u128>| {
@@ -69,9 +73,9 @@ async fn the_vault_runs_uniswap_and_aave_templates_on_a_base_fork() -> anyhow::R
     };
 
     // 1. Approve the router and swap 0.1 WETH with min_out = 99% of the quote: real Uniswap pays the vault.
-    let r = x(&keeper, &vault, "evm_call", call("approve_weth_uniswap", vec![0, 200_000_000_000_000_000])).await?;
+    let r = x(&alice, &vault, "evm_call", call("approve_weth_uniswap", vec![0, 200_000_000_000_000_000])).await?;
     assert_eq!(send_raw(&signed(&r)), 1, "approve executed");
-    let r = x(&keeper, &vault, "evm_call", call("uniswap_swap_weth_usdc", vec![0, 0, 0, 0, amount, quote * 99 / 100, 0])).await?;
+    let r = x(&alice, &vault, "evm_call", call("uniswap_swap_weth_usdc", vec![0, 0, 0, 0, amount, quote * 99 / 100, 0])).await?;
     assert_eq!(send_raw(&signed(&r)), 1, "swap executed");
     let usdc = balance(USDC, &me);
     println!("swapped 0.1 WETH -> {:.2} USDC into the vault's own address", usdc as f64 / 1e6);
@@ -79,15 +83,15 @@ async fn the_vault_runs_uniswap_and_aave_templates_on_a_base_fork() -> anyhow::R
     assert_eq!(balance(WETH, &me), 400_000_000_000_000_000);
 
     // 2. Aave: lend all of it, then take it back. aUSDC is the receipt, held by the vault itself.
-    let r = x(&keeper, &vault, "evm_call", call("approve_usdc_aave", vec![0, usdc])).await?;
+    let r = x(&alice, &vault, "evm_call", call("approve_usdc_aave", vec![0, usdc])).await?;
     assert_eq!(send_raw(&signed(&r)), 1);
-    let r = x(&keeper, &vault, "evm_call", call("aave_supply_usdc", vec![0, usdc, 0, 0])).await?;
+    let r = x(&alice, &vault, "evm_call", call("aave_supply_usdc", vec![0, usdc, 0, 0])).await?;
     assert_eq!(send_raw(&signed(&r)), 1, "Aave supply executed");
     let ausdc = balance(AUSDC, &me);
     println!("supplied {:.2} USDC to Aave: vault holds {:.2} aUSDC", usdc as f64 / 1e6, ausdc as f64 / 1e6);
     assert_eq!(balance(USDC, &me), 0);
     assert!(ausdc + 2 >= usdc, "aUSDC 1:1, give or take Aave's index rounding (seen: 2 wei)");
-    let r = x(&keeper, &vault, "evm_call", call("aave_withdraw_usdc", vec![0, ausdc, 0])).await?;
+    let r = x(&alice, &vault, "evm_call", call("aave_withdraw_usdc", vec![0, ausdc, 0])).await?;
     assert_eq!(send_raw(&signed(&r)), 1, "Aave withdraw executed");
     println!("withdrew: vault holds {:.2} USDC, {:.2} aUSDC", balance(USDC, &me) as f64 / 1e6, balance(AUSDC, &me) as f64 / 1e6);
     assert!(balance(USDC, &me) + 1 >= usdc);

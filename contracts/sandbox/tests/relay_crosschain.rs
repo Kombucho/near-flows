@@ -78,7 +78,7 @@ async fn the_nvda_ladder_runs_on_a_relay_vault_with_the_same_bounds() -> anyhow:
         let v = w.vault.clone();
         async move { x(&who, &v, "remote_report", json!({"flow_id": f, "node": node, "out": out.map(|o| o.to_string())})).await }
     };
-    assert!(fails_with(&report(&w.keeper, 0, None).await?, "may still land"));
+    assert!(fails_with(&report(&w.keeper, 0, None).await?, "only the owner may say"));
     assert!(fails_with(&report(&w.keeper, 0, Some(min - 1)).await?, "below the signed minimum"));
     assert!(fails_with(&report(&w.keeper, 0, Some(eth_in * 20 + 1)).await?, "over the node's cap"));
     let got = 355_200_000_000_000_000u128;

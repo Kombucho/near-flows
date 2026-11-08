@@ -36,7 +36,7 @@ async fn a_nvda_take_profit_ladder_walks_up_on_a_robinhood_fork_into_the_ethnvda
     let now: u128 = num(&fork.cast(&["block", "latest", "--field", "timestamp"]));
     for (name, values) in [("approve_nvda_permit2", vec![0, E18]), ("permit2_nvda_universal_router", vec![0, 0, E18, now + 86_400])] {
         let a = json!({"name": name, "values": values.iter().map(|v| v.to_string()).collect::<Vec<_>>(), "nonce": nonce(&fork), "max_fee": max_fee.to_string(), "max_tip": "0", "gas": 200_000u64});
-        let r = req(&w, &w.keeper, "evm_call", a).await?;
+        let r = req(&w, &w.alice, "evm_call", a).await?;
         assert_eq!(send(&fork, &signed(&r)).0, 1, "{name}");
     }
 

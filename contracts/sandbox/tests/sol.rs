@@ -46,11 +46,13 @@ async fn the_vault_signs_only_swaps_its_owner_allows() -> anyhow::Result<()> {
         let (who, vault_id, m) = (who.clone(), vault.clone(), b64(&msg));
         async move { x(&who, &vault_id, "sol_sign_swap", json!({"message": m})).await }
     };
+    // The keeper may not use this door at all (it reaches Solana through flow nodes); the owner may.
     let (usdc, sol) = (pubkey(USDC_MINT), pubkey(WSOL_MINT));
+    assert!(fails_with(&sign(&keeper, honest_for(me, usdc, sol, 20_000_000, 100_000_000)).await?, "owner only"), "the keeper");
 
     // 3. An honest swap: 10 USDC for ~0.05 SOL. Signed, and the signature verifies.
     let msg = honest_for(me, usdc, sol, 10_000_000, 50_000_000);
-    let r = sign(&keeper, msg.clone()).await?;
+    let r = sign(&alice, msg.clone()).await?;
     println!("GAS sign a Solana swap: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
     let signed = r.logs().iter().find(|l| l.contains("sol_signed")).cloned().unwrap_or_else(|| panic!("{:?} {:?}", r.logs(), r.failures()));
     let sig_hex = signed.split(r#""signature":""#).nth(1).unwrap().split('"').next().unwrap();
@@ -68,15 +70,15 @@ async fn the_vault_signs_only_swaps_its_owner_allows() -> anyhow::Result<()> {
     let bad_price = honest_for(me, usdc, sol, 10_000_000, 30_000_000); // 0.003 SOL/USDC < floor
     let too_big = honest_for(me, usdc, sol, 51_000_000, 300_000_000);
     for (name, m) in [("drain", drain), ("proceeds to a thief", to_thief), ("price under the floor", bad_price), ("over 50 USDC", too_big)] {
-        let r = sign(&keeper, m).await?;
+        let r = sign(&alice, m).await?;
         assert!(format!("{:?}", r.failures()).contains("refused"), "{name}: {:?}", r.failures());
         assert!(!r.logs().iter().any(|l| l.contains("sol_signed")), "{name} was signed!");
     }
     assert!(sign(&mallory, honest_for(me, usdc, sol, 1, 5)).await?.is_failure(), "strangers can't ask");
 
     // 5. The spending limit counts what the messages really spend: 10 + 40 = 50 of 60, then 20 more is refused.
-    assert!(sign(&keeper, honest_for(me, usdc, sol, 40_000_000, 200_000_000)).await?.logs().iter().any(|l| l.contains("sol_signed")));
-    let r = sign(&keeper, honest_for(me, usdc, sol, 20_000_000, 100_000_000)).await?;
+    assert!(sign(&alice, honest_for(me, usdc, sol, 40_000_000, 200_000_000)).await?.logs().iter().any(|l| l.contains("sol_signed")));
+    let r = sign(&alice, honest_for(me, usdc, sol, 20_000_000, 100_000_000)).await?;
     assert!(format!("{:?}", r.failures()).contains("spending limit"), "{:?}", r.failures());
 
     // 6. A market floor on top of the hard one: USDC $1, SOL from the oracle, 1% slippage.
@@ -94,12 +96,12 @@ async fn the_vault_signs_only_swaps_its_owner_allows() -> anyhow::Result<()> {
     let msg = honest_for(me, usdc, sol, 1_000_000, 5_000_000);
     // SOL at $200: the market floor is 1 / 200 x 99% = 0.00495 SOL: the message's 0.004975 passes.
     alice.call(pyth.id(), "set_price").args_json(set(sol_id, 20_000_000_000)).transact().await?.into_result()?;
-    let r = sign(&keeper, msg.clone()).await?;
+    let r = sign(&alice, msg.clone()).await?;
     assert!(r.logs().iter().any(|l| l.contains("sol_signed")), "{:?} {:?}", r.logs(), r.failures());
     // SOL fell to $150: the market says at least 0.0066 SOL per USDC. The same message (above the
     // owner's old 0.004 hard floor) would now sell SOL cheap: refused.
     alice.call(pyth.id(), "set_price").args_json(set(sol_id, 15_000_000_000)).transact().await?.into_result()?;
-    let r = sign(&keeper, msg).await?;
+    let r = sign(&alice, msg).await?;
     assert!(format!("{:?}", r.failures()).contains("refused") && !r.logs().iter().any(|l| l.contains("sol_signed")), "{:?}", r.failures());
     Ok(())
 }

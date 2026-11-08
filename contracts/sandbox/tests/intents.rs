@@ -11,7 +11,7 @@
 mod common;
 mod relayw;
 
-use relayw::{view, x};
+use relayw::{fails_with, view, x};
 use ed25519_dalek::{Signer, SigningKey};
 use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
@@ -97,8 +97,8 @@ async fn a_keyless_vault_swaps_on_real_intents_with_intents_it_signed_itself() -
 
     // 3. The owner allows A -> B with a floor of 0.95 B per A; at most 200 A per intent.
     x(&alice, &vault, "intents_allow", json!({"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": (200 * ONE).to_string(), "floor_out": "95", "floor_per_in": "100"}})).await?.into_result()?;
-    // The keeper asks for 100 A -> "at least 1 wei" of B: the vault signs for at least 95 B (the floor).
-    let r = x(&keeper, &vault, "intents_sign_swap", json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600})).await?;
+    // Alice (the direct door is the owner's) asks for 100 A -> "at least 1 wei" of B: the vault signs for at least 95 B (the floor).
+    let r = x(&alice, &vault, "intents_sign_swap", json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600})).await?;
     println!("GAS sign an intent: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
     let ev = r.logs().iter().find(|l| l.contains("intents_signed")).cloned().unwrap_or_else(|| panic!("{:?} {:?}", r.logs(), r.failures()));
     let vault_signed = serde_json::from_str::<Value>(ev.trim_start_matches("EVENT_JSON:"))?["data"][0]["signed"].clone();
@@ -133,16 +133,18 @@ async fn a_keyless_vault_swaps_on_real_intents_with_intents_it_signed_itself() -
     assert_eq!(ft(&b, &vault).await?, 95 * ONE);
     assert_eq!(mt(&verifier, &vault, &b).await?, 0);
 
-    // 6. Refusals: over the per-intent limit, a pair nobody allowed, a stranger.
+    // 6. Refusals: over the per-intent limit, a pair nobody allowed, a stranger, the keeper (the door is the owner's).
     for (who, args) in [
-        (&keeper, json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (201 * ONE).to_string(), "min_out": "1", "valid_secs": 600})),
-        (&keeper, json!({"token_in": b.id(), "token_out": a.id(), "amount_in": "1", "min_out": "1", "valid_secs": 600})),
+        (&alice, json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (201 * ONE).to_string(), "min_out": "1", "valid_secs": 600})),
+        (&alice, json!({"token_in": b.id(), "token_out": a.id(), "amount_in": "1", "min_out": "1", "valid_secs": 600})),
         (&solver, json!({"token_in": a.id(), "token_out": b.id(), "amount_in": "1", "min_out": "1", "valid_secs": 600})),
     ] {
         let r = x(who, &vault, "intents_sign_swap", args).await?;
         assert!(r.is_failure() && !r.logs().iter().any(|l| l.contains("intents_signed")));
     }
-    // 7. A market floor: A and B both at $1 per the oracle, 1% slippage. The keeper asks for 1 wei;
+    let r = x(&keeper, &vault, "intents_sign_swap", json!({"token_in": a.id(), "token_out": b.id(), "amount_in": "1", "min_out": "1", "valid_secs": 600})).await?;
+    assert!(fails_with(&r, "owner only"), "the keeper: {:?}", r.failures());
+    // 7. A market floor: A and B both at $1 per the oracle, 1% slippage. The owner asks for 1 wei;
     //    the hard floor says 95; the market says 99: the vault signs for 99.
     let pyth = worker.dev_deploy(&ours("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
@@ -156,7 +158,7 @@ async fn a_keyless_vault_swaps_on_real_intents_with_intents_it_signed_itself() -
         {"name": "b", "contract": pyth.id(), "price_id": ids[1], "backup": common::backup(pyth.id(), ids[1])}]}})).await?.into_result()?;
     x(&alice, &vault, "intents_allow", json!({"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": (200 * ONE).to_string(), "floor_out": "95", "floor_per_in": "100",
         "market": {"sell": "a", "buy": "b", "dec_in": 18, "dec_out": 18, "slippage_bps": 100}}})).await?.into_result()?;
-    let r = x(&keeper, &vault, "intents_sign_swap", json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600})).await?;
+    let r = x(&alice, &vault, "intents_sign_swap", json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600})).await?;
     let ev = r.logs().iter().find(|l| l.contains("intents_signed")).cloned().unwrap_or_else(|| panic!("{:?} {:?}", r.logs(), r.failures()));
     assert!(ev.contains(&format!(r#"\"nep141:{}\":\"{}\""#, b.id(), 99 * ONE)), "signed for the market floor: {ev}");
 

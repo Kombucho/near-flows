@@ -4,10 +4,12 @@
 //! The brain decides everything the vault decided: the trigger (block clock,
 //! or oracle prices the brain reads itself), the amount (the node's own input,
 //! put into the template's amount leaf / checked in the message), the minimum
-//! (the template's floor or market rule, enforced by the signed transaction)
-//! and an EVM deadline (now + 5 min). It can't see balances on other chains,
-//! so a remote node's output is KEEPER-REPORTED (`remote_report`), accepted only
-//! between the signed minimum and the node's cap. Same bounds, same events.
+//! (the template's floor or market rule, enforced by the signed transaction),
+//! an EVM deadline (now + 5 min) and the vault's next EVM nonce. It can't see
+//! balances on other chains, so a remote node's output is KEEPER-REPORTED
+//! (`remote_report`), accepted only between the signed minimum and the node's
+//! cap; only the owner may report a signed transaction failed (that frees its
+//! input). Same bounds, same events.
 //!
 //! What changed in the split: the pending steps live in the vault's record
 //! (`VaultState.remote`), and the signer's answer comes back through the vault
@@ -189,7 +191,6 @@ impl Talk {
         require!(by_owner || Some(sender) == self.vs.keeper.as_ref(), "owner or keeper only");
         let p = self.pending(flow_id, node).unwrap_or_else(|| env::panic_str("no remote step pending"));
         let n = p.revealed.clone().unwrap_or_else(|| self.flow(flow_id).nodes[node as usize].clone());
-        let now = env::block_timestamp();
         let result = match out {
             Some(o) => {
                 require!(p.signed || by_owner, "not signed yet");
@@ -197,8 +198,11 @@ impl Talk {
                 require!(o.0 <= p.max_out.0, format!("refused: over the node's cap {}", p.max_out.0));
                 Ok(o.0)
             }
+            // "It failed" gives the input back to be spent again. Nothing here can see the other
+            // chain: had the transaction landed (before its deadline, too), a keeper's word
+            // would spend the same input twice. Only the owner, who can look, says so.
             None => {
-                require!(by_owner || p.expires_ns.map_or(false, |e| now >= e), "refused: the signed transaction may still land; the owner can settle it, or wait for its deadline");
+                require!(by_owner, "refused: only the owner may say a signed transaction failed (it may have landed: its input would be spent twice)");
                 Err(p.amount.0)
             }
         };
@@ -275,14 +279,14 @@ impl Talk {
                 } else {
                     require!(amount_leaf.is_none() && amount == 0, "amount_leaf: no such leaf");
                 }
-                let mut expires = None;
+                let deadline = crate::evm::deadline_s();
+                let mut expires = rules.iter().any(|r| matches!(r, Arg::Deadline)).then_some((deadline + 1) * 1_000_000_000);
                 if let Some(d) = at(deadline_leaf) {
-                    require!(matches!(rules[d], Arg::AtMost { .. }), "deadline_leaf: an at_most leaf");
-                    let deadline = now / 1_000_000_000 + EVM_TTL_S;
+                    require!(matches!(rules[d], Arg::AtMost { .. } | Arg::Deadline), "deadline_leaf: an at_most or deadline leaf");
                     values[d] = U128(deadline as u128);
                     expires = Some((deadline + 1) * 1_000_000_000);
                 }
-                let (tx, nums) = self.evm_prepare(&cfg, &t, values, nonce, max_fee, max_tip, gas, prices);
+                let (tx, nums) = self.evm_prepare(&cfg, &t, values, nonce, max_fee, max_tip, gas, prices, !by_owner);
                 let min = match at(min_leaf) {
                     Some(m) => {
                         require!(matches!(rules[m], Arg::Floor { .. } | Arg::Market { .. }), "min_leaf: a floor or market leaf");
@@ -326,6 +330,9 @@ impl Talk {
 
     pub(crate) fn on_remote_evm_signed(&mut self, flow_id: u32, node: u16, tx: TxJson) -> Reply {
         let signed = self.evm_emit_signed(&tx);
+        if signed.is_none() {
+            self.evm_unreserve(&tx);
+        }
         self.remote_signed(flow_id, node, signed.is_some());
         Answer::default().ret(&signed.unwrap_or_else(|| "null".into())).into()
     }

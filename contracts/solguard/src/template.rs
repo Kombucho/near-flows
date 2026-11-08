@@ -268,7 +268,7 @@ pub fn check_tx(message_bytes: &[u8], templates: &[Template], p: &TxPolicy) -> R
         return Err(Refusal::FeePayer);
     }
     let signers: Vec<Pubkey> = m.account_keys.iter().take(nsig).copied().collect();
-    let (cb, ata_prog) = (pubkey(COMPUTE_BUDGET), pubkey(ATA_PROGRAM));
+    let (cb, ata_prog, system) = (pubkey(COMPUTE_BUDGET), pubkey(ATA_PROGRAM), pubkey(crate::SYSTEM_PROGRAM));
     let (cu_price, cu_limit) = crate::compute_budget(&m)?;
     let mut matched = Vec::new();
     let mut wanted: Vec<Pubkey> = vec![p.authority];
@@ -281,6 +281,12 @@ pub fn check_tx(message_bytes: &[u8], templates: &[Template], p: &TxPolicy) -> R
         if prog == ata_prog {
             created.push(crate::check_ata_create_for(&m, ix, &p.authority)?);
             continue;
+        }
+        // A durable nonce (System advance_nonce_account) keeps a signed transaction valid
+        // until whoever holds it sends it: a swap held back to land once its floor is stale.
+        // Without one it lives only as long as its recent blockhash (~1 minute), whatever a template says.
+        if prog == system && ix.data.starts_with(&[4, 0, 0, 0]) {
+            return Err(Refusal::Program("advance_nonce_account: no durable nonces, a transaction lives only as long as its blockhash".into()));
         }
         let mut why = format!("no template for program {}", bs58::encode(prog).into_string());
         let (mut hit, mut best) = (None, 0u8);

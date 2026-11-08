@@ -33,7 +33,7 @@ async fn the_vault_runs_stonkbrokers_smart_lp_uniswap_v4_and_pair_tokens_on_a_ro
     assert_eq!(fork.cast(&["chain-id"]), "4663", "a fork of Robinhood Chain");
     println!("Robinhood Chain fork at block {}", fork.cast(&["block-number"]));
 
-    let RelayWorld { brain, alice, keeper, signer, vault, .. } = relay_world().await?;
+    let RelayWorld { brain, alice, signer, vault, .. } = relay_world().await?;
     x(&alice, &vault, "evm_setup", json!({"signer": signer.id(), "chain_id": 4663u64,
         "max_fee": GWEI.to_string(), "max_tip": (GWEI / 10).to_string(), "gas_cap": 1_500_000u64})).await?.into_result()?;
     let me = view(&brain, &vault, "get_evm", Value::Null).await?["address"].as_str().unwrap().to_string();
@@ -59,20 +59,20 @@ async fn the_vault_runs_stonkbrokers_smart_lp_uniswap_v4_and_pair_tokens_on_a_ro
     let amount: u128 = 50_000_000; // 50 USDG
 
     // 1. Approve the Smart LP vault for 50 USDG.
-    let r = x(&keeper, &vault, "evm_call", call("approve_usdg_smartlp_amzn", vec![0, amount])).await?;
+    let r = x(&alice, &vault, "evm_call", call("approve_usdg_smartlp_amzn", vec![0, amount])).await?;
     assert_eq!(fork.send_raw(&signed(&r)), 1, "approve executed");
 
     // 2. The Smart LP's own quote (a simulated deposit), as the keeper would ask it.
     let quote = num(&fork.cast(&["call", SMART_LP, "zapDeposit(address,uint256,uint256,address)(uint256)", USDG, &amount.to_string(), "0", &me, "--from", &me]));
     println!("Smart LP quote: 50 USDG -> {:.4} sdAMZN-FR shares", quote as f64 / 1e18);
 
-    // 3. A keeper asking for more shares than the vault mints: StonkBrokers reverts (MinShares), nothing moves.
-    let r = x(&keeper, &vault, "evm_call", call("smartlp_amzn_deposit_usdg", vec![0, amount, quote * 2, 0])).await?;
+    // 3. Asking for more shares than the vault mints: StonkBrokers reverts (MinShares), nothing moves.
+    let r = x(&alice, &vault, "evm_call", call("smartlp_amzn_deposit_usdg", vec![0, amount, quote * 2, 0])).await?;
     assert_eq!(fork.send_raw(&signed(&r)), 0, "MinShares revert");
     assert_eq!(fork.balance(USDG, &me), 100_000_000);
 
     // 4. Deposit with minShares = 98% of the quote (their integration guide's advice).
-    let r = x(&keeper, &vault, "evm_call", call("smartlp_amzn_deposit_usdg", vec![0, amount, quote * 98 / 100, 0])).await?;
+    let r = x(&alice, &vault, "evm_call", call("smartlp_amzn_deposit_usdg", vec![0, amount, quote * 98 / 100, 0])).await?;
     assert_eq!(fork.send_raw(&signed(&r)), 1, "zapDeposit executed");
     let shares = fork.balance(SMART_LP, &me);
     println!("deposited 50 USDG: the vault holds {:.4} sdAMZN-FR shares", shares as f64 / 1e18);
@@ -80,7 +80,7 @@ async fn the_vault_runs_stonkbrokers_smart_lp_uniswap_v4_and_pair_tokens_on_a_ro
     assert_eq!(fork.balance(USDG, &me), 50_000_000);
 
     // 5. Withdraw every share back to USDG; the owner's floor (shares / 1.1e12) is the least accepted.
-    let r = x(&keeper, &vault, "evm_call", call("smartlp_amzn_withdraw_usdg", vec![shares, 0, 1, 0, 0])).await?;
+    let r = x(&alice, &vault, "evm_call", call("smartlp_amzn_withdraw_usdg", vec![shares, 0, 1, 0, 0])).await?;
     let raw = signed(&r);
     assert!(raw.contains(&format!("{:064x}", shares / 1_100_000_000_000)), "the owner's floor is the minimum in the signed tx");
     assert_eq!(fork.send_raw(&raw), 1, "zapWithdraw executed");
@@ -110,8 +110,8 @@ async fn the_vault_runs_stonkbrokers_smart_lp_uniswap_v4_and_pair_tokens_on_a_ro
     let swap_in = 10_000_000_000_000_000u128; // 0.01 ETH
     let q = v4_quote(true, swap_in);
     println!("v4 quote: 0.01 ETH -> {:.4} NVDA", q as f64 / 1e18);
-    // A keeper trying to attach 1 ETH instead of 0.01: the value is `same` as amountIn, so 0.01 is signed.
-    let r = x(&keeper, &vault, "evm_call", call("v4_swap_eth_nvda", v4(swap_in, q * 99 / 100, E18))).await?;
+    // Trying to attach 1 ETH instead of 0.01: the value is `same` as amountIn, so 0.01 is signed.
+    let r = x(&alice, &vault, "evm_call", call("v4_swap_eth_nvda", v4(swap_in, q * 99 / 100, E18))).await?;
     let req = r.logs().iter().find(|l| l.contains("evm_call_requested")).unwrap().to_string();
     assert!(req.contains(&format!(r#""value":"{swap_in}""#)), "{req}");
     let before = eth(&fork);
@@ -121,14 +121,14 @@ async fn the_vault_runs_stonkbrokers_smart_lp_uniswap_v4_and_pair_tokens_on_a_ro
     assert!(nvda >= q * 99 / 100);
 
     // Back to ETH: approve Permit2, let the Universal Router pull through Permit2, swap all NVDA.
-    let r = x(&keeper, &vault, "evm_call", call("approve_nvda_permit2", vec![0, nvda])).await?;
+    let r = x(&alice, &vault, "evm_call", call("approve_nvda_permit2", vec![0, nvda])).await?;
     assert_eq!(fork.send_raw(&signed(&r)), 1);
-    let r = x(&keeper, &vault, "evm_call", call("permit2_nvda_universal_router", vec![0, 0, nvda, (now + 3600) as u128])).await?;
+    let r = x(&alice, &vault, "evm_call", call("permit2_nvda_universal_router", vec![0, 0, nvda, (now + 3600) as u128])).await?;
     assert_eq!(fork.send_raw(&signed(&r)), 1, "Permit2 allowance set");
     let q = v4_quote(false, nvda);
     let mut v = v4(nvda, q * 99 / 100, 0);
     v.pop(); // no ETH value on this one: 16 leaves
-    let r = x(&keeper, &vault, "evm_call", call("v4_swap_nvda_eth", v)).await?;
+    let r = x(&alice, &vault, "evm_call", call("v4_swap_nvda_eth", v)).await?;
     let before = eth(&fork);
     assert_eq!(fork.send_raw(&signed(&r)), 1, "v4 swap NVDA -> ETH executed");
     println!("v4 swap back: {:.4} NVDA -> {:.5} ETH (net of gas)", nvda as f64 / 1e18, (eth(&fork) as f64 - before as f64) / 1e18);
@@ -136,13 +136,13 @@ async fn the_vault_runs_stonkbrokers_smart_lp_uniswap_v4_and_pair_tokens_on_a_ro
 
     // ---------- the ETHNVDA pair token: zap 0.01 ETH in, redeem all of it to ETH ----------
     let zap = 10_000_000_000_000_000u128;
-    let r = x(&keeper, &vault, "evm_call", call("pairtoken_ethnvda_zap_eth", vec![0, zap, 0, 0, 0])).await?;
+    let r = x(&alice, &vault, "evm_call", call("pairtoken_ethnvda_zap_eth", vec![0, zap, 0, 0, 0])).await?;
     assert_eq!(fork.send_raw(&signed(&r)), 1, "pair token zapDeposit executed");
     let pt = fork.balance(ETHNVDA, &me);
     println!("pair token: 0.01 ETH -> {:.5} ETHNVDA shares", pt as f64 / 1e18);
     assert!(pt >= zap * 1536 / 1000, "at least the owner's floor");
     let before = eth(&fork);
-    let r = x(&keeper, &vault, "evm_call", call("pairtoken_ethnvda_redeem_eth", vec![pt, 0, 0, 0])).await?;
+    let r = x(&alice, &vault, "evm_call", call("pairtoken_ethnvda_redeem_eth", vec![pt, 0, 0, 0])).await?;
     assert_eq!(fork.send_raw(&signed(&r)), 1, "pair token redeemZap executed");
     println!("redeemed all shares: {:.5} ETH back (net of gas)", (eth(&fork) as f64 - before as f64) / 1e18);
     assert_eq!(fork.balance(ETHNVDA, &me), 0);

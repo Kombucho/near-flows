@@ -83,3 +83,25 @@ pub async fn view(brain: &Contract, vault: &AccountId, method: &str, args: Value
     args["vault"] = json!(vault);
     Ok(brain.view(method).args_json(args).await?.json()?)
 }
+
+/// Pyth ids of the feeds the node library's EVM swaps read for their market minimums
+/// (nodes/evm-templates.json names them eth, usdc, nvda).
+pub const ETH_FEED: &str = "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace";
+pub const USDC_FEED: &str = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a";
+
+/// A mock_pyth with these (name, price id) feeds, each backed by mock_pyth's second publisher,
+/// set as the vault's oracle (60 s, 1%, 2%).
+pub async fn pyth_feeds(w: &Worker<Sandbox>, owner: &Account, vault: &AccountId, feeds: &[(&str, &str)]) -> anyhow::Result<Contract> {
+    let pyth = w.dev_deploy(&wasm("mock_pyth")).await?;
+    pyth.call("new").transact().await?.into_result()?;
+    let feeds: Vec<Value> = feeds.iter().map(|(n, id)| json!({"name": n, "contract": pyth.id(), "price_id": id, "backup": crate::common::backup(pyth.id(), id)})).collect();
+    x(owner, vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": feeds}})).await?.into_result()?;
+    Ok(pyth)
+}
+
+/// Feed `id` at `usd_e8` dollars x 1e8 (confidence 0.05%, the second publisher agreeing), published `age_s` ago.
+pub async fn set_usd(who: &Account, pyth: &Contract, id: &str, usd_e8: i64, age_s: i64) -> anyhow::Result<()> {
+    who.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": usd_e8.to_string(), "conf": (usd_e8 / 2000).to_string(),
+        "expo": -8, "backup": usd_e8.to_string(), "age_s": age_s})).transact().await?.into_result()?;
+    Ok(())
+}

@@ -377,7 +377,7 @@ async fn a_relay_vault_swaps_on_real_intents_with_intents_the_brain_built() -> a
         let r = x(who, &w.vault, json!({"intents_sign_swap": args})).await?;
         assert!(r.is_failure() && !r.logs().iter().any(|l| l.contains("intents_signed")));
     }
-    // 7. A market floor: A and B both at $1 per the oracle (read by the brain), 1% slippage. The keeper
+    // 7. A market floor: A and B both at $1 per the oracle (read by the brain), 1% slippage. The owner
     //    asks for 1 wei, the hard floor says 95, the market says 99: the brain signs for 99.
     let pyth = w.worker.dev_deploy(&wasm("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;

@@ -37,6 +37,10 @@ async fn a_relay_vault_swaps_on_uniswap_on_a_base_fork() -> anyhow::Result<()> {
     let quote = num(&fork.cast(&["call", QUOTER, "quoteExactInputSingle((address,address,uint256,uint24,uint160))(uint256,uint160,uint32,uint256)",
         &format!("({WETH},{USDC},{amount},500,0)")]));
     println!("Uniswap quote: 0.1 WETH -> {:.2} USDC", quote as f64 / 1e6);
+    // The swap's market minimum reads ETH and USDC: the oracle where the pool is (USDC $1, ETH = 10 x the quote).
+    let pyth = pyth_feeds(&w.worker, &w.alice, &w.vault, &[("eth", ETH_FEED), ("usdc", USDC_FEED)]).await?;
+    set_usd(&w.alice, &pyth, ETH_FEED, (quote * 1_000) as i64, 0).await?;
+    set_usd(&w.alice, &pyth, USDC_FEED, 100_000_000, 0).await?;
     let call = |name: &str, values: Vec<u128>, nonce: u64| json!({"name": name, "values": values.iter().map(|v| v.to_string()).collect::<Vec<_>>(), "nonce": nonce,
         "max_fee": GWEI.to_string(), "max_tip": (GWEI / 100).to_string(), "gas": 400_000u64});
     let swap = |min_out: u128| vec![0, 0, 0, 0, amount, min_out, 0];
@@ -56,9 +60,11 @@ async fn a_relay_vault_swaps_on_uniswap_on_a_base_fork() -> anyhow::Result<()> {
     let got = fork.balance(USDC, &me);
     println!("relay vault swapped 0.1 WETH -> {:.2} USDC on the Base fork", got as f64 / 1e6);
     assert!(got >= quote * 99 / 100);
-    // A 1-wei quote can't go under the owner's floor (2,000 USDC per WETH); the amount cap holds for the owner too.
+    // A 1-wei quote can't go under the market (the oracle's ETH less 1%) nor the owner's fixed 2,000 USDC per WETH;
+    // the amount cap holds for the owner too.
     let r = x(&w.alice, &w.vault, "evm_call", call("uniswap_swap_weth_usdc", swap(1), 3)).await?;
-    assert!(signed(&r).contains(&format!("{:064x}", amount * 2000 / 1_000_000_000_000)));
+    let least = (quote * 99 / 100).max(amount * 2000 / 1_000_000_000_000);
+    assert!(signed(&r).contains(&format!("{least:064x}")), "the larger of the market and the fixed floor is signed");
     let r = x(&w.alice, &w.vault, "evm_call", call("uniswap_swap_weth_usdc", vec![0, 0, 0, 0, 10 * amount, 1, 0], 4)).await?;
     assert!(fails_with(&r, "over its cap"), "{:?}", r.failures());
     assert!(fails_with(&x(&w.alice, &w.vault, "evm_call", call("nope", vec![], 4)).await?, "no such template"));

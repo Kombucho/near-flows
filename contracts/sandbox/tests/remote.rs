@@ -12,7 +12,7 @@ mod relayw;
 use base64::Engine;
 use ladder::*;
 use near_workspaces::result::ExecutionFinalResult;
-use relayw::{relay_world, view, x};
+use relayw::{pyth_feeds, relay_world, set_usd, view, x, ETH_FEED, USDC_FEED};
 use serde_json::{json, Value};
 
 fn num(v: &Value) -> u128 {
@@ -50,7 +50,7 @@ async fn a_take_profit_ladder_fires_on_oracle_prices_and_routes_only_bounded_rep
     // While it's out there: the node can't run again, the flow can't be drained, and only the owner may call it failed.
     assert!(fails_with(&step(&w, &w.keeper, f, 0, evm_args(v4_values(1, true), 1)).await?, "Busy"));
     assert!(req(&w, &w.alice, "drain", json!({"flow_id": f})).await?.is_failure());
-    assert!(fails_with(&report(&w, &w.keeper, f, 0, None).await?, "may still land"));
+    assert!(fails_with(&report(&w, &w.keeper, f, 0, None).await?, "only the owner may say"));
     // Reports outside the bounds: less than the signed minimum (that tx reverted), more than the cap.
     assert!(fails_with(&report(&w, &w.keeper, f, 0, Some(min - 1)).await?, "below the signed minimum"));
     assert!(fails_with(&report(&w, &w.keeper, f, 0, Some(eth_in * 20 + 1)).await?, "over the node's cap"));
@@ -74,7 +74,7 @@ async fn a_take_profit_ladder_fires_on_oracle_prices_and_routes_only_bounded_rep
     let r = step(&w, &w.keeper, f, 1, evm_args(v4_values(1, false), 1)).await?;
     assert_eq!(num(&event(&r, "remote_price")["price"]), 275 * E24);
     let s = event(&r, "remote_step");
-    let min1 = third * 738 / 10_000; // the template's floor: 0.0738 ETH per NVDA
+    let min1 = third * 738 / 10_000; // the template's floor: 0.0738 ETH per NVDA (NVDA is single-source: no market floor)
     assert_eq!((num(&s["amount"]), num(&s["min_out"]), num(&s["max_out"])), (third, min1, third / 5));
     // One step in flight per flow: the other rungs wait for its report.
     assert!(fails_with(&step(&w, &w.keeper, f, 2, evm_args(v4_values(1, false), 2)).await?, "Busy"));
@@ -101,19 +101,24 @@ async fn a_take_profit_ladder_fires_on_oracle_prices_and_routes_only_bounded_rep
 }
 
 #[tokio::test]
-async fn a_remote_step_that_did_not_land_gives_its_input_back_only_once_it_cannot_land() -> anyhow::Result<()> {
+async fn a_remote_step_that_did_not_land_gives_its_input_back_only_on_the_owners_word() -> anyhow::Result<()> {
     let w = world().await?;
     let f: u32 = req(&w, &w.alice, "save_flow", json!({"name": "ladder", "nodes": ladder()})).await?.into_result()?.json()?;
     let eth_in = 10_000_000_000_000_000u128;
     req(&w, &w.alice, "fund", json!({"flow_id": f, "node": 0, "amount": eth_in.to_string()})).await?.into_result()?;
     let r = step(&w, &w.keeper, f, 0, evm_args(v4_values(1, true), 0)).await?;
     let expires = event(&r, "remote_step")["expires_ns"].as_u64().unwrap();
-    assert!(fails_with(&report(&w, &w.keeper, f, 0, None).await?, "may still land"));
-    // Past the signed deadline the transaction can never land: the keeper may now say it failed.
+    // The double spend: the buy LANDED (before its deadline), then the keeper says it failed. Its 0.01 ETH
+    // would go back to the inbox and be signed away again: ETH the vault no longer has for this flow
+    // (another flow's, or the owner's). Nothing here can see Robinhood Chain: refused before and after the deadline.
+    assert!(fails_with(&report(&w, &w.keeper, f, 0, None).await?, "only the owner may say"));
     while w.worker.view_block().await?.timestamp() < expires {
         w.worker.fast_forward(100).await?;
     }
-    let r = report(&w, &w.keeper, f, 0, None).await?;
+    assert!(fails_with(&report(&w, &w.keeper, f, 0, None).await?, "only the owner may say"), "past the deadline too");
+    assert_eq!(inbox(&ledger(&w, f).await?, 0), 0, "the input stays out");
+    // The keeper's honest path is the report of what arrived (bounded); the owner, who can look, says it failed.
+    let r = report(&w, &w.alice, f, 0, None).await?;
     assert!(r.is_success(), "{:?}", r.failures());
     assert_eq!(num(&event(&r, "step_failed")["returned"]), eth_in);
     let l = ledger(&w, f).await?;
@@ -128,6 +133,100 @@ async fn a_remote_step_that_did_not_land_gives_its_input_back_only_once_it_canno
     report(&w, &w.alice, f, 0, None).await?.into_result()?;
     assert!(fails_with(&step(&w, &w.keeper, f, 0, evm_args(v4_values(1, true), 3)).await?, "Paused"));
     Ok(())
+}
+
+/// What a keeper could pick to make a signed swap land later, when its minimum is stale (or never,
+/// holding every later step): a far deadline, a nonce ahead, a fee under the base fee. The brain picks all three.
+#[tokio::test]
+async fn a_keeper_cannot_pick_the_deadline_the_nonce_or_the_fee() -> anyhow::Result<()> {
+    let w = world().await?;
+    let f: u32 = req(&w, &w.alice, "save_flow", json!({"name": "ladder", "nodes": ladder()})).await?.into_result()?.json()?;
+    let eth_in = 10_000_000_000_000_000u128;
+    req(&w, &w.alice, "fund", json!({"flow_id": f, "node": 0, "amount": eth_in.to_string()})).await?.into_result()?;
+    let mut v = v4_values(1, true);
+    v[15] = u64::MAX.to_string(); // a deadline that never comes
+    let args = |nonce: u64| json!({"chain": "evm", "values": v.clone(), "nonce": nonce, "max_fee": "1", "max_tip": "0", "gas": 1_000_000u64});
+    assert!(fails_with(&step(&w, &w.keeper, f, 0, args(5)).await?, "refused: nonce 5"), "signing ahead, to land later");
+    let r = step(&w, &w.keeper, f, 0, args(0)).await?;
+    assert!(r.logs().iter().any(|l| l.contains("evm_signed")), "{:?} {:?}", r.logs(), r.failures());
+    // The deadline is the brain's: 5 minutes from the block.
+    let deadline = event(&r, "remote_step")["expires_ns"].as_u64().unwrap() / 1_000_000_000 - 1;
+    let block_s = w.worker.view_block().await?.timestamp() / 1_000_000_000;
+    assert!(deadline <= block_s + 300 && deadline + 60 >= block_s + 300, "deadline {deadline}, block {block_s}");
+    let data = event(&r, "evm_call_requested")["data"].as_str().unwrap().to_string();
+    assert!(data.contains(&format!("{deadline:064x}")) && !data.contains(&format!("{:064x}", u64::MAX)), "the signed deadline");
+    // The fee is the owner's cap (1 gwei), not the keeper's 1 wei that would never get mined.
+    let tx = evmtx::Eip1559 { chain_id: 4663, nonce: 0, max_priority_fee: 0, max_fee: GWEI, gas_limit: 1_000_000,
+        to: evmtx::parse_address("0x8876789976decbfcbbbe364623c63652db8c0904").unwrap(), value: eth_in, data: hex::decode(data.trim_start_matches("0x"))? };
+    assert_eq!(event(&r, "evm_signed")["hash"], json!(format!("0x{}", hex::encode(tx.signing_hash()))), "signed at the owner's fee cap");
+
+    // Nonce 0 is used: signing it again (a second transaction for the same nonce) is refused, the next one signs.
+    report(&w, &w.alice, f, 0, None).await?.into_result()?;
+    assert!(fails_with(&step(&w, &w.keeper, f, 0, args(0)).await?, "refused: nonce 0"), "a used nonce");
+    step(&w, &w.keeper, f, 0, args(1)).await?.into_result()?;
+    report(&w, &w.alice, f, 0, None).await?.into_result()?;
+    // The owner may sign at any nonce (to unblock or replace); the keeper follows from there.
+    let approve = json!({"name": "approve_nvda_permit2", "values": ["0", E18.to_string()], "nonce": 9, "max_fee": GWEI.to_string(), "max_tip": "0", "gas": 200_000u64});
+    req(&w, &w.alice, "evm_call", approve).await?.into_result()?;
+    assert!(fails_with(&step(&w, &w.keeper, f, 0, args(2)).await?, "next EVM nonce is 10"));
+    step(&w, &w.keeper, f, 0, args(10)).await?.into_result()?;
+    report(&w, &w.keeper, f, 0, Some(eth_in * 11)).await?.into_result()?;
+    assert_eq!(view(&w.brain, &w.vault, "get_evm", Value::Null).await?["next_nonce"], json!(11));
+    Ok(())
+}
+
+/// The library's Base WETH -> USDC swap has a market minimum (ETH and USDC each have an independent
+/// backup): a keeper running its node can't get it signed at the fixed floor (2,000 USDC per WETH,
+/// ~80% of a $2,500 market), the gap a sandwich would take.
+#[tokio::test]
+async fn a_library_swap_with_a_market_leaf_is_signed_at_the_market_not_at_its_fixed_floor() -> anyhow::Result<()> {
+    const WETH: &str = "0x4200000000000000000000000000000000000006";
+    const USDC: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+    let w = relay_world().await?;
+    x(&w.alice, &w.vault, "evm_setup", json!({"signer": w.signer.id(), "chain_id": 8453u64,
+        "max_fee": GWEI.to_string(), "max_tip": (GWEI / 10).to_string(), "gas_cap": 500_000u64})).await?.into_result()?;
+    for t in common::templates("base") {
+        x(&w.alice, &w.vault, "evm_template", json!({"template": t})).await?.into_result()?;
+    }
+    let pyth = pyth_feeds(&w.worker, &w.alice, &w.vault, &[("eth", ETH_FEED), ("usdc", USDC_FEED)]).await?;
+    let prices = |eth_usd: i64, age_s: i64| {
+        let (a, p) = (w.alice.clone(), pyth.clone());
+        async move {
+            set_usd(&a, &p, ETH_FEED, eth_usd * 100_000_000, age_s).await?;
+            set_usd(&a, &p, USDC_FEED, 100_000_000, 0).await
+        }
+    };
+    prices(2_500, 0).await?;
+    // One node: sell the WETH it holds for USDC, at most 3,000 USDC per WETH may be reported.
+    let node = json!({"input": format!("evm:8453:{WETH}"), "when": {"when": "now"}, "next": [],
+        "action": {"label": "WETH to USDC", "calls": [], "out": null, "min_out_per_in": null, "price": null,
+            "remote": {"call": {"chain": "evm", "template": "uniswap_swap_weth_usdc", "amount_leaf": 4, "min_leaf": 5},
+                "out": format!("evm:8453:{USDC}"), "max_out_per_in": "3000000000000000"}}});
+    let f: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "sell", "nodes": [node]})).await?.into_result()?.json()?;
+    let weth_in = 100_000_000_000_000_000u128; // 0.1 WETH
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": weth_in.to_string()})).await?.into_result()?;
+    let args = |nonce: u64| json!({"chain": "evm", "values": ["0", "0", "0", "0", "0", "1", "0"], "nonce": nonce, "max_fee": GWEI.to_string(), "max_tip": "0", "gas": 400_000u64});
+    let run = || x(&w.keeper, &w.vault, "step_remote", json!({"flow_id": f, "node": 0, "args": args(0)}));
+    // A stale ETH price is no price: nothing signed, nothing taken.
+    prices(2_500, 120).await?;
+    assert!(fails_with(&run().await?, "no price fresher"));
+    prices(2_500, 0).await?;
+    // The keeper quotes 1 wei; the fixed floor says 200 USDC; the market says $2,500 x 0.1 less 1% = 247.5 USDC.
+    let r = run().await?;
+    assert!(r.logs().iter().any(|l| l.contains("evm_signed")), "{:?} {:?}", r.logs(), r.failures());
+    let s = event(&r, "remote_step");
+    let market = weth_in * 2_500 * 9_900 / 10_000 / 1_000_000_000_000;
+    assert_eq!((num(&s["amount"]), num(&s["min_out"])), (weth_in, market));
+    assert_eq!(market, 247_500_000);
+    assert!(event(&r, "evm_call_requested")["data"].as_str().unwrap().contains(&format!("{market:064x}")), "the market minimum is in the signed swap");
+    // A fill at the fixed floor means the signed swap reverted: such a report is refused.
+    assert!(fails_with(&report_on(&w.keeper, &w.vault, f, Some(200_000_000)).await?, "below the signed minimum"));
+    report_on(&w.keeper, &w.vault, f, Some(249_000_000)).await?.into_result()?;
+    Ok(())
+}
+
+async fn report_on(who: &near_workspaces::Account, vault: &near_workspaces::AccountId, f: u32, out: Option<u128>) -> anyhow::Result<ExecutionFinalResult> {
+    x(who, vault, "remote_report", json!({"flow_id": f, "node": 0, "out": out.map(|o| o.to_string())})).await
 }
 
 #[tokio::test]

@@ -30,7 +30,7 @@ async fn the_vault_runs_a_meteora_position_on_a_solana_fork() -> anyhow::Result<
 
     // A relay vault: the brain checks every byte, the vault (its own MPC path) signs.
     let w = relay_world().await?;
-    let (alice, keeper, vault) = (w.alice.clone(), w.keeper.clone(), w.vault.clone());
+    let (alice, vault) = (w.alice.clone(), w.vault.clone());
     x(&alice, &vault, "sol_setup", json!({"signer": w.signer.id(), "max_cu_price": 1_000_000u64, "max_cu_limit": 1_400_000u32})).await?.into_result()?;
     let me = view(&w.brain, &vault, "get_sol", Value::Null).await?["address"].as_str().unwrap().to_string();
     println!("relay vault's Solana address: {me}");
@@ -49,7 +49,7 @@ async fn the_vault_runs_a_meteora_position_on_a_solana_fork() -> anyhow::Result<
     fork.rpc_call("surfnet_setTokenAccount", json!([me, USDC, {"amount": 500_000_000u64}, TOKEN]));
 
     let sign = |msg: String| {
-        let (k, v) = (keeper.clone(), vault.clone());
+        let (k, v) = (alice.clone(), vault.clone()); // the direct door is the owner's
         async move { x(&k, &v, "sol_sign_tx", json!({"message": msg})).await }
     };
     let refused = |r: &near_workspaces::result::ExecutionFinalResult, why: &str| {
