@@ -20,7 +20,8 @@ describe("demo producer markers", () => {
     expect(stagesInLine("prices: NEAR $2.00 (Pyth), MEME $1 (price board, 2 of 3 attesters signed)")).toEqual([]);
     expect(stagesInLine("keeper asks to sign a 0.126 SOL buy: REFUSED (over the template's cap), nothing signed")).toEqual(["failed"]);
     expect(stagesInLine("the vault checks every byte and signs")).toEqual(["signed"]);
-    expect(stagesInLine("executed on the fork: 1 coins (6 decimals) in the vault's own token account, tx abcd…")).toEqual(["landed"]);
+    expect(stagesInLine("keeper asks the vault to sign the buy directly, outside any flow: REFUSED (owner only), nothing signed")).toEqual(["failed"]);
+    expect(stagesInLine("executed on the fork: 1 coins (6 decimals) in the vault's own token account, tx abcd…; reported")).toEqual(["landed", "reported"]);
     expect(stagesInLine("checked and signed by the vault, executed: +1 SOL")).toEqual(["signed", "landed"]);
     expect(stagesInLine("keeper reports 0.6 SOL of fees: REFUSED (over the node's 0.5 SOL cap)")).toEqual(["reported", "failed"]);
     expect(stagesInLine("1 SOL of fees -> 2 coins on the fork (signed minimum 2), reported")).toEqual(["reported"]);

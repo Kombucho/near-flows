@@ -253,7 +253,7 @@ export function nodeFromPalette(item: (typeof PALETTE)[number], index: number): 
     output: item.output,
     trigger: item.input === "none" ? { when: "manual" } : { when: "now" },
     routes: [],
-    params: [{ label: "Catalog", value: `${item.id} on commit 9608b9df. Not installed on a vault.` }],
+    params: [{ label: "Catalog", value: `${item.id} on commit 6afddea. Not installed on a vault.` }],
     position: { x: 80 + (index % 4) * 40, y: 80 + index * 24 },
     serializable: item.serializable,
     catalogId: item.id,

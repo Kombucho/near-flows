@@ -1,5 +1,5 @@
-/** Limits read from origin/main 9608b9df on 2026-11-08. Not a claim about an unpushed revision. */
-export const SOURCE_COMMIT = "9608b9df7a7ec6f13eb10e28fc0aabd297ff12a7";
+/** Limits read from origin/main 6afddea on 2026-11-08. */
+export const SOURCE_COMMIT = "6afddea58e785a45b80a0e27ec78bafce6dab694";
 
 export const LIMITS = {
   maxNodes: 32,

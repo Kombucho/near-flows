@@ -80,10 +80,15 @@ function Overview() {
           </article>
         </div>
         <article className="card">
-          <h2>Source mismatch</h2>
+          <h2>Backend {SOURCE_COMMIT.slice(0, 7)}</h2>
           <p>
-            origin/main is still {SOURCE_COMMIT}. User-reported ABI changes are not in that commit.
-            The workspace does not invent the missing methods.
+            Standalone vault code is gone. Direct evm_call, sol_sign_swap, sol_sign_tx, and intents_sign_swap are owner only.
+            A keeper uses step_remote. Fee increases wait 24 hours. A signature-fee cap cannot exceed 0.1 NEAR.
+            Each price feed names a second publisher, or single_source with no market floor.
+            One named vault per signer. Stealth is a separate key-owned account. This page does not call any of them.
+          </p>
+          <p>
+            Published in README, not re-queried: factory {ABI.deployment.factory}, brain {ABI.deployment.brain}, board {ABI.deployment.board}. {ABI.deployment.caveat}
           </p>
         </article>
       </div>
@@ -118,9 +123,9 @@ function Vaults() {
         <article className="card">
           <h2>On this commit</h2>
           <p>
-            factory_relay.create_vault still returns “you already have a vault” for a second named vault
-            from the same signer. create_stealth_vault is separate and does not record the payer.
-            That on-chain limit is not applied to these local drafts, and Plus does not send either call.
+            On {SOURCE_COMMIT.slice(0, 7)}, create_vault(name, keeper, expected_code_hash?) still refuses a second named vault
+            for the same signer with “you already have a vault”. create_stealth_vault does not record the payer.
+            These rows are local drafts. Plus does not send.
           </p>
         </article>
       </div>
@@ -148,8 +153,8 @@ function CreateVault({ onClose }: { onClose: () => void }) {
         <p className="kicker">Create vault · review only</p>
         <h2 id={titleId} style={{ margin: 0 }}>No transaction is built</h2>
         <p className="muted">
-          User-reported create arguments are not in {SOURCE_COMMIT.slice(0, 7)}. This form does not serialize
-          create_vault. A confirmed result is only another local draft.
+          Arguments on {SOURCE_COMMIT.slice(0, 7)} are name, optional keeper, and optional expected_code_hash.
+          Nothing here is serialized or sent. Confirming only adds a local draft.
         </p>
         {step === "edit" ? (
           <>
@@ -173,7 +178,8 @@ function CreateVault({ onClose }: { onClose: () => void }) {
               <dt>Network</dt><dd>Testnet concept. No RPC selected.</dd>
               <dt>Kind</dt><dd>{kind}</dd>
               <dt>Label</dt><dd>{label}</dd>
-              <dt>Deposit</dt><dd>Not asserted. This commit’s factory text says 0.1 NEAR minimum. User reports that figure is stale.</dd>
+              <dt>Deposit</dt><dd>This commit requires at least 0.1 NEAR. This form does not attach it.</dd>
+              <dt>Code pin</dt><dd>expected_code_hash is optional. README records relay hash {ABI.deployment.relayCodeHash}. Not checked live.</dd>
               <dt>Submit</dt><dd>Disarmed.</dd>
             </dl>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -601,7 +607,7 @@ function Settings() {
           </article>
           <article className="card">
             <h2>Graph visibility</h2>
-            <p>Public / private is read-only. Private would not hide a public transaction. hide_flow exists on this commit and is not called.</p>
+            <p>hide_flow is owner-only on this commit. This switch does not call it. Private would not hide a public transaction.</p>
             <div className="toolbar" style={{ padding: 0 }}>
               <button type="button" className="btn" disabled aria-disabled="true">Public</button>
               <button type="button" className="btn" disabled aria-disabled="true">Private</button>
@@ -614,7 +620,7 @@ function Settings() {
           </article>
           <article className="card">
             <h2>Close</h2>
-            <p>User report: owner or keeper, with holdings checks, and closed names stay closed. This commit’s close and is_closed were not re-checked as that new predicate. The action stays disarmed.</p>
+            <p>Verified and still disarmed. The owner may close. The keeper may close only with auto-close on. Inboxes must be empty and token reads zero. Other chains need confirm_remote. is_closed keeps the name.</p>
             <button type="button" className="btn" disabled>Review close</button>
           </article>
           <article className="card">
@@ -624,14 +630,14 @@ function Settings() {
           </article>
           <article className="card">
             <h2>Direct signing</h2>
-            <p>evm_call, sol_sign_swap, sol_sign_tx and intents_sign_swap are not on the canvas. This commit’s comments still allow a keeper to call them. The UI does not offer that path.</p>
+            <p>Verified in brain request(): those four calls are owner only. A keeper uses step_remote. They are not canvas nodes and this screen does not send them.</p>
           </article>
         </div>
         <article className="card">
           <h2>Checked against {SOURCE_COMMIT.slice(0, 7)}</h2>
           <ul className="list">
             {ABI.notes.map((note) => (
-              <li key={note.topic}><strong>{note.topic}.</strong> {note.ui}</li>
+              <li key={note.topic}><strong>{note.topic}.</strong> {note.detail}</li>
             ))}
           </ul>
         </article>
