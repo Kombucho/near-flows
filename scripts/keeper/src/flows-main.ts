@@ -25,9 +25,11 @@
 // PYTH_API_KEY is set), so its market floor reads a price seconds old. A price
 // trigger that reads the board gets one post before it is checked. Besides that,
 // every quarter of the board's averaging window (150 s for 600 s) it posts them for
-// each vault that names this keeper and has a flow: WHY the board serves a feed's
-// average (a vault's `ema` backup) only on half a window of unbroken history, so a
-// lone on-demand price can't be its own backup (contracts/priceboard `max_gap`).
+// each vault that names this keeper and has a flow: WHY the board serves a new feed's
+// average (a vault's `ema` backup) only on half a window of unbroken history, and any
+// one price moves it a third of the way at most, so a lone on-demand price can't be
+// its own backup (contracts/priceboard `store`). Without these posts a real move
+// between steps would outrun the average and the vault's floor would refuse.
 // A vault with no flows costs nothing.
 //
 // Environment: FACTORY_ID (the relay factory), KEEPER_ACCOUNT_ID, NEAR_NETWORK (default testnet),

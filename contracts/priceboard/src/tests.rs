@@ -470,14 +470,42 @@ fn the_average_vouches_only_for_a_steady_history_and_a_pump_then_disagrees() {
     post_curve(&mut b, t + 600, 184_404_837);
     let (spot, avg) = (b.get_price_no_older_than(feed.clone(), 60).unwrap().price.0 as i128, ema(&b).unwrap().price.0 as i128);
     assert!((spot - avg) * 10_000 > avg * 200, "spot {spot} vs average {avg}: they disagree");
-    // A read more than a third of a window after the last one breaks the history: no average again.
-    post_curve(&mut b, t + 802, 0);
+    // Seasoned, the average keeps its anchor across a gap: an hour of silence, then
+    // the pump read at three slots 150 s apart (the poster picks when the guardians
+    // read). Each read moves the average a third of the way at most, then a quarter:
+    // it is still well short of the pump, and a vault refuses every one of them.
+    for (i, at) in [t + 4_200, t + 4_350, t + 4_500].into_iter().enumerate() {
+        post_curve(&mut b, at, 184_404_837);
+        let (spot, avg) = (b.get_price_no_older_than(feed.clone(), 60).unwrap().price.0 as i128, ema(&b).expect("seasoned: served").price.0 as i128);
+        assert!((spot - avg) * 10_000 > avg * 1_000, "pumped read {i}: spot {spot} vs average {avg}, over 10% apart");
+    }
+    // Honest reads every 150 s bring it back: within 2% of the curve after ~25 minutes.
+    let mut at = t + 4_500;
+    while {
+        at += 150;
+        post_curve(&mut b, at, 0);
+        let (spot, avg) = (b.get_price_no_older_than(feed.clone(), 60).unwrap().price.0 as i128, ema(&b).unwrap().price.0 as i128);
+        (avg - spot) * 10_000 > spot * 200
+    } {}
+    assert!(at - (t + 4_500) <= 1_800, "caught up in {} s", at - (t + 4_500));
+}
+
+#[test]
+fn a_new_feed_needs_half_a_window_of_unbroken_history() {
+    let t = 1_793_960_000;
+    let mut b = pump_board(t);
+    let feed = hex::encode(real_curve().mint);
+    let ema = |b: &Board| b.get_ema_price_no_older_than(feed.clone(), 60);
+    // A gap over a third of a window before the feed is seasoned starts its history over.
+    post_curve(&mut b, t, 0);
+    post_curve(&mut b, t + 200, 0);
+    post_curve(&mut b, t + 402, 0);
     assert_eq!(ema(&b), None, "a 202 s gap: history starts over");
     // Bursts don't buy history faster: 299 s of reads one second apart is still short.
     for s in 1..=299 {
-        post_curve(&mut b, t + 802 + s, 0);
+        post_curve(&mut b, t + 402 + s, 0);
     }
     assert_eq!(ema(&b), None);
-    post_curve(&mut b, t + 802 + 300, 0);
+    post_curve(&mut b, t + 402 + 300, 0);
     assert!(ema(&b).is_some(), "300 s of history");
 }

@@ -150,14 +150,16 @@ impl Board {
         self.prices.get(&price_id.to_lowercase()).map(|e| e.spot.clone()).filter(|p| fresh(p, age))
     }
 
-    /// The average, only once it rests on half a window of unbroken history
-    /// (prices at most a third of a window apart): see `max_gap`.
+    /// The average, only once the feed has been seasoned: half a window of
+    /// unbroken history (prices at most a third of a window apart), see `store`.
     pub fn get_ema_price_no_older_than(&self, price_id: String, age: u64) -> Option<Price> {
         self.seasoned_ema(&price_id.to_lowercase()).filter(|p| fresh(p, age))
     }
 
-    /// The averaging window (s). A feed's average is served once it has half of
-    /// this in unbroken history, prices at most a third of it apart: post at least that often.
+    /// The averaging window (s). A new feed's average is served once it has half of
+    /// this in unbroken history, prices at most a third of it apart. After that,
+    /// a price after a gap moves it a third of the way at most, so post at least
+    /// that often or a real move outruns the average (no floor until it catches up).
     pub fn get_ema_window_s(&self) -> u64 {
         self.ema_window_s
     }
@@ -402,26 +404,34 @@ impl Board {
     }
 
     /// Keep `p` if it's newer than what the board has, and move the average
-    /// toward it by the time elapsed since the last price. A gap longer than
-    /// `max_gap` (a third of the window) breaks the history: the average starts
-    /// over at `p`, and isn't served until it has half a window of history again.
+    /// toward it by the time elapsed since the last price, at most `max_gap` (a
+    /// third of the window): one price can't drag the average along, however long
+    /// the board sat quiet. Until a feed is seasoned (half a window of history,
+    /// no gap over `max_gap`), a gap starts its history over at `p`; once seasoned,
+    /// the average keeps its anchor across gaps (the poster can't re-anchor it by
+    /// going quiet and posting a price of its choosing).
     fn store(&mut self, feed: &str, p: Price) -> bool {
         let prev = self.prices.get(feed).cloned();
         let (ema, since) = match prev {
             Some(e) if p.publish_time <= e.spot.publish_time => return false,
-            Some(e) if e.ema.expo == p.expo && p.publish_time - e.spot.publish_time <= max_gap(self.ema_window_s) => {
-                // At most a third of the way: one price can't drag the average along.
-                let w = (p.publish_time - e.ema.publish_time).max(0) as i128;
-                let win = self.ema_window_s as i128;
-                let mv = |old: i128, new: i128| old + (new - old) * w / win;
-                let ema = Price {
-                    price: I64(mv(e.ema.price.0 as i128, p.price.0 as i128) as i64),
-                    conf: U64(mv(e.ema.conf.0 as i128, p.conf.0 as i128) as u64),
-                    expo: p.expo,
-                    publish_time: p.publish_time,
-                };
+            Some(e) if e.ema.expo == p.expo => {
                 // A board deployed before histories were kept: its history starts at its last price.
-                (ema, history_since(feed).unwrap_or(e.spot.publish_time))
+                let since = history_since(feed).unwrap_or(e.spot.publish_time);
+                let gap = p.publish_time - e.spot.publish_time;
+                if gap > max_gap(self.ema_window_s) && !self.seasoned(e.spot.publish_time, since) {
+                    (p.clone(), p.publish_time)
+                } else {
+                    let w = gap.min(max_gap(self.ema_window_s)) as i128;
+                    let win = self.ema_window_s as i128;
+                    let mv = |old: i128, new: i128| old + (new - old) * w / win;
+                    let ema = Price {
+                        price: I64(mv(e.ema.price.0 as i128, p.price.0 as i128) as i64),
+                        conf: U64(mv(e.ema.conf.0 as i128, p.conf.0 as i128) as u64),
+                        expo: p.expo,
+                        publish_time: p.publish_time,
+                    };
+                    (ema, since)
+                }
             }
             _ => (p.clone(), p.publish_time),
         };
@@ -430,17 +440,23 @@ impl Board {
         true
     }
 
+    /// Half a window of history behind the price published at `last`.
+    fn seasoned(&self, last: i64, since: i64) -> bool {
+        last - since >= (self.ema_window_s / 2) as i64
+    }
+
     /// The average, if it rests on an unbroken history at least half a window long.
     fn seasoned_ema(&self, feed: &str) -> Option<Price> {
         let e = self.prices.get(feed)?;
         let since = history_since(feed).unwrap_or(e.spot.publish_time);
-        (e.spot.publish_time - since >= (self.ema_window_s / 2) as i64).then(|| e.ema.clone())
+        self.seasoned(e.spot.publish_time, since).then(|| e.ema.clone())
     }
 }
 
-/// The longest gap between two prices that keeps a feed's history unbroken: a
-/// third of the averaging window. WHY: the average moves toward a new price by
-/// gap / window, so this caps any one price's pull at a third. Prices posted only
+/// The longest gap between two prices that keeps a new feed's history unbroken,
+/// and the most time any one price is credited with: a third of the averaging
+/// window. WHY: the average moves toward a new price by gap / window, so this caps
+/// any one price's pull at a third. Prices posted only
 /// on demand (minutes or hours apart) would otherwise let a single price, e.g. a
 /// pump.fun curve read at the one slot someone just bought into, become its own
 /// average and pass a vault's "price and backup agree" check.

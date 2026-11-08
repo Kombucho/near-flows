@@ -163,7 +163,8 @@ async fn a_vault_swap_floor_follows_an_attested_memecoin_price() -> anyhow::Resu
     // The on-demand exploit: after a quiet spell longer than the window, one pumped price
     // (+60%, e.g. a curve read at the slot the keeper just bought into) is posted right
     // before the step, with a pool 37.5% under the market waiting. The board's average
-    // used to jump all the way to it and "agree"; now it has no history, so no floor, no trade.
+    // used to jump all the way to it and "agree"; now it moves a third of the way at
+    // most (the feed is seasoned, so the gap doesn't re-anchor it): they disagree, no trade.
     wait_until(&w, t + 601).await?;
     let t2 = now(&w).await?;
     push(&keeper, &board, vec![report(&attester(0), MEME, 81_926, t2), report(&attester(1), MEME, 81_926, t2)]).await?.into_result()?;
@@ -171,7 +172,7 @@ async fn a_vault_swap_floor_follows_an_attested_memecoin_price() -> anyhow::Resu
         .transact().await?.into_result()?;
     rate(24_412_274_491_614_383_712).await?.into_result()?; // fair x 51204 / 81926
     let r = step().await?;
-    assert!(format!("{:?}", r.failures()).contains("meme backup: no price fresher than 60 s"), "{:?} {:?}", r.logs(), r.failures());
+    assert!(format!("{:?}", r.failures()).contains("meme: price and backup disagree"), "{:?} {:?}", r.logs(), r.failures());
     assert!(!r.logs().join("\n").contains(r#""event":"step""#), "it didn't run");
     Ok(())
 }
