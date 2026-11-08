@@ -2,15 +2,17 @@
 //! Solana mainnet (surfpool): the vault opens a position in the SOL/USDC pool with USDC only
 //! (the owner's own wallet co-signs the open), a trader's swap earns it fees, the vault sweeps
 //! the fees into its own token accounts, then withdraws everything and closes the position.
-//! The keeper builds every transaction with Meteora's own SDK; the vault checks every byte
-//! against the templates published in nodes/sol-templates.json and signs (test signer: a real
+//! The keeper builds every transaction with Meteora's own SDK; the brain checks every byte
+//! against the templates published in nodes/sol-templates.json and the relay vault signs (test signer: a real
 //! Ed25519 key standing in for the MPC network).
 //!
-//! Needs surfpool and the keeper's node modules (scripts/keeper: npm install --ignore-scripts).
+//! Surfpool on 9810/9811. Needs surfpool and the keeper's node modules (scripts/keeper: npm install --ignore-scripts).
 
 mod common;
+mod relayw;
 
-use common::{sol_sig, sol_template, wasm, SolFork};
+use common::{sol_sig, sol_template, SolFork};
+use relayw::*;
 use serde_json::{json, Value};
 
 const POOL: &str = "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6";
@@ -24,35 +26,31 @@ fn units(v: &Value, k: &str) -> u128 {
 
 #[tokio::test]
 async fn the_vault_runs_a_meteora_position_on_a_solana_fork() -> anyhow::Result<()> {
-    let Some(fork) = SolFork::start(9100).await else { return Ok(()) };
+    let Some(fork) = SolFork::start(9810).await else { return Ok(()) };
 
-    let worker = near_workspaces::sandbox().await?;
-    let (alice, keeper) = (worker.dev_create_account().await?, worker.dev_create_account().await?);
-    let signer = worker.dev_deploy(&wasm("mock_signer")).await?;
-    let vault = worker.dev_deploy(&wasm("vault")).await?;
-    vault.call("new").args_json(json!({"owner": alice.id(), "keeper": keeper.id()})).transact().await?.into_result()?;
-    alice.call(vault.id(), "sol_setup").args_json(json!({"signer": signer.id(), "max_cu_price": 1_000_000u64, "max_cu_limit": 1_400_000u32}))
-        .max_gas().transact().await?.into_result()?;
-    let me = vault.view("get_sol").await?.json::<Value>()?["address"].as_str().unwrap().to_string();
-    println!("vault's Solana address: {me}");
+    // A relay vault: the brain checks every byte, the vault (its own MPC path) signs.
+    let w = relay_world().await?;
+    let (alice, vault) = (w.alice.clone(), w.vault.clone());
+    x(&alice, &vault, "sol_setup", json!({"signer": w.signer.id(), "max_cu_price": 1_000_000u64, "max_cu_limit": 1_400_000u32})).await?.into_result()?;
+    let me = view(&w.brain, &vault, "get_sol", Value::Null).await?["address"].as_str().unwrap().to_string();
+    println!("relay vault's Solana address: {me}");
 
     // The owner's own Solana wallet: it co-signs LP opens (the app holds it; here, the test).
     let owner = fork.helper(&["keypair"]);
     let (owner_key, owner_secret) = (owner["pubkey"].as_str().unwrap().to_string(), owner["secret"].as_str().unwrap().to_string());
-    alice.call(vault.id(), "sol_owner_wallet").args_json(json!({"wallet": owner_key})).transact().await?.into_result()?;
+    x(&alice, &vault, "sol_owner_wallet", json!({"wallet": owner_key})).await?.into_result()?;
     for name in ["dlmm_open", "dlmm_add_usdc", "dlmm_claim", "dlmm_remove", "dlmm_close"] {
-        alice.call(vault.id(), "sol_template").args_json(json!({"template": sol_template(name, &[])})).transact().await?.into_result()?;
+        x(&alice, &vault, "sol_template", json!({"template": sol_template(name, &[])})).await?.into_result()?;
     }
-    alice.call(vault.id(), "set_limit").args_json(json!({"token": format!("sol:{USDC}"), "max": "300000000", "window_ns": 86_400_000_000_000u64}))
-        .transact().await?.into_result()?;
+    x(&alice, &vault, "set_limit", json!({"token": format!("sol:{USDC}"), "max": "300000000", "window_ns": 86_400_000_000_000u64})).await?.into_result()?;
 
     // On the fork: 1 SOL for fees and rent, 500 USDC in the vault's own token account.
     fork.rpc_call("surfnet_setAccount", json!([me, {"lamports": 1_000_000_000u64}]));
     fork.rpc_call("surfnet_setTokenAccount", json!([me, USDC, {"amount": 500_000_000u64}, TOKEN]));
 
     let sign = |msg: String| {
-        let (k, v) = (keeper.clone(), vault.id().clone());
-        async move { k.call(&v, "sol_sign_tx").args_json(json!({"message": msg})).max_gas().transact().await }
+        let (k, v) = (alice.clone(), vault.clone()); // the direct door is the owner's
+        async move { x(&k, &v, "sol_sign_tx", json!({"message": msg})).await }
     };
     let refused = |r: &near_workspaces::result::ExecutionFinalResult, why: &str| {
         assert!(sol_sig(r).is_none(), "signed, expected a refusal ({why})");

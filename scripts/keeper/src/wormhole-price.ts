@@ -10,6 +10,9 @@
 // trusted with nothing: it can only post a true reading, or none. The board
 // prices the coin as virtual quote / virtual token, then in USD with Pyth.
 // Coins that finished their curve (moved to an AMM pool) are refused.
+// What it proves is the curve's state at the slot read, which anyone can move by
+// buying into it: a true reading, not a trusted price. So it is for price triggers
+// only; a vault names the feed single_source and no market floor reads it.
 //
 // Environment: WORMHOLE_QUERY_API_KEY (required: the proxy is allow-listed; ask Wormhole for a key),
 // QUERY_PROXY (default https://query.wormhole.com/v1/query; testnet: https://testnet.query.wormhole.com/v1/query),

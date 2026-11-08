@@ -22,7 +22,8 @@
 //! A transaction passes (`check_tx`) when the vault is the only fee payer,
 //! every other signer is the owner's wallet or a fresh key a template asks
 //! for, and every instruction is Compute Budget (capped), the creation of one
-//! of the vault's own token accounts, or matches an allowed template.
+//! of the vault's own token accounts that a template here uses (a few at
+//! most), or matches an allowed template.
 
 use crate::message::{Instruction, Message};
 use crate::{pda, pubkey, Pubkey, Refusal, ATA_PROGRAM, COMPUTE_BUDGET};
@@ -178,9 +179,18 @@ impl Template {
             raw.push(b);
             values.push(if f.ty.unsigned() { le(b) } else { 0 });
         }
+        // Fixed fields first: they say which instruction this is (Hylo's router has one
+        // instruction for every pair; the pair is in its data), so a refusal can name the
+        // template the instruction was meant for (`meant`).
+        for (i, f) in self.fields.iter().enumerate() {
+            if let FieldRule::Fixed(v) = &f.rule {
+                if raw[i] != v.as_slice() {
+                    return Err(format!("field {i}: not the fixed value"));
+                }
+            }
+        }
         for (i, f) in self.fields.iter().enumerate() {
             match &f.rule {
-                FieldRule::Fixed(v) if raw[i] != v.as_slice() => return Err(format!("field {i}: not the fixed value")),
                 FieldRule::AtMost(max) if values[i] > *max => return Err(format!("field {i}: {} over the cap {max}", values[i])),
                 FieldRule::AtLeast { of, num, den } => {
                     let floor = mul_div(values[*of as usize], *num, *den);
@@ -223,6 +233,16 @@ impl Template {
         Ok(values)
     }
 
+    /// The vault's token accounts this template names in `ix` (checked by `check`).
+    fn vault_atas(&self, m: &Message, ix: &Instruction) -> Vec<Pubkey> {
+        self.accounts
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| matches!(a, Acc::VaultAta { .. } | Acc::VaultAtaOf { .. }))
+            .filter_map(|(i, _)| ix.accounts.get(i).and_then(|&k| m.key(k)).copied())
+            .collect()
+    }
+
     /// The keys this template needs as co-signers in `ix` (owner, new signers).
     fn cosigners(&self, m: &Message, ix: &Instruction) -> Vec<Pubkey> {
         self.accounts
@@ -233,6 +253,9 @@ impl Template {
             .collect()
     }
 }
+
+/// Most token-account creations one template transaction may carry.
+const MAX_ATA_CREATES: usize = 4;
 
 /// Check a whole transaction message against the allowed templates.
 pub fn check_tx(message_bytes: &[u8], templates: &[Template], p: &TxPolicy) -> Result<Vec<Matched>, Refusal> {
@@ -245,35 +268,42 @@ pub fn check_tx(message_bytes: &[u8], templates: &[Template], p: &TxPolicy) -> R
         return Err(Refusal::FeePayer);
     }
     let signers: Vec<Pubkey> = m.account_keys.iter().take(nsig).copied().collect();
-    let (cb, ata_prog) = (pubkey(COMPUTE_BUDGET), pubkey(ATA_PROGRAM));
-    let (mut cu_price, mut cu_limit) = (0u64, 200_000u32);
+    let (cb, ata_prog, system) = (pubkey(COMPUTE_BUDGET), pubkey(ATA_PROGRAM), pubkey(crate::SYSTEM_PROGRAM));
+    let (cu_price, cu_limit) = crate::compute_budget(&m)?;
     let mut matched = Vec::new();
     let mut wanted: Vec<Pubkey> = vec![p.authority];
+    let (mut created, mut used): (Vec<Pubkey>, Vec<Pubkey>) = (vec![], vec![]);
     for ix in &m.instructions {
         let prog = *m.key(ix.program_index).ok_or(Refusal::Program("bad index".into()))?;
         if prog == cb {
-            match ix.data.first() {
-                Some(2) if ix.data.len() == 5 => cu_limit = u32::from_le_bytes(ix.data[1..5].try_into().unwrap()),
-                Some(3) if ix.data.len() == 9 => cu_price = u64::from_le_bytes(ix.data[1..9].try_into().unwrap()),
-                _ => return Err(Refusal::ComputeBudget("only unit limit and unit price".into())),
-            }
             continue;
         }
         if prog == ata_prog {
-            crate::check_ata_create_for(&m, ix, &p.authority)?;
+            created.push(crate::check_ata_create_for(&m, ix, &p.authority)?);
             continue;
         }
+        // A durable nonce (System advance_nonce_account) keeps a signed transaction valid
+        // until whoever holds it sends it: a swap held back to land once its floor is stale.
+        // Without one it lives only as long as its recent blockhash (~1 minute), whatever a template says.
+        if prog == system && ix.data.starts_with(&[4, 0, 0, 0]) {
+            return Err(Refusal::Program("advance_nonce_account: no durable nonces, a transaction lives only as long as its blockhash".into()));
+        }
         let mut why = format!("no template for program {}", bs58::encode(prog).into_string());
-        let mut hit = None;
+        let (mut hit, mut best) = (None, 0u8);
         for t in templates.iter().filter(|t| t.program == prog) {
             match t.check(&m, ix, p, &signers) {
                 Ok(values) => {
                     hit = Some((t, values));
                     break;
                 }
-                // Report the template that was meant (its discriminator matched), not the last one tried.
-                Err(e) if ix.data.starts_with(&t.prefix) || !why.contains(": ") => why = format!("{}: {e}", t.name),
-                Err(_) => {}
+                // Report the template that was meant, not the last one tried: the first whose
+                // discriminator and fixed fields matched, else the first whose discriminator did.
+                Err(e) => {
+                    let rank = meant(t, &ix.data, &e);
+                    if rank > best || !why.contains(": ") {
+                        (why, best) = (format!("{}: {e}", t.name), rank);
+                    }
+                }
             }
         }
         let (t, values) = hit.ok_or(Refusal::Program(why))?;
@@ -284,10 +314,18 @@ pub fn check_tx(message_bytes: &[u8], templates: &[Template], p: &TxPolicy) -> R
             wanted.extend(p.owner);
         }
         wanted.extend(t.cosigners(&m, ix));
+        used.extend(t.vault_atas(&m, ix));
         matched.push(Matched { template: t.name.clone(), values });
     }
     if matched.is_empty() {
         return Err(Refusal::NoSwap);
+    }
+    // Each create locks ~0.002 SOL of the vault's in rent: only accounts the templates use, a few per transaction.
+    if created.len() > MAX_ATA_CREATES {
+        return Err(Refusal::AtaCreate(format!("at most {MAX_ATA_CREATES} token accounts per transaction")));
+    }
+    if created.iter().any(|a| !used.contains(a)) {
+        return Err(Refusal::AtaCreate("a token account no instruction here uses".into()));
     }
     // Every signer must be one the templates asked for: the vault, the owner, fresh position keys.
     if signers.iter().any(|s| !wanted.contains(s)) {
@@ -297,6 +335,17 @@ pub fn check_tx(message_bytes: &[u8], templates: &[Template], p: &TxPolicy) -> R
         return Err(Refusal::ComputeBudget(format!("price {cu_price} / limit {cu_limit} over the cap")));
     }
     Ok(matched)
+}
+
+/// How surely instruction data was meant for template `t`, given why it failed: 2 when its
+/// prefix and every fixed field matched (it failed on an amount or an account), 1 when only the
+/// prefix did, 0 otherwise.
+fn meant(t: &Template, data: &[u8], why: &str) -> u8 {
+    match (data.starts_with(&t.prefix), why.contains("not the fixed value") || why.starts_with("data is")) {
+        (false, _) => 0,
+        (true, true) => 1,
+        (true, false) => 2,
+    }
 }
 
 fn le(b: &[u8]) -> u128 {

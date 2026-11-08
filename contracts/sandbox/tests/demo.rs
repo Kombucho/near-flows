@@ -2,9 +2,10 @@
 //! in the shared brain) trades on three chains, every step decided and signed
 //! by the vault, executed on local forks of mainnet.
 //!
-//! 1. NEAR: wrap NEAR and buy a memecoin on the real Rhea DEX code, guarded by a
-//!    market floor from an attested price board (a pumped pool is refused).
-//! 2. Solana: buy a pump.fun coin through a Solana template (surfpool fork).
+//! 1. NEAR: wrap NEAR and buy a memecoin on the real Rhea DEX code, guarded by
+//!    the owner's fixed floor (a memecoin has no trusted price, so no market
+//!    floor: the vault says so plainly); a pumped pool is refused.
+//! 2. Solana: buy a pump.fun coin through a flow node holding the SOL it may spend (surfpool fork).
 //! 3. Solana: open a Meteora DLMM position (the owner co-signs), let a trader
 //!    pay it fees, and run a flow that sweeps the fees into the pump.fun coin:
 //!    claim node -> keeper-reported (capped) output -> buy node.
@@ -14,7 +15,6 @@
 //! Narrative lines start with "DEMO|" (scripts/demo/run.sh shows only those).
 //! Forks: anvil on 9500 (Robinhood Chain), surfpool on 9510/9511 (Solana, public RPC).
 
-mod board;
 mod common;
 mod ladder;
 mod relayw;
@@ -83,7 +83,7 @@ async fn show_ledger(w: &RelayWorld, f: u32, nodes: &[(&str, (u32, &str), (u32, 
 
 async fn set_pyth(w: &RelayWorld, pyth: &Contract, id: &str, usd_e8: i64, age_s: i64) -> anyhow::Result<()> {
     w.alice.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": usd_e8.to_string(), "conf": (usd_e8 / 2000).to_string(),
-        "expo": -8, "ema": usd_e8.to_string(), "age_s": age_s})).transact().await?.into_result()?;
+        "expo": -8, "backup": usd_e8.to_string(), "age_s": age_s})).transact().await?.into_result()?;
     Ok(())
 }
 
@@ -101,15 +101,15 @@ async fn one_relay_vault_buys_memecoins_on_near_and_solana_sweeps_lp_fees_and_la
     // ---------- Alice's vault, set up once for every chain ----------
     let pyth = w.worker.dev_deploy(&wasm("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
-    let board = board::attested_board(&w.worker, &w.keeper, 2).await?;
     x(&w.alice, &w.vault, "sol_setup", json!({"signer": w.signer.id(), "max_cu_price": 1_000_000u64, "max_cu_limit": 1_400_000u32})).await?.into_result()?;
     x(&w.alice, &w.vault, "evm_setup", json!({"signer": w.signer.id(), "chain_id": 4663u64,
         "max_fee": GWEI.to_string(), "max_tip": (GWEI / 10).to_string(), "gas_cap": 1_500_000u64})).await?.into_result()?;
-    // Prices: NEAR and NVDA from Pyth (mock_pyth, Pyth's interface), the memecoin from the board. At most 60 s old.
+    // Prices: NEAR from Pyth (mock_pyth, Pyth's interface) confirmed by a second publisher;
+    // NVDA single-source (said plainly: it fires the ladder's rungs, no market floor reads it). At most 60 s old.
+    // The memecoin has no feed at all: no trusted price exists for it.
     x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 500, "feeds": [
-        {"name": "near", "contract": pyth.id(), "price_id": NEAR_ID, "backup": {"kind": "ema"}},
-        {"name": "meme", "contract": board.id(), "price_id": board::MEME, "backup": {"kind": "ema"}},
-        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "near", "contract": pyth.id(), "price_id": NEAR_ID, "backup": common::backup(pyth.id(), NEAR_ID)},
+        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": common::single_source()}]}})).await?.into_result()?;
     let sol_me = w.brain.view("get_sol").args_json(json!({"vault": w.vault})).await?.json::<Value>()?["address"].as_str().unwrap().to_string();
     let evm_me = w.brain.view("get_evm").args_json(json!({"vault": w.vault})).await?.json::<Value>()?["address"].as_str().unwrap().to_string();
     let relay_kb = wasm("relay").len() as f64 / 1024.0;
@@ -120,7 +120,7 @@ async fn one_relay_vault_buys_memecoins_on_near_and_solana_sweeps_lp_fees_and_la
     say!("  signatures: a test signer (real secp256k1 / Ed25519 keys) standing in for NEAR's MPC network");
 
     // =====================================================================
-    header("1. Buy a memecoin on Rhea (NEAR), guarded by a market floor");
+    header("1. Buy a memecoin on Rhea (NEAR), guarded by the owner's fixed floor");
     let lp = w.worker.root_account()?;
     let dex = rhea::deploy(&w.worker).await?;
     let meme = w.worker.dev_deploy(&wasm("mock_ft")).await?;
@@ -131,24 +131,22 @@ async fn one_relay_vault_buys_memecoins_on_near_and_solana_sweeps_lp_fees_and_la
     for t in [dex.wrap.id(), meme.id()] {
         rhea::register(&lp, t, &w.vault).await?;
     }
-    set_pyth(&w, &pyth, NEAR_ID, 200_000_000, 0).await?;
-    let t = board::now(&w.worker).await?;
-    board::push(&w.keeper, &board, vec![board::report(&board::attester(0), board::MEME, 51_204, t), board::report(&board::attester(1), board::MEME, 51_204, t)])
-        .await?.into_result()?;
-    say!("prices: NEAR $2.00 (Pyth), MEME $0.000000051204 (price board, 2 of 3 attesters signed)");
+    say!("MEME is a memecoin: no trusted price exists, so no market floor. Alice sets a fixed floor and a small size instead");
     x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": dex.wrap.id(), "methods": ["near_deposit"]}, {"contract": meme.id()}, {"contract": dex.dex.id()}], "remove": []}))
         .await?.into_result()?;
     let mut buy = dex.swap_recipe(pool, dex.wrap.id(), meme.id(), None);
     buy["label"] = json!("Buy MEME on Rhea");
     buy["price"] = Value::Null;
-    // The floor comes from the oracle, not from the pool: at most 1% under the market.
-    buy["market"] = json!({"sell": "near", "buy": "meme", "dec_in": 24, "dec_out": 6, "slippage_bps": 100});
+    // The owner's fixed floor, not the pool's word: 1% under today's price (MEME units per wNEAR; scaled
+    // 1e24 per input unit, and a wNEAR is 1e24 units, so the two cancel).
+    let per_in = MEME_UNITS_PER_NEAR * 99 / 100;
+    buy["min_out_per_in"] = json!(per_in.to_string());
     let f: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "Ape into MEME", "nodes": [
         {"input": "near", "action": dex.wrap_recipe(), "when": {"when": "now"}, "next": [{"to": 1, "bps": 10_000}]},
         {"input": dex.wrap.id(), "action": buy, "when": {"when": "now"}}]})).await?.json()?;
     w.alice.transfer_near(&w.vault, NearToken::from_near(12)).await?.into_result()?;
     x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": (10 * NEAR).to_string()})).await?.into_result()?;
-    say!("flow \"Ape into MEME\": [wrap NEAR] -> [buy MEME on Rhea, floor = oracle price - 1%]; Alice funds it with 10 NEAR");
+    say!("flow \"Ape into MEME\": [wrap NEAR] -> [buy MEME on Rhea, fixed floor {} MEME per wNEAR]; Alice funds it with 10 NEAR", amt(per_in, 6, 0));
     let r = x(&w.keeper, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
     assert!(r.is_success(), "{:?}", r.failures());
     say!("keeper steps node 0: 10 NEAR wrapped into {} wNEAR, routed to node 1", amt(rhea::balance(&dex.wrap, &w.vault).await?, 24, 2));
@@ -162,11 +160,11 @@ async fn one_relay_vault_buys_memecoins_on_near_and_solana_sweeps_lp_fees_and_la
     let pumped = dex.quote(pool, dex.wrap.id(), meme.id(), 10 * NEAR).await?;
     say!("a whale buys MEME with 300 wNEAR: 10 wNEAR now fetches only {} MEME", amt(pumped, 6, 0));
     let r = x(&w.keeper, &w.vault, "step", json!({"flow_id": f, "node": 1})).await?;
-    // Per wNEAR unit, scaled 1e24: one wNEAR is 1e24 units, so 10 wNEAR's minimum is 10 x it.
-    let floor = u(&event(&r, "market_floor")["min_out_per_in"]) * 10;
+    // 10 wNEAR's minimum is 10 x the floor per wNEAR.
+    let floor = per_in * 10;
     assert!(r.logs().join("").contains("step_failed"), "{:?} {:?}", r.logs(), r.failures());
     assert!(pumped < floor);
-    say!("keeper steps node 1: REFUSED. The vault's floor from the oracle is {} MEME; Rhea reverted, nothing spent", amt(floor, 6, 0));
+    say!("keeper steps node 1: REFUSED. Alice's floor is {} MEME; Rhea reverted, nothing spent", amt(floor, 6, 0));
     assert_eq!(inbox(&ledger(&w, f).await?, 1), 10 * NEAR, "the wNEAR waits in node 1");
     dex.trade(&lp, pool, meme.id(), dex.wrap.id(), whale_got).await?;
     say!("the whale sells back; the pool is at the market again");
@@ -190,20 +188,32 @@ async fn one_relay_vault_buys_memecoins_on_near_and_solana_sweeps_lp_fees_and_la
     let pump_buy = sol_template("pump_buy", &[("mint", PUMP_MINT), ("max_lamports", "100000000"), ("floor_per_lamport", &(per_lamport / 2).to_string())]);
     x(&w.alice, &w.vault, "sol_template", json!({"template": pump_buy})).await?.into_result()?;
     say!("Alice allows one template: pump.fun buy of {}…, max 0.1 SOL, floor {} units per lamport", &PUMP_MINT[..8], amt(per_lamport / 2, 0, 0));
-    let big = sol.helper(&["pump-buy", &sol_me, PUMP_MINT, "120000000", "5"]);
-    let r = x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": big["message"]})).await?;
-    assert!(sol_sig(&r).is_none() && fails_with(&r, "over the cap"), "{:?}", r.failures());
-    say!("keeper asks to sign a 0.126 SOL buy: REFUSED (over the template's cap), nothing signed");
+    // A flow of one node holds the SOL the buy may spend: the keeper can't sign anything outside it.
+    let pump_node = json!({"input": "sol:SOL", "when": {"when": "now"}, "next": [],
+        "action": {"label": "Buy the coin", "calls": [], "out": null, "min_out_per_in": null, "price": null,
+            "remote": {"call": {"chain": "sol", "template": "pump_buy", "amount_field": 1, "min_field": 0},
+                       "out": format!("sol:{PUMP_MINT}"), "max_out_per_in": (per_lamport * 4 * E24).to_string()}}});
+    let p: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "Buy the coin", "nodes": [pump_node]})).await?.json()?;
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": p, "node": 0, "amount": "50000000"})).await?.into_result()?;
+    say!("flow \"Buy the coin\": one node holding 0.05 SOL of the vault's SOL; Alice funds it");
     let coins = |s: &SolFork| u(&s.helper(&["balance", &sol_me, PUMP_MINT])["amount"]);
-    let b = sol.helper(&["pump-buy", &sol_me, PUMP_MINT, "50000000", "5"]);
+    let b = sol.helper(&["pump-buy", &sol_me, PUMP_MINT, "50000000", "5", "exact"]);
     let r = x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": b["message"]})).await?;
+    assert!(sol_sig(&r).is_none() && fails_with(&r, "owner only"), "{:?}", r.failures());
+    say!("keeper asks the vault to sign the buy directly, outside any flow: REFUSED (owner only), nothing signed");
+    let big = sol.helper(&["pump-buy", &sol_me, PUMP_MINT, "60000000", "5", "exact"]);
+    let r = x(&w.keeper, &w.vault, "step_remote", json!({"flow_id": p, "node": 0, "args": {"chain": "sol", "message": big["message"]}})).await?;
+    assert!(sol_sig(&r).is_none() && fails_with(&r, "exactly"), "{:?}", r.failures());
+    say!("keeper asks the node to sign a 0.06 SOL buy: REFUSED (the node spends exactly its 0.05 SOL), nothing signed");
+    let r = x(&w.keeper, &w.vault, "step_remote", json!({"flow_id": p, "node": 0, "args": {"chain": "sol", "message": b["message"]}})).await?;
     let sig = sol_sig(&r).unwrap_or_else(|| panic!("not signed: {:?} {:?}", r.logs(), r.failures()));
     let sent = sol.helper(&["send", b["message"].as_str().unwrap(), &sig]);
     assert!(sent["signature"].is_string() && sent["err"].is_null(), "not executed: {sent}");
     let pump_bought = coins(&sol);
-    assert!(pump_bought >= u(&b["tokens"]));
-    say!("keeper builds a 0.05 SOL buy with pump.fun's SDK; the vault checks every byte and signs");
-    say!("executed on the fork: {} coins (6 decimals) in the vault's own token account, tx {}…", amt(pump_bought, 6, 0), &sent["signature"].as_str().unwrap()[..16]);
+    assert!(pump_bought >= u(&event(&r, "remote_step")["min_out"]));
+    x(&w.keeper, &w.vault, "remote_report", json!({"flow_id": p, "node": 0, "out": pump_bought.to_string()})).await?.into_result()?;
+    say!("keeper builds a 0.05 SOL buy with pump.fun's SDK and steps the node; the vault checks every byte and signs");
+    say!("executed on the fork: {} coins (6 decimals) in the vault's own token account, tx {}…; reported", amt(pump_bought, 6, 0), &sent["signature"].as_str().unwrap()[..16]);
 
     // =====================================================================
     header("3. Meteora LP on Solana, its fees swept into the memecoin by a flow");
@@ -216,12 +226,12 @@ async fn one_relay_vault_buys_memecoins_on_near_and_solana_sweeps_lp_fees_and_la
     sol.rpc_call("surfnet_setTokenAccount", json!([sol_me, USDC, {"amount": 500_000_000u64}, TOKEN]));
     say!("Alice's own Solana wallet {}… must co-sign any LP open; the vault holds 500 USDC on the fork", &owner_key[..8]);
     let alone = sol.helper(&["dlmm-open", &sol_me, "-", DLMM_POOL, "100000000", "10"]);
-    let r = x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": alone["message"]})).await?;
+    let r = x(&w.alice, &w.vault, "sol_sign_tx", json!({"message": alone["message"]})).await?;
     assert!(sol_sig(&r).is_none() && fails_with(&r, "Signers"), "{:?}", r.failures());
-    say!("keeper asks to open a position without Alice's wallet in it: REFUSED");
+    say!("an open without Alice's wallet in it: REFUSED, even asked from her own NEAR account");
     let open = sol.helper(&["dlmm-open", &sol_me, &owner_key, DLMM_POOL, "100000000", "10"]);
     let (msg, position, pos_secret) = (open["message"].as_str().unwrap(), open["position"].as_str().unwrap().to_string(), open["positionSecret"].as_str().unwrap());
-    let r = x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": msg})).await?;
+    let r = x(&w.alice, &w.vault, "sol_sign_tx", json!({"message": msg})).await?;
     let sig = sol_sig(&r).unwrap_or_else(|| panic!("open not signed: {:?} {:?}", r.logs(), r.failures()));
     let sent = sol.helper(&["send", msg, &sig, pos_secret, &owner_secret]);
     assert!(sent["signature"].is_string() && sent["err"].is_null(), "open not executed: {sent}");
@@ -299,11 +309,11 @@ async fn one_relay_vault_buys_memecoins_on_near_and_solana_sweeps_lp_fees_and_la
     let nonce = |f: &Fork| num(&f.cast(&["nonce", &evm_me])) as u64;
     let args = |values: Vec<String>, nonce: u64| json!({"chain": "evm", "values": values, "nonce": nonce, "max_fee": max_fee.to_string(), "max_tip": "0", "gas": 1_000_000u64});
     say!("Robinhood Chain fork at block {}; the vault's address gets 1 ETH", rh.cast(&["block-number"]));
-    // Once: let Uniswap's Universal Router pull NVDA through Permit2 (plain template calls, outside the flow).
+    // Once: let Uniswap's Universal Router pull NVDA through Permit2 (Alice's own template calls, outside the flow).
     let now: u128 = num(&rh.cast(&["block", "latest", "--field", "timestamp"]));
     for (name, values) in [("approve_nvda_permit2", vec![0, E18]), ("permit2_nvda_universal_router", vec![0, 0, E18, now + 86_400])] {
         let a = json!({"name": name, "values": values.iter().map(|v| v.to_string()).collect::<Vec<_>>(), "nonce": nonce(&rh), "max_fee": max_fee.to_string(), "max_tip": "0", "gas": 200_000u64});
-        let r = x(&w.keeper, &w.vault, "evm_call", a).await?;
+        let r = x(&w.alice, &w.vault, "evm_call", a).await?;
         assert_eq!(send(&rh, &signed(&r)).0, 1, "{name}");
     }
     set_pyth(&w, &pyth, NVDA_FEED, 180 * 100_000_000, 0).await?;

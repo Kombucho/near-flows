@@ -1,7 +1,7 @@
 //! The body/brain split: each user's vault is the 9 KB relay (a global
 //! contract), all rules and state live in one shared brain. Same swap flow as
-//! tests/vault.rs, run through relay + brain, plus the attacks on the relay
-//! and the measured costs against the full vault. Build the wasm first: make build
+//! the old full vault's, run through relay + brain, plus the attacks on the relay
+//! and the measured costs. Build the wasm first: make build
 
 use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
@@ -286,6 +286,8 @@ async fn a_forged_brain_answer_is_refused() -> anyhow::Result<()> {
     let evil = evil.deploy(&wasm("relay")).await?.into_result()?;
     let mut init = vec![fake.id().len() as u8];
     init.extend(fake.id().as_bytes());
+    init.push(w.mallory.id().len() as u8);
+    init.extend(w.mallory.id().as_bytes());
     let _ = w.mallory.call(evil.id(), "new").args(init).max_gas().transact().await?;
 
     // 1. "Brain answer" delivered to Alice's vault's cb by another contract: refused (wrong predecessor).
@@ -309,10 +311,13 @@ async fn a_forged_brain_answer_is_refused() -> anyhow::Result<()> {
     let evil2 = evil2.deploy(&wasm("relay")).await?.into_result()?;
     let mut init = vec![w.brain.id().len() as u8];
     init.extend(w.brain.id().as_bytes());
+    init.push(w.mallory.id().len() as u8);
+    init.extend(w.mallory.id().as_bytes());
     init.extend(json!({"init": {"owner": w.mallory.id(), "keeper": null}}).to_string().as_bytes());
     let r = w.mallory.call(evil2.id(), "new").args(init).max_gas().transact().await?;
     assert!(fails_with(&r, "vaults are made by the factory"), "{:?}", r.failures());
     assert!(w.brain.view("get_vault").args_json(json!({"vault": evil2.id()})).await?.json::<Option<Value>>()?.is_none());
+    assert!(w.worker.view_account(evil2.id()).await.is_err(), "a relay the brain refused deletes itself, its NEAR to the payer");
 
     assert_eq!(balance(&w.wnear, &w.vault).await?, 1_000 * ONE, "Alice's vault untouched");
     // And with an honest answer, a relay does exactly what it says (here: pay Alice 1 NEAR).
@@ -332,10 +337,8 @@ async fn a_forged_brain_answer_is_refused() -> anyhow::Result<()> {
 async fn the_split_costs_about_one_near_to_publish_and_this_much_gas_per_step() -> anyhow::Result<()> {
     let w = setup().await?;
     let relay_kb = wasm("relay").len() as f64 / 1024.0;
-    let vault_kb = wasm("vault").len() as f64 / 1024.0;
     let brain = w.worker.view_account(w.brain.id()).await?;
     println!("relay wasm: {relay_kb:.1} KB; publishing it as a global contract cost {:.3} NEAR (incl. gas)", w.publish_cost);
-    println!("full vault wasm: {vault_kb:.1} KB (publishing at 0.1 NEAR/KB: {:.1} NEAR)", vault_kb / 10.0);
     println!("brain wasm: {:.1} KB; deployed, it stakes {:.2} NEAR of storage ({} bytes incl. state; refundable)",
         wasm("brain").len() as f64 / 1024.0, brain.storage_usage as f64 * 1e19 / 1e24, brain.storage_usage);
     assert!(w.publish_cost < 2.0, "publishing the body costs ~1 NEAR, not 59");
@@ -359,37 +362,23 @@ async fn the_split_costs_about_one_near_to_publish_and_this_much_gas_per_step() 
         near(cost.parse()?), near(paid.parse()?), near(w.worker.view_account(&cv).await?.balance.as_yoctonear()));
     assert!(paid.parse::<u128>()? >= cost.parse::<u128>()?);
 
-    // Gas: the same one-swap step on the full vault and on relay + brain.
-    let full = w.worker.dev_deploy(&wasm("vault")).await?;
-    full.call("new").args_json(json!({"owner": w.alice.id(), "keeper": w.keeper.id()})).transact().await?.into_result()?;
-    register(&w.alice, &w.wnear, full.id()).await?;
-    register(&w.alice, &w.usdc, full.id()).await?;
-    give(&w.alice, &w.wnear, full.id(), 100 * ONE).await?;
-    w.alice.call(full.id(), "trust").args_json(json!({"add": [{"contract": w.wnear.id()}, {"contract": w.usdc.id()}, {"contract": w.dex.id()}], "remove": []}))
-        .transact().await?.into_result()?;
+    // Gas per request of a one-swap flow on relay + brain.
+    // WHY no comparison any more: the full vault (contracts/vault) is gone. Its
+    // last measured figures (2026-11-06, same flow, same sandbox) for the record:
+    //   full vault wasm 735.1 KB (73.5 NEAR to publish at 0.1 NEAR/KB);
+    //   save_flow 2.4 Tg vs 8.7 relay (3.66x), fund 6.8 vs 10.5 (1.53x), step 29.0 vs 32.5 (1.12x).
     let node = json!([{"input": w.wnear.id(), "action": swap(&w, &w.usdc, None), "when": {"when": "now"}}]);
-    let mut rows = vec![];
-    // Full vault.
-    let r = w.alice.call(full.id(), "save_flow").args_json(json!({"name": "g", "nodes": node})).max_gas().transact().await?;
-    rows.push(("save_flow", r.total_gas_burnt.as_gas()));
-    let f: u32 = r.json()?;
-    let r = w.alice.call(full.id(), "fund").args_json(json!({"flow_id": f, "node": 0, "amount": (10 * ONE).to_string()})).max_gas().transact().await?;
-    rows.push(("fund", r.into_result()?.total_gas_burnt.as_gas()));
-    let r = w.keeper.call(full.id(), "step").args_json(json!({"flow_id": f, "node": 0})).max_gas().transact().await?;
-    rows.push(("step", r.into_result()?.total_gas_burnt.as_gas()));
-    // Relay + brain.
     let r = x(&w.alice, &w.vault, json!({"save_flow": {"name": "g", "nodes": node}})).await?;
-    let mut split = vec![r.total_gas_burnt.as_gas()];
+    let mut split = vec![("save_flow", r.total_gas_burnt.as_gas())];
     let f: u32 = r.json()?;
     let r = x(&w.alice, &w.vault, json!({"fund": {"flow_id": f, "node": 0, "amount": (10 * ONE).to_string()}})).await?;
-    split.push(r.into_result()?.total_gas_burnt.as_gas());
+    split.push(("fund", r.into_result()?.total_gas_burnt.as_gas()));
     let r = x(&w.keeper, &w.vault, json!({"step": {"flow_id": f, "node": 0}})).await?;
     report("relay step", &r);
-    split.push(r.into_result()?.total_gas_burnt.as_gas());
+    split.push(("step", r.into_result()?.total_gas_burnt.as_gas()));
     assert_eq!(balance(&w.usdc, &w.vault).await?, 20 * ONE, "the relay's swap really ran");
-    println!("{:<10} {:>12} {:>14} {:>8}", "", "full vault", "relay+brain", "ratio");
-    for ((what, a), b) in rows.iter().zip(split) {
-        println!("{what:<10} {:>9.1} Tg {:>11.1} Tg {:>7.2}x", *a as f64 / 1e12, b as f64 / 1e12, b as f64 / *a as f64);
+    for (what, g) in split {
+        println!("{what:<10} {:>7.1} Tgas on relay+brain", g as f64 / 1e12);
     }
     Ok(())
 }

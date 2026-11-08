@@ -1,6 +1,6 @@
 //! An attested price board (contracts/priceboard) for a memecoin: k of n
 //! attesters sign each price (Ed25519), the board keeps the median. Shared by
-//! priceboard.rs and demo.rs. The attester keys are test keys.
+//! priceboard.rs and chainlink_board.rs. The attester keys are test keys.
 #![allow(dead_code)]
 
 use crate::common::wasm;
@@ -42,10 +42,10 @@ pub async fn now(w: &Worker<Sandbox>) -> anyhow::Result<i64> {
     Ok((w.view_block().await?.timestamp() / 1_000_000_000) as i64)
 }
 
-/// A board of three attesters, `k` of them needed; its EMA follows over 10 minutes.
+/// A board of three attesters, `k` of them needed.
 pub async fn attested_board(w: &Worker<Sandbox>, owner: &Account, k: u8) -> anyhow::Result<Contract> {
     let b = w.dev_deploy(&wasm("priceboard")).await?;
-    b.call("new").args_json(json!({"owner": owner.id(), "ema_window_s": 600,
+    b.call("new").args_json(json!({"owner": owner.id(),
         "source": {"kind": "attested", "attesters": (0..3).map(|i| near_key(&attester(i))).collect::<Vec<_>>(), "k": k, "max_skew_s": 60}}))
         .transact().await?.into_result()?;
     Ok(b)

@@ -1,6 +1,9 @@
 //! Stealth vaults: owned by a key, not an account. The owner signs commands off
 //! chain; a relayer (here the keeper) sends them and pays the gas; the vault checks
 //! the signature itself. The owner's account never touches the vault or the factory.
+//! Run on relay vaults: the relay factory makes them, the relay's `exec` door
+//! forwards the signed command, the brain checks it. (relay_ports.rs has a
+//! one-test tour of the same; these keep each property on its own.)
 //! Build the wasm first: make build
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -75,18 +78,34 @@ async fn ft(t: &Contract, who: &AccountId) -> anyhow::Result<u128> {
 
 struct World {
     worker: Worker<Sandbox>,
+    brain: Contract,
     factory: Contract,
     relayer: Account,
 }
 
+/// Brain + relay factory + the relay published. No vault yet: each test makes its own.
 async fn world() -> anyhow::Result<World> {
     let worker = near_workspaces::sandbox().await?;
-    let us = worker.root_account()?.create_subaccount("flows").initial_balance(NearToken::from_near(100)).transact().await?.into_result()?;
-    let factory = us.deploy(&wasm("factory")).await?.into_result()?;
-    factory.call("new").args_json(json!({"owner": us.id()})).transact().await?.into_result()?;
-    us.call(factory.id(), "publish").args(wasm("vault")).deposit(NearToken::from_near(40)).max_gas().transact().await?.into_result()?;
+    let root = worker.root_account()?;
+    let us = root.create_subaccount("flows").initial_balance(NearToken::from_near(30)).transact().await?.into_result()?;
+    let brain_acc = root.create_subaccount("brain").initial_balance(NearToken::from_near(15)).transact().await?.into_result()?;
+    let brain = brain_acc.deploy(&wasm("brain")).await?.into_result()?;
+    brain.call("new").args_json(json!({"factory": us.id()})).transact().await?.into_result()?;
+    let factory = us.deploy(&wasm("factory_relay")).await?.into_result()?;
+    factory.call("new").args_json(json!({"owner": us.id(), "brain": brain.id()})).transact().await?.into_result()?;
+    us.call(factory.id(), "publish").args(wasm("relay")).deposit(NearToken::from_near(2)).max_gas().transact().await?.into_result()?;
     let relayer = worker.dev_create_account().await?;
-    Ok(World { worker, factory, relayer })
+    Ok(World { worker, brain, factory, relayer })
+}
+
+/// A brain view about one vault (the relay vault itself holds no state).
+async fn bview(w: &World, vault: &AccountId, method: &str) -> anyhow::Result<Value> {
+    Ok(w.brain.view(method).args_json(json!({"vault": vault})).await?.json()?)
+}
+
+/// A request through the relay's generic door, as `who`.
+async fn x(who: &Account, vault: &AccountId, method: &str, args: Value) -> anyhow::Result<ExecutionFinalResult> {
+    Ok(who.call(vault, "x").args(json!({ method: args }).to_string().into_bytes()).max_gas().transact().await?)
 }
 
 async fn stealth_vault(w: &World, name: &str, owner: &Owner) -> anyhow::Result<AccountId> {
@@ -105,10 +124,9 @@ async fn a_relayer_creates_a_vault_owned_by_a_key_and_the_factory_records_no_cre
     let owner = Owner::new(7);
     let vault = stealth_vault(&w, "q8z1x", &owner).await?;
 
-    let key: Option<String> = w.worker.view(&vault, "get_owner_key").await?.json()?;
+    let key: Option<String> = serde_json::from_value(bview(&w, &vault, "get_owner_key").await?)?;
     assert_eq!(key, Some(owner.public()));
-    let me: String = w.worker.view(&vault, "get_owner").await?.json()?;
-    assert_eq!(me, vault.as_str(), "a stealth vault is its own owner");
+    assert_eq!(bview(&w, &vault, "get_vault").await?["owner"], vault.as_str(), "a stealth vault is its own owner");
     assert!(w.worker.view_access_keys(&vault).await?.is_empty(), "no keys: nobody can redeploy it");
     let by_relayer: Option<String> = w.factory.view("get_vault").args_json(json!({"owner": w.relayer.id()})).await?.json()?;
     assert!(by_relayer.is_none(), "no creator -> vault mapping");
@@ -126,7 +144,7 @@ async fn a_relayer_creates_a_vault_owned_by_a_key_and_the_factory_records_no_cre
     alice.call(w.factory.id(), "create_vault").args_json(json!({"name": "alice", "keeper": null})).deposit(NearToken::from_near(1)).max_gas().transact().await?.into_result()?;
     let named: Option<String> = w.factory.view("get_vault").args_json(json!({"owner": alice.id()})).await?.json()?;
     assert_eq!(named, Some(format!("alice.{}", w.factory.id())));
-    let none: Option<String> = w.worker.view(&format!("alice.{}", w.factory.id()).parse()?, "get_owner_key").await?.json()?;
+    let none: Option<String> = serde_json::from_value(bview(&w, &format!("alice.{}", w.factory.id()).parse()?, "get_owner_key").await?)?;
     assert!(none.is_none(), "a named vault has no owner key");
     Ok(())
 }
@@ -148,9 +166,9 @@ async fn signed_commands_run_once_before_expiry_and_only_for_their_own_vault() -
         "args": "{}", "deposit": {"kind": "input"}, "tgas": 10}], "out": wrap, "min_out_per_in": null, "price": null}, "when": {"when": "now"}}]);
     let save = owner.sign(&vault, "save_flow", json!({"name": "first", "nodes": nodes}));
     let id: u32 = exec(&w.relayer, &vault, &save).await?.into_result()?.json()?;
-    let flows: Vec<(u32, String)> = w.worker.view(&vault, "get_flows").await?.json()?;
-    assert_eq!(flows, vec![(id, "first".to_string())], "the command's return value comes back");
-    assert_eq!(w.worker.view(&vault, "get_nonce").await?.json::<String>()?, "2");
+    assert_eq!(id, 0, "the command's return value comes back");
+    assert_eq!(bview(&w, &vault, "get_vault").await?["flows"][0]["name"], "first");
+    assert_eq!(bview(&w, &vault, "get_nonce").await?, "2");
 
     // Replayed: refused. An older nonce after a newer one: refused.
     refused(&exec(&w.relayer, &vault, &save).await?, "nonce already used");
@@ -180,14 +198,18 @@ async fn signed_commands_run_once_before_expiry_and_only_for_their_own_vault() -
     stale["nonce"] = json!("999");
     refused(&exec(&w.relayer, &vault, &stale).await?, "bad signature");
     let mut starve = owner.sign_with(&vault, "set_keeper", json!({"keeper": null}), 100, now_ns() + HOUR_NS);
-    let r = w.relayer.call(&vault, "exec").args_json(&starve).gas(near_workspaces::types::Gas::from_tgas(50)).transact().await?;
-    refused(&r, "attach at least 110 Tgas");
+    // The relay needs 150 for 100 signed: 100 + 5 (a relay round) + 40 (first round) + 5 (exec).
+    // (The full vault asked for 110 with 50 attached; 140 is just under the relay's need.)
+    let r = w.relayer.call(&vault, "exec").args_json(&starve).gas(near_workspaces::types::Gas::from_tgas(140)).transact().await?;
+    refused(&r, "attach at least 150 Tgas");
     starve["tgas"] = json!(5);
     refused(&exec(&w.relayer, &vault, &starve).await?, "bad signature");
 
-    // Callbacks can't be called through exec, even signed.
-    let cb = owner.sign(&vault, "on_withdraw_to_balance", json!({"token": wrap, "amount": "1", "to": "x.test.near", "via_intents": false}));
-    refused(&exec(&w.relayer, &vault, &cb).await?, "not a command");
+    // Requests that are not owner commands can't run through exec, even signed: here a
+    // re-init that would hand the vault to another key. (The relay has no vault callbacks
+    // to name, the full vault's on_withdraw_to_balance case; its callbacks are brain-internal.)
+    let reinit = owner.sign(&vault, "init_stealth", json!({"owner_key": Owner::new(66).public(), "keeper": null}));
+    refused(&exec(&w.relayer, &vault, &reinit).await?, "not a command");
     Ok(())
 }
 
@@ -205,10 +227,11 @@ async fn the_relayer_can_do_nothing_but_relay() -> anyhow::Result<()> {
         ("set_limit", json!({"token": "near", "max": null, "window_ns": 0})),
         ("set_owner_key", json!({"owner_key": Owner::new(9).public()})),
     ] {
-        refused(&r.call(&vault, m).args_json(a).max_gas().transact().await?, "owner only");
+        refused(&x(r, &vault, m, a).await?, "owner only");
     }
-    // Nor can it impersonate the vault's own callbacks.
-    refused(&r.call(&vault, "on_withdraw_to_balance").args_json(json!({"token": "near", "amount": "1", "to": r.id(), "via_intents": false})).max_gas().transact().await?, "");
+    // Nor can it impersonate the vault's own callback (the relay's `cb`), nor a callback name.
+    refused(&r.call(&vault, "cb").args(vec![1, 0, 0, 0, 0, 0]).max_gas().transact().await?, "only the vault's own callback");
+    refused(&x(r, &vault, "on_withdraw_to_balance", json!({"token": "near", "amount": "1", "to": r.id(), "via_intents": false})).await?, "bad request");
 
     // The owner can rotate the key; the old one stops working at once.
     let rotate = owner.sign(&vault, "set_owner_key", json!({"owner_key": Owner::new(9).public()}));

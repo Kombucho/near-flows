@@ -165,9 +165,22 @@ async fn fees_move_only_within_their_caps_and_only_by_the_fee_admin() -> anyhow:
     assert!(fails_with(&set(&m.w.alice, 5, CENTI).await?, "fee admin only"));
     assert!(fails_with(&set(&m.treasury, 31, CENTI).await?, "fee over its cap"));
     assert!(fails_with(&set(&m.treasury, 10, 5 * CENTI + 1).await?, "signature fee over its cap"));
+    // A raise waits 24 hours, in plain sight; the fees in force don't move meanwhile.
     set(&m.treasury, 30, 5 * CENTI).await?.into_result()?;
+    let f = get().await?;
+    assert_eq!((f["bps"].clone(), f["per_signature"].clone()), (json!(10), json!(CENTI.to_string())), "not raised yet: {f}");
+    assert_eq!((f["pending"]["bps"].clone(), f["pending"]["per_signature"].clone()), (json!(30), json!((5 * CENTI).to_string())), "{f}");
+    assert!(f["pending"]["active_at_ns"].as_str().unwrap().parse::<u64>()? > 0);
+    // A cut is at once, and drops the pending raise.
     set(&m.treasury, 0, 0).await?.into_result()?;
-    assert_eq!(get().await?["bps"], json!(0), "lowered");
+    let f = get().await?;
+    assert_eq!(f["bps"], json!(0), "lowered");
+    assert!(f["pending"].is_null(), "{f}");
+    // No brain starts with a signature fee cap over 0.1 NEAR (the bps cap is 10%).
+    let other = m.w.worker.dev_deploy(&wasm("brain")).await?;
+    let fees = json!({"treasury": m.treasury.id(), "admin": m.treasury.id(), "cap_bps": 30, "bps": 10, "per_signature": "0", "per_signature_cap": (10 * CENTI + 1).to_string()});
+    let r = other.call("new").args_json(json!({"factory": m.w.vault, "fees": fees})).transact().await?;
+    assert!(fails_with(&r, "signature fee cap over 0.1 NEAR"), "{:?}", r.failures());
     Ok(())
 }
 
@@ -186,7 +199,7 @@ async fn a_cross_chain_signature_costs_the_flat_fee_and_is_refused_without_the_n
     let msg = Tx::new(me).ix(pubkey(SYSTEM_PROGRAM), vec![me, wsol], transfer).ix(pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"), vec![wsol], vec![17]).bytes();
     let b64 = { use base64::Engine; base64::engine::general_purpose::STANDARD.encode(&msg) };
     let before = near_of(w, m.treasury.id()).await?;
-    let r = x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": b64})).await?;
+    let r = x(&w.alice, &w.vault, "sol_sign_tx", json!({"message": b64})).await?;
     assert!(r.logs().iter().any(|l| l.contains("sol_signed")), "{:?} {:?}", r.logs(), r.failures());
     println!("GAS sol_sign_tx with the signature fee: {:.1} Tgas", tgas(&r));
     assert_eq!(near_of(w, m.treasury.id()).await? - before, CENTI, "exactly 0.01 NEAR");
@@ -198,7 +211,7 @@ async fn a_cross_chain_signature_costs_the_flat_fee_and_is_refused_without_the_n
         r = x(&w.alice, &w.vault, "withdraw", json!({"token": "near", "amount": free.to_string()})).await?;
     }
     assert!(r.is_success(), "withdrew {free}");
-    let r = x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": b64})).await?;
+    let r = x(&w.alice, &w.vault, "sol_sign_tx", json!({"message": b64})).await?;
     assert!(fails_with(&r, "signature fee") && !r.logs().iter().any(|l| l.contains("sol_signed")), "{:?}", r.failures());
     Ok(())
 }
@@ -300,5 +313,198 @@ async fn a_vault_that_cant_pay_its_keeper_gets_no_free_work() -> anyhow::Result<
     assert_eq!(ev[0]["fee"], json!(CENTI.to_string()));
     assert_eq!(before - near_of(w, &w.vault).await?, CENTI + 1, "the vault paid exactly the price");
     println!("FEE keeper unpaid: refused up front, record and funds untouched; topped up, paid exactly {CENTI}");
+    Ok(())
+}
+
+fn stake_node(m: &World, deposit: Value) -> Value {
+    json!({"input": "near", "when": {"when": "now"}, "action": {"label": "Stake",
+        "calls": [{"call": "fn", "contract": m.dex.id(), "method": "deposit_and_stake", "args": "{}", "deposit": deposit, "tgas": 30}],
+        "out": m.usdc.id(), "min_out_per_in": null, "price": null}})
+}
+
+/// A flow holding `amount` NEAR: a stake node, funded and never run.
+async fn near_flow(m: &World, amount: u128) -> anyhow::Result<u32> {
+    let w = &m.w;
+    let k: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "held", "nodes": [stake_node(m, json!({"kind": "input"}))]})).await?.json()?;
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": k, "node": 0, "amount": amount.to_string()})).await?.into_result()?;
+    Ok(k)
+}
+
+/// Put all but under 0.0001 NEAR of the vault's free NEAR into node 0 of `flow`. Returns how much.
+async fn fund_all_near(w: &RelayWorld, flow: u32, upper: u128) -> anyhow::Result<u128> {
+    let fund = |a: u128| x(&w.alice, &w.vault, "fund", json!({"flow_id": flow, "node": 0, "amount": a.to_string()}));
+    let mut a = upper;
+    while fund(a).await?.is_failure() {
+        a -= CENTI / 10;
+    }
+    let mut total = a;
+    while fund(CENTI / 100).await?.is_success() {
+        total += CENTI / 100;
+    }
+    Ok(total)
+}
+
+/// Security report: settle_fees and intents_withdraw had no idle() check, so either
+/// landing between a step's two balance reads corrupted what the step measured.
+#[tokio::test]
+async fn nobody_moves_the_vaults_tokens_while_a_step_is_measuring_them() -> anyhow::Result<()> {
+    let m = world().await?;
+    let w = &m.w;
+    reg(&m.minter, &m.wnear, m.treasury.id()).await?;
+    let f: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "s", "nodes": [swap(&m, "now")]})).await?.json()?;
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": (10 * ONE).to_string()})).await?.into_result()?;
+    x(&w.alice, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?.into_result()?;
+    assert!(owed(&m, m.wnear.id()).await? > 0, "a wNEAR fee to settle");
+    // Intents set up (the verifier here is a plain account: only the brain's refusal matters).
+    let verifier = w.worker.dev_create_account().await?;
+    let _ = x(&w.alice, &w.vault, "intents_setup", json!({"verifier": verifier.id(), "signer": w.signer.id()})).await?;
+    assert!(!w.brain.view("get_intents").args_json(json!({"vault": w.vault})).await?.json::<Value>()?["key"].is_null());
+
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": (10 * ONE).to_string()})).await?.into_result()?;
+    let step = w.keeper.call(&w.vault, "x").args(json!({"step": {"flow_id": f, "node": 0}}).to_string().into_bytes()).max_gas().transact_async().await?;
+    let stranger = w.worker.dev_create_account().await?;
+    let (settle, back) = tokio::join!(
+        x(&stranger, &w.vault, "settle_fees", json!({"token": m.wnear.id()})),
+        x(&w.keeper, &w.vault, "intents_withdraw", json!({"token": m.usdc.id(), "amount": "1"}))
+    );
+    let (settle, back) = (settle?, back?);
+    let r = step.await?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?} {:?}", r.logs(), r.failures());
+    assert!(fails_with(&settle, "a step is running"), "a stranger's settle mid-step: {:?} {:?}", settle.logs(), settle.failures());
+    assert!(fails_with(&back, "a step is running"), "a keeper's intents_withdraw mid-step: {:?}", back.failures());
+    // Idle again: the settle goes through.
+    let r = x(&stranger, &w.vault, "settle_fees", json!({"token": m.wnear.id()})).await?;
+    assert_eq!(fee_events(&r, "settled").len(), 1, "{:?} {:?}", r.logs(), r.failures());
+    Ok(())
+}
+
+/// Security report: settle_fees(near) paid `owed.min(free_near + owed)`, i.e. all of
+/// it, out of the reserve and other flows' NEAR when the vault had no free NEAR.
+#[tokio::test]
+async fn settling_owed_near_fees_never_takes_the_reserve_or_a_flows_near() -> anyhow::Result<()> {
+    let m = world().await?;
+    let w = &m.w;
+    let held = NEAR / 2;
+    near_flow(&m, held).await?;
+    let n: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "n", "nodes": [stake_node(&m, json!({"kind": "input"}))]})).await?.json()?;
+    let staked = fund_all_near(w, n, near_of(w, &w.vault).await? - NEAR / 20 - held).await?;
+    let r = x(&w.alice, &w.vault, "step", json!({"flow_id": n, "node": 0})).await?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?} {:?}", r.logs(), r.failures());
+    let fee = owed(&m, &"near".parse()?).await?;
+    assert_eq!(fee, staked * BPS / 10_000, "no free NEAR to pay it from: owed");
+
+    let stranger = w.worker.dev_create_account().await?;
+    let before = near_of(w, &w.vault).await?;
+    let r = x(&stranger, &w.vault, "settle_fees", json!({"token": "near"})).await?;
+    let after = near_of(w, &w.vault).await?;
+    // fund_all_near leaves under 0.0001 NEAR free: the settle takes at most that sliver, or nothing.
+    let settled = fee - owed(&m, &"near".parse()?).await?;
+    assert!(settled <= CENTI / 100, "settled {settled} of {fee}, more than the vault had free");
+    if settled == 0 {
+        assert!(fails_with(&r, "nothing to settle with"), "{:?} {:?}", r.logs(), r.failures());
+    }
+    assert!(after + CENTI / 100 >= before, "the settle took {} yoctoNEAR the vault didn't have free", before - after);
+    let fee = fee - settled;
+    assert!(fee > 0, "most of the fee still owed");
+
+    // Topped up: it settles exactly what's owed.
+    w.alice.transfer_near(&w.vault, NearToken::from_near(1)).await?.into_result()?;
+    let t0 = near_of(w, m.treasury.id()).await?;
+    let r = x(&stranger, &w.vault, "settle_fees", json!({"token": "near"})).await?;
+    assert_eq!(fee_events(&r, "settled").len(), 1, "{:?} {:?}", r.logs(), r.failures());
+    assert_eq!(near_of(w, m.treasury.id()).await? - t0, fee);
+    assert_eq!(owed(&m, &"near".parse()?).await?, 0);
+    Ok(())
+}
+
+/// Security report: a recipe's Deposit::Fixed was attached with no free-NEAR check,
+/// paid out of other flows' NEAR (and the reserve) every run.
+#[tokio::test]
+async fn a_recipes_fixed_deposit_comes_from_free_near_never_from_other_flows() -> anyhow::Result<()> {
+    let m = world().await?;
+    let w = &m.w;
+    near_flow(&m, NEAR).await?;
+    let node = json!({"input": m.wnear.id(), "when": {"when": "now"}, "action": {"label": "Stake then swap", "calls": [
+        {"call": "fn", "contract": m.dex.id(), "method": "deposit_and_stake", "args": "{}", "deposit": {"kind": "fixed", "yocto": (NEAR / 2).to_string()}, "tgas": 30},
+        {"call": "ft", "receiver": m.dex.id(), "tgas": 50, "msg": format!(r#"{{"token_out":"{}","min_out":"1"}}"#, m.usdc.id())}],
+        "out": m.usdc.id(), "min_out_per_in": null, "price": null}});
+    let f: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "f", "nodes": [node]})).await?.json()?;
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": (10 * ONE).to_string()})).await?.into_result()?;
+    // Saved and funded first (the record's storage is paid from free NEAR), then no NEAR free.
+    drain_near(w).await?;
+    let before = near_of(w, &w.vault).await?;
+    let r = x(&w.alice, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
+    let after = near_of(w, &w.vault).await?;
+    assert!(after + CENTI / 100 >= before, "the step attached {} yoctoNEAR of another flow's NEAR", before - after);
+    assert!(fails_with(&r, "free NEAR"), "{:?} {:?}", r.logs(), r.failures());
+    // With the NEAR free, it runs and pays it.
+    w.alice.transfer_near(&w.vault, NearToken::from_near(1)).await?.into_result()?;
+    let r = x(&w.alice, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?} {:?}", r.logs(), r.failures());
+    Ok(())
+}
+
+/// Security report: a collector that collected nothing counted as a success, and the
+/// keeper was paid for it (up to 0.05 NEAR a minute, 72 NEAR a day).
+#[tokio::test]
+async fn the_keeper_isnt_paid_for_a_collector_run_that_collected_nothing() -> anyhow::Result<()> {
+    let m = world().await?;
+    let w = &m.w;
+    x(&w.alice, &w.vault, "set_keeper", json!({"keeper": w.keeper.id(), "keeper_fee": CENTI.to_string()})).await?.into_result()?;
+    x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": m.dex.id(), "methods": ["deposit_and_stake", "set_rate"]}], "remove": []})).await?.into_result()?;
+    let every = json!({"when": "every", "every_ns": 60_000_000_000u64, "chunk": "1"});
+    let empty = json!({"input": "none", "when": every, "action": {"label": "Claim nothing", "calls": [{"call": "fn", "contract": m.dex.id(), "method": "set_rate",
+        "args": json!({"token_in": m.wnear.id(), "token_out": m.usdc.id(), "rate": (2 * NEAR).to_string()}).to_string(), "deposit": {"kind": "none"}, "tgas": 10}],
+        "out": m.usdc.id(), "min_out_per_in": null, "price": null}});
+    let full = json!({"input": "none", "when": every, "action": {"label": "Claim", "calls": [{"call": "fn", "contract": m.dex.id(), "method": "deposit_and_stake",
+        "args": "{}", "deposit": {"kind": "fixed", "yocto": CENTI.to_string()}, "tgas": 30}], "out": m.usdc.id(), "min_out_per_in": null, "price": null}});
+    let f: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "c", "nodes": [empty, full]})).await?.json()?;
+    let r = x(&w.keeper, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
+    assert!(r.is_success(), "{:?}", r.failures());
+    assert!(fee_events(&r, "keeper").is_empty(), "paid for collecting nothing: {:?}", r.logs());
+    let r = x(&w.keeper, &w.vault, "step", json!({"flow_id": f, "node": 1})).await?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?} {:?}", r.logs(), r.failures());
+    assert_eq!(fee_events(&r, "keeper").len(), 1, "paid for collecting {CENTI} USDC units: {:?}", r.logs());
+    Ok(())
+}
+
+/// Security report: free NEAR is the balance the vault reported when the request
+/// came in; two requests in parallel both saw it whole and both spent it.
+#[tokio::test]
+async fn parallel_requests_cant_spend_the_same_free_near_twice() -> anyhow::Result<()> {
+    let m = world().await?;
+    let w = &m.w;
+    let held = NEAR;
+    near_flow(&m, held).await?;
+    let acc = w.worker.view_account(&w.vault).await?;
+    let storage = acc.storage_usage as u128 * 10u128.pow(19);
+    let free = acc.balance.as_yoctonear() - storage - NEAR / 20 - held;
+    let amount = free - CENTI / 10;
+    let send = || x(&w.alice, &w.vault, "withdraw", json!({"token": "near", "amount": amount.to_string()}));
+    let (r1, r2) = tokio::join!(send(), send());
+    let (r1, r2) = (r1?, r2?);
+    println!("parallel withdrawals of {amount}: {} {}", r1.is_success(), r2.is_success());
+    assert!(r1.is_success() != r2.is_success(), "exactly one of two parallel withdrawals of the free NEAR: {:?} {:?}", r1.failures(), r2.failures());
+    let left = near_of(w, &w.vault).await?;
+    assert!(left >= held + NEAR / 20 + storage, "the flow's NEAR and the reserve stayed: {left}");
+    Ok(())
+}
+
+/// Security report: a step's input used only in part (a partial fill) lost the rest
+/// to the free balance instead of its node.
+#[tokio::test]
+async fn a_partial_fill_returns_the_unused_input_to_its_node() -> anyhow::Result<()> {
+    let m = world().await?;
+    let w = &m.w;
+    let node = json!({"input": m.wnear.id(), "when": {"when": "now"}, "action": {"label": "Swap 60%", "calls": [{"call": "ft", "receiver": m.dex.id(), "tgas": 50,
+        "msg": format!(r#"{{"token_out":"{}","min_out":"1","use_bps":6000}}"#, m.usdc.id())}], "out": m.usdc.id(), "min_out_per_in": null, "price": null}});
+    let f: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "p", "nodes": [node]})).await?.json()?;
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": (10 * ONE).to_string()})).await?.into_result()?;
+    let r = x(&w.alice, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#) && l.contains(&format!(r#""used":"{}""#, 6 * ONE))), "{:?} {:?}", r.logs(), r.failures());
+    let flow: Value = w.brain.view("get_flow").args_json(json!({"vault": w.vault, "flow_id": f})).await?.json()?;
+    assert_eq!(flow["ledger"]["nodes"][0]["inbox"], json!((4 * ONE).to_string()), "the unused 4 wNEAR are the node's again");
+    let alloc: String = w.brain.view("get_allocated").args_json(json!({"vault": w.vault, "token": m.wnear.id()})).await?.json()?;
+    assert_eq!(alloc.parse::<u128>()?, 4 * ONE + 6 * ONE * BPS / 10_000, "the node's 4 and the fee set aside");
     Ok(())
 }

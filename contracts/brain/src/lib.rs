@@ -5,8 +5,9 @@
 //! knows which vault is talking: the predecessor. A vault only ever touches
 //! its own record.
 //!
-//! WHY: the full vault is ~640 KB, ~64 NEAR to publish per version. The body is
-//! ~10 KB (~1 NEAR); the brain is deployed normally (storage staked, refundable).
+//! WHY: the old full vault (one ~640 KB contract per user, removed 2026-11) cost
+//! ~64 NEAR to publish per version. The body is ~10 KB (~1 NEAR); the brain is
+//! deployed normally (storage staked, refundable).
 //!
 //! Three ways in, each with its own proof of who's talking:
 //! - `handle`: a request the vault forwards (relay `x`, a named door, `new`).
@@ -20,15 +21,15 @@
 //!   decides in this private callback; its answer becomes the value the vault's
 //!   `cb` receives. One relay round less per read. #[private]: only the brain.
 //!
-//! # Porting status
+//! # What the brain does
 //!
-//! Everything the full vault does, with the same request names and arguments
-//! as the vault's methods (apps and keepers change only the door: `x` with
-//! `{"<method>": <args>}`; stealth relayers call `exec` unchanged):
+//! Everything the old full vault did, with the same request names and arguments
+//! its methods had (apps and keepers call the relay's `x` door with
+//! `{"<method>": <args>}`; stealth relayers call `exec`):
 //! - core: trust, save/delete/fund/drain/resume/unstick, step, withdraw,
 //!   withdraw_to, set_keeper, act.
-//! - limits, hidden (fingerprints byte-identical to the vault's pins, remote
-//!   nodes included), stealth (same signed text), intents.
+//! - limits, hidden (fingerprints pinned with the keeper's, remote nodes
+//!   included), stealth (same signed text as the keeper's), intents.
 //! - oracle: market floors on recipes, EVM leaves, Solana pairs and Intents
 //!   pairs; Pyth / priceboard reads issued by the brain itself.
 //! - evm: templates and rule trees, built and checked here, signed by the
@@ -37,7 +38,7 @@
 //!   co-sign), signed by the vault's `sign`.
 //! - remote: flow nodes on other chains, keeper-reported outputs capped and floored.
 //!
-//! What can't port as is:
+//! What differs from the old full vault:
 //! - The vault's synchronous state: balance and storage are a snapshot in the
 //!   header. A race with another receipt only makes the vault's transfer fail,
 //!   never the brain's books.
@@ -51,7 +52,11 @@
 //! Storage: the brain pays for every vault's record and charges it back: when a
 //! record grows past what its vault paid, the answer includes a `pay` call
 //! from the vault for the difference (plus a small buffer). A vault that can't
-//! afford it is refused the change.
+//! afford it is refused the change, also ahead of a read (`finish`): a read's
+//! callback may fail and leave the growth stored, so it must be growth the vault
+//! can pay for, and anyone may then have it paid (`pay_storage`). The brain
+//! keeps STORAGE_MARGIN spare for growth whose `pay` hasn't landed yet, and
+//! refuses growth below it.
 
 mod close;
 pub mod fees;
@@ -91,6 +96,13 @@ pub const NEAR: &str = "near";
 const RECORD_OVERHEAD: u64 = 40;
 /// Paid on top of what's owed, so not every small change needs a payment.
 const PAY_BUFFER_BYTES: u128 = 500;
+/// How long NEAR an answer sent counts as spent (`spend`): a request's balance is
+/// read 1 block before the brain sees it (a few with a read in between), and
+/// the answer's transfer leaves the vault 1 block after. 8 blocks is a margin;
+/// a network so congested that receipts wait longer could still race.
+const SPENT_BLOCKS: u64 = 8;
+/// The brain's own NEAR kept spare beyond its storage, for records grown and not yet paid (`require_room`).
+const STORAGE_MARGIN: u128 = 10_000_000_000_000_000_000_000;
 
 // Gas. Mainnet caps a transaction at 300 Tgas prepaid, and a recipe's own calls
 // may ask for most of it (the library's Borrow on Rhea: 60 + 120), so every
@@ -138,7 +150,7 @@ pub enum Deposit {
     Fixed { yocto: U128 },
 }
 
-/// One contract call in a recipe (same as the vault's; see vault/src/lib.rs).
+/// One contract call in a recipe.
 #[near(serializers = [borsh, json])]
 #[serde(tag = "call", rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq)]
@@ -282,6 +294,16 @@ pub struct VaultState {
     pub keeper_fee: U128,
     /// Protocol fees in tokens, set aside out of the free balance until settled (fees.rs).
     pub owed_fees: Vec<(String, U128)>,
+    /// Every contract the vault may hold a token of, for `close` to read (close.rs):
+    /// true = used as a token (a balance it can't read refuses the close), false =
+    /// only trusted or called (maybe no token: a failed read is no balance).
+    pub tokens: Vec<(AccountId, bool)>,
+    /// The vault may have left funds inside another contract (it may call their
+    /// methods, or ran a node whose output wasn't measured): only its owner closes it.
+    pub elsewhere: bool,
+    /// NEAR answers sent out lately (block height, amount): the vault's reported
+    /// balance may not show it yet, so `free_near` doesn't count it (SPENT_BLOCKS).
+    pub spent: Vec<(u64, U128)>,
 }
 
 /// Requests a vault forwards: `{"<method>": {<args>}}`, the vault's own method
@@ -323,20 +345,24 @@ pub enum Req {
     SolOwnerWallet { wallet: Option<String> },
     SolTemplate { template: sol::SolTemplate },
     SolTemplateRemove { name: String },
-    // Owner or keeper.
-    Step { flow_id: u32, node: u16 },
-    StepHidden { flow_id: u32, node: u16, reveal: Node<Recipe>, salt: String },
+    // Owner only: direct signatures, outside any flow.
     IntentsSignSwap { token_in: AccountId, token_out: AccountId, amount_in: U128, min_out: U128, valid_secs: u64 },
-    IntentsWithdraw { token: AccountId, amount: U128 },
     EvmCall { name: String, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64 },
     SolSignSwap { message: String },
     SolSignTx { message: String },
+    // Owner or keeper.
+    /// Bring tokens back from the vault's Intents account (always to the vault).
+    IntentsWithdraw { token: AccountId, amount: U128 },
+    Step { flow_id: u32, node: u16 },
+    StepHidden { flow_id: u32, node: u16, reveal: Node<Recipe>, salt: String },
     StepRemote { flow_id: u32, node: u16, args: remote::RemoteArgs, #[serde(default)] reveal: Option<Node<Recipe>>, #[serde(default)] salt: Option<String> },
     RemoteReport { flow_id: u32, node: u16, out: Option<U128> },
     // Anyone.
     ApplyLimit { token: String },
     /// Send a token's owed protocol fees to the treasury (fees.rs).
     SettleFees { token: AccountId },
+    /// Have the vault pay what its record owes the brain (e.g. growth a failed read left).
+    PayStorage {},
     /// Delete the empty vault (close.rs): anyone with auto-close on, else the owner.
     Close { #[serde(default)] confirm_remote: bool, #[serde(default)] to: Option<AccountId> },
     /// A stealth owner's signed command (see stealth.rs).
@@ -390,9 +416,13 @@ pub(crate) enum Read {
     SolPrices(String),
     RemotePrices(remote::Begin),
     /// Closing: the vault's token balances (then its Intents balances) came back.
-    Close { to: AccountId, tokens: Vec<AccountId>, intents: Vec<String> },
+    Close { to: AccountId, tokens: Vec<(AccountId, bool)>, intents: Vec<String> },
+    /// Closing: the factory's tombstone of the name returned; only then the delete.
+    Tombstoned { to: AccountId },
     /// Settling fees: the vault's balance of the token.
     Settle { token: AccountId },
+    /// A Solana template transaction with a market field: the oracle answered.
+    SolTxPrices(String),
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
@@ -425,6 +455,8 @@ pub struct Brain {
     pub factory: AccountId,
     /// Protocol fees and their caps (fees.rs).
     pub fees: fees::Fees,
+    /// A fee raise waiting for its time (fees.rs).
+    pub pending_fee: Option<fees::PendingFee>,
 }
 
 /// A vault talking to the brain: who it is, what it reported, its record.
@@ -445,24 +477,23 @@ impl Brain {
     pub fn new(factory: AccountId, fees: Option<fees::Fees>) -> Self {
         let fees = fees.unwrap_or_else(|| fees::Fees::none(factory.clone()));
         fees.check();
-        Self { factory, fees }
+        Self { factory, fees, pending_fee: None }
     }
 
-    /// The fee admin moves the fees, within the caps fixed at deployment.
+    /// The fee admin moves the fees, within the caps fixed at deployment: a cut at
+    /// once, a raise after 24 hours (fees.rs).
     pub fn set_fee(&mut self, bps: u16, per_signature: U128) {
-        require!(env::predecessor_account_id() == self.fees.admin, "fee admin only");
-        let mut f = self.fees.clone();
-        f.bps = bps;
-        f.per_signature = per_signature;
-        f.check();
-        self.fees = f;
-        env::log_str(&format!(r#"EVENT_JSON:{{"standard":"flows","version":"1.0.0","event":"fees_set","data":[{{"bps":{bps},"per_signature":"{}"}}]}}"#, per_signature.0));
+        self.move_fees(bps, per_signature);
+        let at = self.pending_fee.as_ref().map_or(0, |p| p.active_at_ns.0);
+        env::log_str(&format!(r#"EVENT_JSON:{{"standard":"flows","version":"1.0.0","event":"fees_set","data":[{{"bps":{bps},"per_signature":"{}","active_at_ns":"{at}"}}]}}"#, per_signature.0));
     }
 
+    /// The fees in force, and a raise waiting for its time (`pending`, or null).
     pub fn get_fees(&self) -> near_sdk::serde_json::Value {
-        let f = &self.fees;
+        let f = self.fees_now();
+        let pending = self.pending_fee.as_ref().filter(|p| env::block_timestamp() < p.active_at_ns.0);
         near_sdk::serde_json::json!({"treasury": f.treasury, "admin": f.admin, "bps": f.bps, "cap_bps": f.cap_bps,
-            "per_signature": f.per_signature, "per_signature_cap": f.per_signature_cap})
+            "per_signature": f.per_signature, "per_signature_cap": f.per_signature_cap, "pending": pending})
     }
 
     /// A request forwarded by a vault (relay `x`, a named door, or `new`).
@@ -549,7 +580,9 @@ impl Brain {
             Read::SolPrices(m) => t.on_sol_prices(m),
             Read::RemotePrices(b) => t.on_remote_prices(b),
             Read::Close { to, tokens, intents } => t.on_close(to, tokens, intents, &self.factory),
+            Read::Tombstoned { to } => t.on_tombstoned(to),
             Read::Settle { token } => t.on_settle(token),
+            Read::SolTxPrices(m) => t.on_sol_tx_prices(m),
         };
         t.finish(r);
     }
@@ -612,6 +645,11 @@ impl Brain {
         fingerprint(&node, &salt)
     }
 
+    /// Whether `vault` was closed here (its name never gets a record again).
+    pub fn is_closed(&self, vault: AccountId) -> bool {
+        env::storage_has_key(&tomb_key(&vault))
+    }
+
     /// What this vault's record costs and what it has paid.
     pub fn get_storage(&self, vault: AccountId) -> (U128, U128) {
         let vs = must_load(&vault);
@@ -627,6 +665,7 @@ impl Brain {
         let name = vault.as_str().strip_suffix(&format!(".{}", self.factory)).unwrap_or("");
         require!(!name.is_empty() && !name.contains('.'), "not one of the factory's vaults");
         require!(load(&vault).is_none(), "already a vault");
+        require!(!env::storage_has_key(&tomb_key(&vault)), "that name belonged to a closed vault: it is never reused");
         let vs = VaultState {
             owner,
             keeper,
@@ -647,6 +686,9 @@ impl Brain {
             crosschain: false,
             keeper_fee: U128(0),
             owed_fees: Vec::new(),
+            tokens: Vec::new(),
+            elsewhere: false,
+            spent: Vec::new(),
         };
         Talk { vault, ctx, vs, need_after: 0 }.save(Answer::default()).send();
     }
@@ -664,9 +706,14 @@ impl Talk {
     pub(crate) fn finish(self, r: Reply) {
         match r {
             Reply::Answer(a) => self.save(a).send(),
-            // The read's callback saves again and asks for any payment then.
+            // The read's callback saves again and asks for the payment then. It
+            // may still fail, so the record is stored ahead of it only if the
+            // vault can pay for it now: that NEAR can't leave the vault without
+            // paying (every answer that moves it is `save`d), and anyone may
+            // have it paid (`pay_storage`). Never growth nobody can collect.
             Reply::Read(p) => {
                 store(&self.vault, &self.vs);
+                self.storage_due();
                 let _ = p.as_return();
             }
             Reply::Final(a) => a.send(),
@@ -707,6 +754,20 @@ impl Talk {
         })
     }
 
+    /// What the vault pays now for its stored record (what it owes plus the
+    /// buffer), 0 if nothing. Refused if its free NEAR can't cover it, or if the
+    /// brain's own spare is below the margin it floats growth on.
+    fn storage_due(&self) -> u128 {
+        let owed = record_cost(&self.vault, &self.vs).saturating_sub(self.vs.paid.0);
+        if owed == 0 {
+            return 0;
+        }
+        let pay = owed + PAY_BUFFER_BYTES * env::storage_byte_cost().as_yoctonear();
+        require!(pay <= self.free_near(), "the vault can't pay for its storage in the brain: add NEAR");
+        require_room();
+        pay
+    }
+
     pub(crate) fn balance_view(&self, token: &AccountId) -> (AccountId, String, String) {
         (token.clone(), "ft_balance_of".into(), format!(r#"{{"account_id":"{}"}}"#, self.vault))
     }
@@ -727,7 +788,7 @@ impl Talk {
             self.vs.crosschain = true;
         }
         match req {
-            Req::Close { confirm_remote, to } => return self.close(owner, confirm_remote, to),
+            Req::Close { confirm_remote, to } => return self.close(owner, keeper, confirm_remote, to),
             Req::Init { .. } | Req::InitStealth { .. } | Req::NftOnTransfer { .. } | Req::MtOnTransfer { .. } => env::panic_str("not here"),
             Req::Step { flow_id, node } => {
                 require!(!self.flow(flow_id).is_hidden(), "a hidden flow runs with step_hidden");
@@ -735,8 +796,11 @@ impl Talk {
                 return self.begin_step(&sender, flow_id, node, n, false);
             }
             Req::StepHidden { flow_id, node, reveal, salt } => return self.step_hidden(&sender, flow_id, node, reveal, salt),
+            // The direct signing doors skip every flow rule (trigger, inbox, the node's caps):
+            // only the owner may use them. The keeper reaches other chains through remote
+            // nodes (step_remote), which check all of that first.
             Req::IntentsSignSwap { token_in, token_out, amount_in, min_out, valid_secs } => {
-                crew_only();
+                owner_only();
                 return self.intents_sign_swap(owner, token_in, token_out, amount_in.0, min_out.0, valid_secs);
             }
             Req::IntentsWithdraw { token, amount } => {
@@ -744,21 +808,22 @@ impl Talk {
                 return self.intents_withdraw(token, amount.0).into();
             }
             Req::EvmCall { name, values, nonce, max_fee, max_tip, gas } => {
-                crew_only();
+                owner_only();
                 return self.evm_call(evm::EvmArgs { name, values, nonce, max_fee, max_tip, gas });
             }
             Req::SolSignSwap { message } => {
-                crew_only();
+                owner_only();
                 return self.sol_sign_swap(message);
             }
             Req::SolSignTx { message } => {
-                crew_only();
+                owner_only();
                 return self.sol_sign_tx(message);
             }
             Req::StepRemote { flow_id, node, args, reveal, salt } => return self.step_remote(&sender, flow_id, node, args, reveal, salt),
             Req::RemoteReport { flow_id, node, out } => return self.remote_report(&sender, flow_id, node, out).into(),
             Req::ApplyLimit { token } => self.apply_limit(token),
             Req::SettleFees { token } => return self.settle_fees(token),
+            Req::PayStorage {} => {} // `save` asks for what's owed
             Req::Exec { method, args, nonce, expires_ns, tgas, signature } => return self.exec(method, args, nonce.0, expires_ns.0, tgas, signature).into(),
             other => {
                 owner_only();
@@ -853,6 +918,7 @@ impl Talk {
         if token == NEAR {
             require!(!via_intents, "wrap NEAR first: Intents takes tokens");
             require!(amount <= self.free_near(), "not enough free NEAR");
+            self.spend(amount);
             return Answer::default().transfer(&to, amount).into();
         }
         let t: AccountId = token.parse().unwrap_or_else(|_| env::panic_str("bad token"));
@@ -864,6 +930,7 @@ impl Talk {
         let balance = amount_result(0).unwrap_or_else(|| env::panic_str("balance unknown"));
         let free = balance.saturating_sub(self.allocated(token.as_str()));
         require!(amount <= free, "not enough free balance");
+        self.note_token(token.as_str(), true);
         if via_intents {
             let verifier = self.vs.intents.as_ref().map(|c| c.verifier.clone()).unwrap_or_else(|| env::panic_str("run intents_setup first"));
             // The verifier credits the account named in `msg`, not the sender.
@@ -894,6 +961,9 @@ impl Talk {
                 require!(!m.is_empty() && m.len() <= 64, "bad method");
             }
             require!(t.methods.len() <= 16, "too many methods");
+            // What the vault may hold of it is read on close; one it may call can hold its funds.
+            self.note_token(t.contract.as_str(), false);
+            self.vs.elsewhere |= !t.methods.is_empty();
             self.vs.trusted.retain(|x| x.contract != t.contract);
             self.vs.trusted.push(t);
         }
@@ -908,6 +978,7 @@ impl Talk {
         for (i, n) in nodes.iter().enumerate() {
             self.check_node(n);
             self.check_gas(i, n);
+            self.note_node(n);
         }
         self.add_flow(FlowRec { name, ledger: Ledger::new(nodes.len()), inputs: flow::inputs(&nodes), hidden: Vec::new(), nodes })
     }
@@ -990,23 +1061,57 @@ impl Talk {
     }
 
     /// The vault's NEAR not held by flows, not needed for its own storage, minus
-    /// the reserve. From the balance the vault reported in this call.
+    /// the reserve. From the balance the vault reported in this call, less what
+    /// answers sent out lately (`spend`).
     pub(crate) fn free_near(&self) -> u128 {
+        self.near_beyond(self.allocated(NEAR))
+    }
+
+    /// The vault's NEAR beyond `held`, its storage, the reserve and what it just sent.
+    pub(crate) fn near_beyond(&self, held: u128) -> u128 {
         let storage = env::storage_byte_cost().as_yoctonear() * self.ctx.storage as u128;
-        self.ctx.balance.saturating_sub(storage).saturating_sub(RESERVE).saturating_sub(self.allocated(NEAR))
+        let sent = self.recently_spent();
+        self.ctx.balance.saturating_sub(storage).saturating_sub(RESERVE).saturating_sub(held).saturating_sub(sent)
+    }
+
+    /// The answer sends `amount` of the vault's free NEAR. The balance a request
+    /// reports was read when it reached the vault: a request racing this one (the
+    /// same block, a parallel transaction) would see this NEAR again and spend it
+    /// twice, out of the flows' NEAR and the reserve. So it counts as spent for
+    /// SPENT_BLOCKS, until any balance reported has it out.
+    pub(crate) fn spend(&mut self, amount: u128) {
+        if amount == 0 {
+            return;
+        }
+        let now = env::block_height();
+        self.vs.spent.retain(|(h, _)| now < h + SPENT_BLOCKS);
+        let full = self.vs.spent.len() >= 16;
+        match self.vs.spent.last_mut() {
+            Some((h, a)) if *h == now || full => {
+                *h = now;
+                a.0 += amount;
+            }
+            _ => self.vs.spent.push((now, U128(amount))),
+        }
+    }
+
+    fn recently_spent(&self) -> u128 {
+        let now = env::block_height();
+        self.vs.spent.iter().filter(|(h, _)| now < h + SPENT_BLOCKS).map(|(_, a)| a.0).sum()
     }
 
     /// Store the record; if it now costs more than the vault paid, the answer
     /// also makes the vault pay the difference (last action, so callbacks still
     /// find their own results at the indices they expect).
-    pub(crate) fn save(self, ans: Answer) -> Answer {
-        let owed = record_cost(&self.vault, &self.vs).saturating_sub(self.vs.paid.0);
+    pub(crate) fn save(mut self, ans: Answer) -> Answer {
+        let now = env::block_height();
+        self.vs.spent.retain(|(h, _)| now < h + SPENT_BLOCKS);
+        let pay = self.storage_due();
+        self.spend(pay);
         store(&self.vault, &self.vs);
-        if owed == 0 {
+        if pay == 0 {
             return ans;
         }
-        let pay = owed + PAY_BUFFER_BYTES * env::storage_byte_cost().as_yoctonear();
-        require!(pay <= self.free_near(), "the vault can't pay for its storage in the brain: add NEAR");
         ans.call(&env::current_account_id(), "pay", b"", pay, GAS_PAY)
     }
 
@@ -1032,6 +1137,16 @@ pub(crate) fn key(vault: &AccountId) -> Vec<u8> {
     [b"v:".as_slice(), vault.as_bytes()].concat()
 }
 
+/// A closed vault's tombstone (close.rs): the name never gets a record again.
+pub(crate) fn tomb_key(vault: &AccountId) -> Vec<u8> {
+    [b"t:".as_slice(), vault.as_bytes()].concat()
+}
+
+/// What a tombstone costs the brain's storage, kept out of the close's refund.
+pub(crate) fn tomb_cost(vault: &AccountId) -> u128 {
+    (RECORD_OVERHEAD + tomb_key(vault).len() as u64) as u128 * env::storage_byte_cost().as_yoctonear()
+}
+
 fn load(vault: &AccountId) -> Option<VaultState> {
     env::storage_read(&key(vault)).map(|b| VaultState::try_from_slice(&b).unwrap_or_else(|_| env::panic_str("bad record")))
 }
@@ -1042,6 +1157,14 @@ fn must_load(vault: &AccountId) -> VaultState {
 
 fn store(vault: &AccountId, vs: &VaultState) {
     env::storage_write(&key(vault), &borsh::to_vec(vs).unwrap());
+}
+
+/// Growth floats on the brain's own NEAR until its vault's `pay` lands (a later
+/// receipt), and several may be in flight at once. Below this much spare, growth
+/// is refused with a clear message, before the brain's storage stake runs out.
+fn require_room() {
+    let locked = env::storage_byte_cost().as_yoctonear() * env::storage_usage() as u128;
+    require!(env::account_balance().as_yoctonear() >= locked + STORAGE_MARGIN, "the brain is short of NEAR for its storage: its operator must top it up");
 }
 
 fn record_cost(vault: &AccountId, vs: &VaultState) -> u128 {

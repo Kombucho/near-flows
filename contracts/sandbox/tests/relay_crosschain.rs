@@ -1,7 +1,7 @@
 //! The last vault modules, through relay vaults: remote flow nodes (the NVDA
 //! take-profit ladder of remote.rs, same flow, same bounds), oracle market
-//! floors on a NEAR recipe, and EVM template calls; each against the full vault
-//! for gas. Build the wasm first: make build
+//! floors on a NEAR recipe, and EVM template calls, with their gas. Build the
+//! wasm first: make build
 
 mod common;
 mod ladder;
@@ -31,7 +31,7 @@ async fn ladder_world() -> anyhow::Result<(RelayWorld, Contract)> {
         x(&w.alice, &w.vault, "evm_template", json!({"template": t})).await?.into_result()?;
     }
     x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": common::single_source()}]}})).await?.into_result()?;
     price(&w, &pyth, 180, 0).await?;
     Ok((w, pyth))
 }
@@ -39,7 +39,7 @@ async fn ladder_world() -> anyhow::Result<(RelayWorld, Contract)> {
 async fn price(w: &RelayWorld, pyth: &Contract, usd: i64, age_s: i64) -> anyhow::Result<()> {
     let p = usd * 100_000_000;
     w.alice.call(pyth.id(), "set_price").args_json(json!({"price_id": NVDA_FEED, "price": p.to_string(), "conf": (p / 2000).to_string(),
-        "expo": -8, "ema": p.to_string(), "age_s": age_s})).transact().await?.into_result()?;
+        "expo": -8, "backup": p.to_string(), "age_s": age_s})).transact().await?.into_result()?;
     Ok(())
 }
 
@@ -78,7 +78,7 @@ async fn the_nvda_ladder_runs_on_a_relay_vault_with_the_same_bounds() -> anyhow:
         let v = w.vault.clone();
         async move { x(&who, &v, "remote_report", json!({"flow_id": f, "node": node, "out": out.map(|o| o.to_string())})).await }
     };
-    assert!(fails_with(&report(&w.keeper, 0, None).await?, "may still land"));
+    assert!(fails_with(&report(&w.keeper, 0, None).await?, "only the owner may say"));
     assert!(fails_with(&report(&w.keeper, 0, Some(min - 1)).await?, "below the signed minimum"));
     assert!(fails_with(&report(&w.keeper, 0, Some(eth_in * 20 + 1)).await?, "over the node's cap"));
     let got = 355_200_000_000_000_000u128;
@@ -98,18 +98,46 @@ async fn the_nvda_ladder_runs_on_a_relay_vault_with_the_same_bounds() -> anyhow:
     price(&w, &pyth, 400, 120).await?;
     assert!(fails_with(&step(2, evm_args(v4_values(1, false), 2)).await?, "no price fresher"));
     assert_eq!(inbox(&ledger_of(&w, f).await?, 2), third, "nothing taken");
+    // WHY no full-vault comparison any more: contracts/vault is gone. Its last
+    // figures (2026-11-06, same flow, same calls), for the record: step_remote
+    // buy 22.9 Tgas (relay 28.6), rung with an oracle read 30.1 (relay 36.0).
+    Ok(())
+}
 
-    // Gas against the full vault, same flow, same calls.
-    let full = ladder::world().await?;
-    let fv = full.vault.id();
-    let ff: u32 = full.alice.call(fv, "save_flow").args_json(json!({"name": "NVDA ladder", "nodes": ladder()})).max_gas().transact().await?.into_result()?.json()?;
-    full.alice.call(fv, "fund").args_json(json!({"flow_id": ff, "node": 0, "amount": eth_in.to_string()})).max_gas().transact().await?.into_result()?;
-    let r = ladder::step(&full, &full.keeper, ff, 0, evm_args(v4_values(1, true), 0)).await?;
-    println!("GAS full vault step_remote (buy): {:.1} Tgas", tgas(&r));
-    ladder::report(&full, &full.keeper, ff, 0, Some(got)).await?.into_result()?;
-    nvda_price(&full, 275, 0).await?;
-    let r = ladder::step(&full, &full.keeper, ff, 1, evm_args(v4_values(1, false), 1)).await?;
-    println!("GAS full vault step_remote (rung, oracle read): {:.1} Tgas", tgas(&r));
+/// The direct signing doors skip every flow rule (trigger, inbox, the node's caps): a keeper that
+/// could use them would swap at the template's fixed floor whenever it liked, and every try would
+/// cost the vault a signature fee. Only the owner may; the keeper reaches other chains through nodes.
+#[tokio::test]
+async fn the_keeper_cannot_use_the_direct_signing_doors() -> anyhow::Result<()> {
+    let w = relay_world_fees(|t| json!({"treasury": t, "admin": t, "cap_bps": 30, "bps": 10, "per_signature": (E24 / 100).to_string(), "per_signature_cap": (E24 / 20).to_string()})).await?;
+    w.worker.root_account()?.create_subaccount("treasury").initial_balance(NearToken::from_near(1)).transact().await?.into_result()?;
+    x(&w.alice, &w.vault, "evm_setup", json!({"signer": w.signer.id(), "chain_id": 4663u64,
+        "max_fee": GWEI.to_string(), "max_tip": (GWEI / 10).to_string(), "gas_cap": 1_500_000u64})).await?.into_result()?;
+    for t in common::templates("robinhood") {
+        x(&w.alice, &w.vault, "evm_template", json!({"template": t})).await?.into_result()?;
+    }
+    x(&w.alice, &w.vault, "sol_setup", json!({"signer": w.signer.id(), "max_cu_price": 1_000_000u64, "max_cu_limit": 1_400_000u32})).await?.into_result()?;
+    w.alice.transfer_near(&w.vault, NearToken::from_near(1)).await?.into_result()?;
+    let near_of = |who: near_workspaces::AccountId| {
+        let worker = w.worker.clone();
+        async move { anyhow::Ok(worker.view_account(&who).await?.balance.as_yoctonear()) }
+    };
+    let approve = json!({"name": "approve_nvda_permit2", "values": ["0", E18.to_string()], "nonce": 0, "max_fee": GWEI.to_string(), "max_tip": "0", "gas": 200_000u64});
+    let before = near_of(w.vault.clone()).await?;
+    for (door, args) in [
+        ("evm_call", approve.clone()),
+        ("sol_sign_tx", json!({"message": "AQABAg=="})),
+        ("sol_sign_swap", json!({"message": "AQABAg=="})),
+        ("intents_sign_swap", json!({"token_in": w.alice.id(), "token_out": w.keeper.id(), "amount_in": "1", "min_out": "1", "valid_secs": 600})),
+    ] {
+        let r = x(&w.keeper, &w.vault, door, args).await?;
+        assert!(fails_with(&r, "owner only"), "the keeper on {door}: {:?} {:?}", r.logs(), r.failures());
+        assert!(!r.logs().iter().any(|l| l.contains("_signed") || l.contains(r#""kind":"signature""#)), "{door}: nothing signed, no fee");
+    }
+    assert_eq!(near_of(w.vault.clone()).await?, before, "no signature fee paid for the keeper's tries");
+    // The owner still may.
+    let r = x(&w.alice, &w.vault, "evm_call", approve).await?;
+    assert!(r.logs().iter().any(|l| l.contains("evm_signed")), "{:?} {:?}", r.logs(), r.failures());
     Ok(())
 }
 
@@ -145,7 +173,7 @@ async fn a_recipe_with_a_market_floor_refuses_a_pool_pushed_off_the_market() -> 
     let set = |id: &'static str, usd_e8: i64, age: i64| {
         let (a, p) = (w.alice.clone(), pyth.clone());
         async move {
-            a.call(p.id(), "set_price").args_json(json!({"price_id": id, "price": usd_e8.to_string(), "conf": "0", "expo": -8, "ema": usd_e8.to_string(), "age_s": age}))
+            a.call(p.id(), "set_price").args_json(json!({"price_id": id, "price": usd_e8.to_string(), "conf": "0", "expo": -8, "backup": usd_e8.to_string(), "age_s": age}))
                 .transact().await?.into_result()?;
             anyhow::Ok(())
         }
@@ -154,8 +182,8 @@ async fn a_recipe_with_a_market_floor_refuses_a_pool_pushed_off_the_market() -> 
     set(USDC_ID, 100_000_000, 0).await?; // USDC $1
     x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": wnear.id()}, {"contract": usdc.id()}, {"contract": dex.id()}], "remove": []})).await?.into_result()?;
     x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "near", "contract": pyth.id(), "price_id": NEAR_ID, "backup": {"kind": "ema"}},
-        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_ID, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+        {"name": "near", "contract": pyth.id(), "price_id": NEAR_ID, "backup": common::backup(pyth.id(), NEAR_ID)},
+        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_ID, "backup": common::backup(pyth.id(), USDC_ID)}]}})).await?.into_result()?;
     let node = json!({"input": wnear.id(), "when": {"when": "now"}, "action": {"label": "Swap at market", "calls": [{"call": "ft", "receiver": dex.id(), "tgas": 50,
         "msg": format!(r#"{{"token_out":"{}","min_out":"{{min_out}}"}}"#, usdc.id())}], "out": usdc.id(), "min_out_per_in": null, "price": null,
         "market": {"sell": "near", "buy": "usdc", "dec_in": 18, "dec_out": 18, "slippage_bps": 100}}});

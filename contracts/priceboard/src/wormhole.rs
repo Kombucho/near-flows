@@ -14,6 +14,11 @@ use near_sdk::env;
 
 pub const RESPONSE_PREFIX: &[u8] = b"query_response_0000000000000000000|";
 pub const SOLANA: u16 = 1;
+/// eth_call at a block the requester names ("latest" or a number). Types 2
+/// (by timestamp) and 3 (with finality) aren't taken: finality on an L2 is
+/// minutes to hours old, too stale for a price, and the board checks the
+/// block's own time instead.
+pub const QT_ETH_CALL: u8 = 1;
 pub const QT_SOL_PDA: u8 = 5;
 
 /// Reads a byte string front to back; every read is bounds-checked.
@@ -156,6 +161,51 @@ pub fn parse_sol_pda(pc: &PerChain) -> Result<SolPda, &'static str> {
     q.done()?;
     r.done()?;
     Ok(SolPda { commitment, slice, slot, block_time_us, accounts })
+}
+
+/// One contract call the guardians made, and what it returned.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Call {
+    pub to: [u8; 20],
+    pub data: Vec<u8>,
+    pub result: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EthCall {
+    pub chain: u16,
+    /// What the requester asked for: "latest" or a hex block number (ASCII).
+    pub block_id: Vec<u8>,
+    pub block_num: u64,
+    pub block_hash: [u8; 32],
+    pub block_time_us: u64,
+    pub calls: Vec<Call>,
+}
+
+/// An eth_call query (type 1) on an EVM chain: every guardian ran the same
+/// calls at the same block and signed the results, with the block's number,
+/// hash and time. Layout from wormhole-solidity-sdk QueryResponse.sol
+/// (parseEthCallQueryResponse); checked against real responses in the tests.
+pub fn parse_eth_call(pc: &PerChain) -> Result<EthCall, &'static str> {
+    if pc.kind != QT_ETH_CALL || pc.chain == SOLANA {
+        return Err("not an EVM eth_call query");
+    }
+    let (mut q, mut r) = (Reader::new(&pc.request), Reader::new(&pc.response));
+    let block_id = q.var()?.to_vec();
+    let n = q.u8()?;
+    let (block_num, block_hash, block_time_us) = (r.u64()?, r.b32()?, r.u64()?);
+    if r.u8()? != n {
+        return Err("result count");
+    }
+    let mut calls = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let to: [u8; 20] = q.bytes(20)?.try_into().unwrap();
+        let data = q.var()?.to_vec();
+        calls.push(Call { to, data, result: r.var()?.to_vec() });
+    }
+    q.done()?;
+    r.done()?;
+    Ok(EthCall { chain: pc.chain, block_id, block_num, block_hash, block_time_us, calls })
 }
 
 /// What the guardians sign for a query response.

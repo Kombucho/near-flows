@@ -1,4 +1,4 @@
-//! Stealth vaults, as vault/src/stealth.rs: the owner is an Ed25519 KEY. The
+//! Stealth vaults: the owner is an Ed25519 KEY. The
 //! owner signs commands off chain; anyone (normally the keeper) submits them
 //! to the vault's `exec` door; the brain checks the signature and runs the
 //! command as the owner. A stealth vault is its own owner (`owner` = the
@@ -80,7 +80,7 @@ const NOT_COMMANDS: &[&str] = &["init", "init_stealth", "exec", "nft_on_transfer
 mod tests {
     use super::*;
 
-    // The vault's pinned vector (vault/src/stealth.rs, signed by the keeper's node:crypto).
+    // The pinned vector, signed by the keeper's node:crypto (scripts/keeper/src/stealth.test.ts).
     const PIN_TEXT: &str = "near-flows stealth v1\nvault: k7xq2m.vaults.near\nnonce: 1762400000000000000\nexpires_ns: 1762400600000000000\ntgas: 50\nmethod: withdraw_to\nargs: {\"token\":\"near\",\"amount\":\"1000\",\"to\":\"fresh-7f3a.near\",\"via_intents\":false}";
     const PIN_KEY: &str = "ed25519:FAe4sisG95oZ42w7buUn5qEE4TAnfTTFPiguZUHmhiF";
     const PIN_SIG: &str = "342a99949d4e2c41a51f4b5e8dc5b85519f0215d916ef5b9387e68392197c8f487903f25305dbe161e6ae895fd70276a4340bd3d73b0cee57db67d7b4e0ea601";
@@ -93,5 +93,18 @@ mod tests {
         let key = ed25519(&PIN_KEY.parse().unwrap());
         let sig: [u8; 64] = hex::decode(PIN_SIG).unwrap().try_into().unwrap();
         assert!(env::ed25519_verify(&sig, &text, &key));
+    }
+
+    /// WHY: the full vault ran a signed command as a call to itself, so it had to
+    /// keep every #[private] callback named on_* and refuse those names. Here a
+    /// command can only ever be a `Req` (the request enum): the brain's own doors
+    /// (handle, on_vault, on_read, pay) and the relay's (cb, x, new) are no `Req`,
+    /// so a signed command can never fake a callback, whatever it is called.
+    #[test]
+    fn a_signed_command_can_never_name_a_callback_or_a_door() {
+        for m in ["on_read", "on_vault", "handle", "pay", "cb", "x", "new", "on_measured"] {
+            let r: Result<Req, _> = near_sdk::serde_json::from_value(near_sdk::serde_json::json!({ m: {} }));
+            assert!(r.is_err(), "{m} must not be a request");
+        }
     }
 }

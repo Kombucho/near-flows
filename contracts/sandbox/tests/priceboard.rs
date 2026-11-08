@@ -1,5 +1,7 @@
-//! Memecoin prices for market floors (contracts/priceboard), read by the vault
-//! through Pyth's own interface.
+//! Memecoin prices on a price board (contracts/priceboard), behind Pyth's own
+//! read interface. A memecoin has no trusted price, so no market floor reads one:
+//! the vault names such a feed single_source and refuses a market floor on it;
+//! the owner's fixed floor bounds the trade.
 //! - Attested board: k of n attesters sign each price (Ed25519), the median is
 //!   kept. Trusts the attesters.
 //! - Wormhole board: a Wormhole Query response, signed by a quorum of guardians,
@@ -10,6 +12,7 @@
 
 mod board;
 mod common;
+mod relayw;
 
 use board::*;
 use common::wasm;
@@ -71,11 +74,10 @@ async fn attested_prices_need_k_fresh_signatures_from_real_attesters() -> anyhow
     // An old signed price replayed can't roll the board back.
     refused(push(&keeper, &board, vec![report(&a, MEME, 40_000, t - 90), report(&b, MEME, 40_000, t - 90)]).await?, "not newer");
 
-    // The average moves toward a new price by the time elapsed: 60 s of a 600 s window = 10% of the way.
+    // A new price 60 s later replaces it: the board keeps the latest, nothing else.
     let r = push(&keeper, &board, vec![report(&a, MEME, 61_300, t - 5), report(&b, MEME, 61_300, t - 5)]).await?;
     assert!(r.is_success(), "{:?}", r.failures());
-    let ema = price(&board, "get_ema_price_no_older_than", 600).await?.unwrap();
-    assert_eq!(ema["price"].as_str(), Some("52300")); // 51,300 + (61,300 - 51,300) x 60 / 600
+    assert_eq!(price(&board, "get_price_no_older_than", 60).await?.unwrap()["price"], json!("61300"));
 
     // Stale: once it's older than the reader's limit, there is no price.
     wait_until(&w, t + 30).await?;
@@ -99,66 +101,66 @@ async fn token(w: &Worker<Sandbox>, owner: &Account, sym: &str, decimals: u8) ->
 }
 
 #[tokio::test]
-async fn a_vault_swap_floor_follows_an_attested_memecoin_price() -> anyhow::Result<()> {
-    let w = near_workspaces::sandbox().await?;
+async fn a_memecoin_on_the_board_gets_no_market_floor_only_the_owners_fixed_floor() -> anyhow::Result<()> {
+    // A relay vault: the brain reads the board through Pyth's interface.
+    let relayw::RelayWorld { worker: w, alice, keeper, vault, .. } = relayw::relay_world().await?;
     let root = w.dev_create_account().await?;
-    let (alice, keeper) = (w.dev_create_account().await?, w.dev_create_account().await?);
     let (wnear, meme) = (token(&w, &root, "wNEAR", 18).await?, token(&w, &root, "MEME", 6).await?);
     let dex = w.dev_deploy(&wasm("mock_dex")).await?;
     dex.call("new").args_json(json!({"lst": wnear.id()})).transact().await?.into_result()?;
     let pyth = w.dev_deploy(&wasm("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
     let board = attested_board(&w, &keeper, 2).await?;
-    let vault = w.dev_deploy(&wasm("vault")).await?;
-    vault.call("new").args_json(json!({"owner": alice.id(), "keeper": keeper.id()})).transact().await?.into_result()?;
     for t in [&wnear, &meme] {
-        for who in [dex.id(), vault.id()] {
+        for who in [dex.id(), &vault] {
             root.call(t.id(), "storage_deposit").args_json(json!({"account_id": who})).deposit(NearToken::from_millinear(10)).transact().await?.into_result()?;
         }
     }
     root.call(meme.id(), "ft_transfer").args_json(json!({"receiver_id": dex.id(), "amount": (u128::MAX / 8).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
-    root.call(wnear.id(), "ft_transfer").args_json(json!({"receiver_id": vault.id(), "amount": (1_000 * ONE).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
-    alice.call(vault.id(), "trust").args_json(json!({"add": [{"contract": wnear.id()}, {"contract": meme.id()}, {"contract": dex.id()}], "remove": []})).transact().await?.into_result()?;
-    // NEAR from Pyth; the memecoin from the board (its own EMA as the backup). Up to 5% apart, under 60 s, confidence under 1%.
-    alice.call(vault.id(), "oracle_setup").args_json(json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 500, "feeds": [
-        {"name": "near", "contract": pyth.id(), "price_id": NEAR_ID, "backup": {"kind": "ema"}},
-        {"name": "meme", "contract": board.id(), "price_id": MEME, "backup": {"kind": "ema"}}]}})).transact().await?.into_result()?;
-    alice.call(pyth.id(), "set_price").args_json(json!({"price_id": NEAR_ID, "price": "200000000", "conf": "100000", "expo": -8, "ema": "200000000", "age_s": 0}))
+    root.call(wnear.id(), "ft_transfer").args_json(json!({"receiver_id": vault, "amount": (1_000 * ONE).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
+    relayw::x(&alice, &vault, "trust", json!({"add": [{"contract": wnear.id()}, {"contract": meme.id()}, {"contract": dex.id()}], "remove": []})).await?.into_result()?;
+    // NEAR from Pyth, confirmed by a second publisher; the memecoin from the board, single-source
+    // (said plainly: the board's price is whatever the attesters, or the curve at the slot read, say).
+    let r = relayw::x(&alice, &vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 500, "feeds": [
+        {"name": "near", "contract": pyth.id(), "price_id": NEAR_ID, "backup": common::backup(pyth.id(), NEAR_ID)},
+        {"name": "meme", "contract": board.id(), "price_id": MEME, "backup": common::single_source()}]}})).await?.into_result()?;
+    assert!(r.logs().iter().any(|l| l.contains(r#""feed":"meme""#) && l.contains("single-source feed: fixed floor + size caps apply")), "{:?}", r.logs());
+    alice.call(pyth.id(), "set_price").args_json(json!({"price_id": NEAR_ID, "price": "200000000", "conf": "100000", "expo": -8, "backup": "200000000", "age_s": 0}))
         .transact().await?.into_result()?;
-    // The attesters say $5.1204e-8 (the live curve's price at SOL $89.92).
+    // The attesters say $5.1204e-8 (the live curve's price at SOL $89.92): one post, right before the step.
     let t = now(&w).await?;
-    let r = push(&keeper, &board, vec![report(&attester(0), MEME, 51_204, t), report(&attester(1), MEME, 51_204, t)]).await?;
-    assert!(r.is_success(), "{:?}", r.failures());
+    push(&keeper, &board, vec![report(&attester(0), MEME, 51_204, t), report(&attester(1), MEME, 51_204, t)]).await?.into_result()?;
 
-    // Sell 100 wNEAR for MEME, at most 1% under the market.
-    let node = json!({"input": wnear.id(), "when": {"when": "now"}, "action": {"label": "Buy MEME", "out": meme.id(), "min_out_per_in": null, "price": null,
+    // Sell 100 wNEAR for MEME at most 1% under the market: refused, a market floor can't read a single-source feed.
+    let swap = |market: Value, per_in: Value| json!({"input": wnear.id(), "when": {"when": "now"}, "action": {"label": "Buy MEME", "out": meme.id(), "min_out_per_in": per_in, "price": null,
         "calls": [{"call": "ft", "receiver": dex.id(), "tgas": 50, "msg": format!(r#"{{"token_out":"{}","min_out":"{{min_out}}"}}"#, meme.id())}],
-        "market": {"sell": "near", "buy": "meme", "dec_in": 18, "dec_out": 6, "slippage_bps": 100}}});
-    let f: u32 = alice.call(vault.id(), "save_flow").args_json(json!({"name": "ape", "nodes": [node]})).max_gas().transact().await?.into_result()?.json()?;
-    alice.call(vault.id(), "fund").args_json(json!({"flow_id": f, "node": 0, "amount": (100 * ONE).to_string()})).max_gas().transact().await?.into_result()?;
+        "market": market}});
+    let flow = |node: Value| {
+        let (alice, vault) = (alice.clone(), vault.clone());
+        async move {
+            let f: u32 = relayw::x(&alice, &vault, "save_flow", json!({"name": "ape", "nodes": [node]})).await?.into_result()?.json()?;
+            relayw::x(&alice, &vault, "fund", json!({"flow_id": f, "node": 0, "amount": (100 * ONE).to_string()})).await?.into_result()?;
+            anyhow::Ok(f)
+        }
+    };
     let rate = |r: u128| dex.call("set_rate").args_json(json!({"token_in": wnear.id(), "token_out": meme.id(), "rate": r.to_string()})).transact();
-    let step = || keeper.call(vault.id(), "step").args_json(json!({"flow_id": f, "node": 0})).max_gas().transact();
+    let step = |f: u32| relayw::x(&keeper, &vault, "step", json!({"flow_id": f, "node": 0}));
+    rate(39_059_448_480_587_454_105).await?.into_result()?; // the market (Python fractions: 2e18 / 5.1204e10 / 1e12 per base unit)
+    let market = flow(swap(json!({"sell": "near", "buy": "meme", "dec_in": 18, "dec_out": 6, "slippage_bps": 100}), Value::Null)).await?;
+    let r = step(market).await?;
+    assert!(format!("{:?}", r.failures()).contains("meme: single-source feed: fixed floor + size caps apply (no market floor)"), "{:?} {:?}", r.logs(), r.failures());
+    assert!(!r.logs().join("\n").contains(r#""event":"step""#), "it didn't run");
 
-    // A pool pushed 5% under the market (Python fractions: fair = 2e18 / 5.1204e10 / 1e12 per base unit).
+    // The owner's fixed floor instead: $2 / $5.1204e-8 x 0.99 per wNEAR (scaled 1e24 per base unit:
+    // 38668853995781579564, Python fractions). A pool pushed 5% under the market is refused.
+    let fixed = flow(swap(Value::Null, json!("38668853995781579564"))).await?;
     rate(37_106_476_056_558_081_399).await?.into_result()?;
-    let r = step().await?;
-    let logs = r.logs().join("\n");
-    // Minimum per unit in, scaled 1e24 = $2 / $5.1204e-8 x 0.99 / 1e12 (Python fractions: 38668853995781579564).
-    assert!(logs.contains(r#""min_out_per_in":"38668853995781579564""#), "{logs}");
-    assert!(logs.contains("step_failed"), "{logs}");
+    let r = step(fixed).await?;
+    assert!(r.logs().join("\n").contains("step_failed"), "{:?} {:?}", r.logs(), r.failures());
     // Back at the market: it buys ~3.906e15 units (3.906 billion MEME) for 100 wNEAR.
     rate(39_059_448_480_587_454_105).await?.into_result()?;
-    let r = step().await?;
+    let r = step(fixed).await?;
     assert!(r.logs().join("\n").contains(r#""out":"3905944848058745""#), "{:?} {:?}", r.logs(), r.failures());
-
-    // No fresh memecoin price, no trade.
-    alice.call(vault.id(), "fund").args_json(json!({"flow_id": f, "node": 0, "amount": (100 * ONE).to_string()})).max_gas().transact().await?.into_result()?;
-    wait_until(&w, t + 60).await?;
-    alice.call(pyth.id(), "set_price").args_json(json!({"price_id": NEAR_ID, "price": "200000000", "conf": "100000", "expo": -8, "ema": "200000000", "age_s": 0}))
-        .transact().await?.into_result()?;
-    let r = step().await?;
-    assert!(format!("{:?}", r.failures()).contains("meme: no price fresher than 60 s"), "{:?}", r.failures());
-    assert!(!r.logs().join("\n").contains(r#""event":"step""#), "it didn't run");
     Ok(())
 }
 
@@ -243,10 +245,10 @@ async fn a_wormhole_board_prices_a_pump_curve_from_a_guardian_signed_query() -> 
     let pyth = w.dev_deploy(&wasm("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
     let board = w.dev_deploy(&wasm("priceboard")).await?;
-    board.call("new").args_json(json!({"owner": null, "ema_window_s": 600, "source": {"kind": "wormhole", "guardian_set": 0,
+    board.call("new").args_json(json!({"owner": null, "source": {"kind": "wormhole", "guardian_set": 0,
         "guardians": (0..3).map(|i| guardian_addr(&guardian(i))).collect::<Vec<_>>(), "pyth": pyth.id(), "quote_age_s": 60,
         "quotes": [{"mint": "0".repeat(64), "pyth_id": SOL_ID, "decimals": 9}]}})).transact().await?.into_result()?;
-    let sol = |age: i64| keeper.call(pyth.id(), "set_price").args_json(json!({"price_id": SOL_ID, "price": "8991598560", "conf": "4495799", "expo": -8, "ema": "8991598560", "age_s": age})).transact();
+    let sol = |age: i64| keeper.call(pyth.id(), "set_price").args_json(json!({"price_id": SOL_ID, "price": "8991598560", "conf": "4495799", "expo": -8, "age_s": age})).transact();
     let t = now(&w).await?;
     sol(0).await?.into_result()?;
     let (pump, data) = curve();

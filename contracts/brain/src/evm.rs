@@ -1,7 +1,8 @@
-//! EVM chains through NEAR Chain Signatures, as vault/src/evm.rs: the brain
+//! EVM chains through NEAR Chain Signatures: the brain
 //! BUILDS every transaction from a template the owner set (rule trees over the
-//! ABI: fixed / vault / at_most / floor / market / same / bytes / encoded /
-//! tuple / list), applies caps, floors and market minimums, counts spending,
+//! ABI: fixed / vault / at_most / floor / market / same / deadline / bytes /
+//! encoded / tuple / list), applies caps, floors, market minimums and its own
+//! deadlines, takes a keeper's transaction at the vault's next nonce, counts spending,
 //! and answers with the vault's `sign` call (the MPC key is derived from the
 //! vault's account, so the EVM address is still per vault). The signature
 //! comes back through the vault (`on_vault` EvmSigned): the brain assembles the
@@ -50,6 +51,9 @@ pub enum Arg {
     Encoded { types: String, args: Vec<Arg> },
     Tuple { args: Vec<Arg> },
     List { items: Vec<Arg> },
+    /// A swap's deadline: the brain writes block time + 5 min, whatever the keeper sends
+    /// (a far deadline lets a signed swap wait for a price that leaves its floor behind).
+    Deadline,
 }
 
 #[near(serializers = [borsh, json])]
@@ -81,6 +85,11 @@ pub struct EvmConfig {
     pub max_fee: U128,
     pub max_tip: U128,
     pub gas_cap: u64,
+    /// The nonce a keeper's next transaction must use (each signature request takes one):
+    /// a keeper can't sign ahead (a transaction held back to land later) or reuse a nonce.
+    /// The owner may sign at any nonce, to unblock or replace.
+    #[serde(default)]
+    pub next_nonce: u64,
 }
 
 /// A transaction the brain built, carried to the signature callback.
@@ -111,8 +120,9 @@ pub struct EvmArgs {
 impl Talk {
     pub(crate) fn evm_setup(&mut self, signer: AccountId, chain_id: u64, max_fee: U128, max_tip: U128, gas_cap: u64) -> Reply {
         require!(gas_cap <= 2_000_000, "gas cap: at most 2M");
-        let templates = self.vs.evm.as_ref().filter(|c| c.chain_id == chain_id).map(|c| c.templates.clone()).unwrap_or_default();
-        self.vs.evm = Some(EvmConfig { signer: signer.clone(), chain_id, address: None, templates, max_fee, max_tip, gas_cap });
+        let same = self.vs.evm.as_ref().filter(|c| c.chain_id == chain_id);
+        let (templates, next_nonce) = same.map(|c| (c.templates.clone(), c.next_nonce)).unwrap_or_default();
+        self.vs.evm = Some(EvmConfig { signer: signer.clone(), chain_id, address: None, templates, max_fee, max_tip, gas_cap, next_nonce });
         let args = near_sdk::serde_json::json!({"path": EVM_PATH, "predecessor": self.vault, "domain_id": ECDSA_DOMAIN}).to_string();
         self.read(vec![(signer, "derived_public_key".into(), args)], Read::EvmAddress, GAS_READ)
     }
@@ -149,7 +159,7 @@ impl Talk {
         cfg.templates.iter().find(|t| t.name == name).cloned().unwrap_or_else(|| env::panic_str("refused: no such template"))
     }
 
-    /// Owner or keeper: build, check and have template `a.name` signed.
+    /// Owner only (a keeper goes through remote nodes): build, check and have template `a.name` signed.
     pub(crate) fn evm_call(&mut self, a: EvmArgs) -> Reply {
         let t = self.evm_template_named(&a.name);
         let feeds = market_feeds(&leaves(&t));
@@ -157,6 +167,7 @@ impl Talk {
             return self.evm_build(a, &[]);
         }
         // Market minimums: the brain reads the prices, then builds in `on_read`.
+        self.require_confirmed(&feeds);
         let views = self.feed_views(&feeds);
         self.need_after = GAS_SIGN.as_tgas() + GAS_SIGNED.as_tgas() + crate::RELAY_TGAS;
         self.read(views, Read::EvmPrices(a), GAS_BUILD)
@@ -171,20 +182,30 @@ impl Talk {
     fn evm_build(&mut self, a: EvmArgs, prices: &[(String, u128)]) -> Reply {
         let cfg = self.vs.evm.clone().unwrap_or_else(|| env::panic_str("run evm_setup first"));
         let t = self.evm_template_named(&a.name);
-        let (tx, _) = self.evm_prepare(&cfg, &t, a.values, a.nonce, a.max_fee, a.max_tip, a.gas, prices);
+        let (tx, _) = self.evm_prepare(&cfg, &t, a.values, a.nonce, a.max_fee, a.max_tip, a.gas, prices, false);
         let (ans, carry) = evm_sign_call(&cfg.signer, &tx);
         self.charge_signature(ans).then("on_vault", near_sdk::borsh::to_vec(&Next::EvmSigned(carry)).unwrap(), GAS_SIGNED).into()
     }
 
     /// Build template `t` with `values`: caps, floors and market minimums applied,
-    /// spending counted. Returns the unsigned transaction and each leaf's number.
+    /// deadlines the brain's, spending counted. A keeper's transaction takes the vault's
+    /// next nonce and the owner's fee cap. Returns the unsigned transaction and each leaf's number.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn evm_prepare(&mut self, cfg: &EvmConfig, t: &EvmTemplate, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64, prices: &[(String, u128)]) -> (Eip1559, Vec<Option<u128>>) {
+    pub(crate) fn evm_prepare(&mut self, cfg: &EvmConfig, t: &EvmTemplate, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64, prices: &[(String, u128)], keeper: bool) -> (Eip1559, Vec<Option<u128>>) {
         let name = t.name.clone();
         let me = parse_address(cfg.address.as_deref().unwrap_or_else(|| env::panic_str("the vault's EVM address isn't known yet"))).unwrap();
         let rules = leaves(t);
         require!(values.len() == rules.len(), format!("one value per leaf ({})", rules.len()));
-        let nums = numbers(&rules, &values, prices);
+        let nums = numbers(&rules, &values, prices, deadline_s() as u128);
+        // Each request reserves its nonce. A keeper may only take the next one: no signing
+        // ahead (a swap held back to land once its floor is stale), no reusing one.
+        if keeper {
+            require!(nonce == cfg.next_nonce, format!("refused: nonce {nonce}: the vault's next EVM nonce is {} (the owner can sign at any nonce to move it)", cfg.next_nonce));
+        }
+        self.vs.evm.as_mut().unwrap().next_nonce = cfg.next_nonce.max(nonce.saturating_add(1));
+        // A fee under the network's base fee would hold that nonce, and every later step, hostage:
+        // a keeper's transaction offers the owner's cap (EIP-1559 charges base fee + tip, not the cap).
+        let max_fee = if keeper { cfg.max_fee } else { max_fee };
         let tys = sig::args(&t.function).unwrap();
         let mut at = 0;
         let vals: Vec<Val> = t.args.iter().zip(&tys).map(|(r, ty)| build(r, ty, &me, &nums, &mut at)).collect();
@@ -229,7 +250,19 @@ impl Talk {
 
     pub(crate) fn on_evm_signed(&mut self, tx: TxJson) -> Reply {
         let signed = self.evm_emit_signed(&tx);
+        if signed.is_none() {
+            self.evm_unreserve(&tx);
+        }
         Answer::default().ret(&signed.unwrap_or_else(|| "null".into())).into()
+    }
+
+    /// Not signed: nothing can use its nonce, so it's the next again (unless a later request took one).
+    pub(crate) fn evm_unreserve(&mut self, tx: &TxJson) {
+        if let Some(c) = self.vs.evm.as_mut() {
+            if c.next_nonce == tx.nonce.saturating_add(1) {
+                c.next_nonce = tx.nonce;
+            }
+        }
     }
 }
 
@@ -343,6 +376,10 @@ fn check_rule(r: &mut Arg, ty: &Ty, kinds: &mut Vec<Leaf>, depth: u8) {
             kinds.push(Leaf::Min)
         }
         (Arg::Same { .. }, Ty::Uint(_)) => kinds.push(Leaf::Same),
+        (Arg::Deadline, Ty::Uint(b)) => {
+            require!(*b >= 40, format!("leaf {i}: a deadline is uint40 or wider"));
+            kinds.push(Leaf::Other)
+        }
         (Arg::Bytes { hex: h }, Ty::Bytes) => {
             *h = h.to_lowercase();
             let b = hex::decode(h.trim_start_matches("0x")).unwrap_or_else(|_| env::panic_str("bytes: hex"));
@@ -384,6 +421,7 @@ fn rule_name(r: &Arg) -> &'static str {
         Arg::Encoded { .. } => "encoded",
         Arg::Tuple { .. } => "tuple",
         Arg::List { .. } => "list",
+        Arg::Deadline => "deadline",
     }
 }
 
@@ -416,14 +454,24 @@ pub(crate) fn market_feeds(rules: &[Arg]) -> Vec<String> {
     out
 }
 
+/// The deadline the brain signs: block time + 5 minutes, in seconds.
+pub(crate) fn deadline_s() -> u64 {
+    env::block_timestamp() / 1_000_000_000 + crate::remote::EVM_TTL_S
+}
+
 /// The number each numeric leaf ends up with: amounts capped, minimums at least
-/// their floor (and the market's, from `prices`), `same` copied. None for non-numeric leaves.
-fn numbers(rules: &[Arg], values: &[U128], prices: &[(String, u128)]) -> Vec<Option<u128>> {
+/// their floor (and the market's, from `prices`), deadlines `deadline`, `same` copied.
+/// None for non-numeric leaves.
+fn numbers(rules: &[Arg], values: &[U128], prices: &[(String, u128)], deadline: u128) -> Vec<Option<u128>> {
     let mut nums: Vec<Option<u128>> = vec![None; rules.len()];
     for (i, r) in rules.iter().enumerate() {
-        if let Arg::AtMost { max } = r {
-            require!(values[i].0 <= max.0, format!("refused: leaf {i} over its cap"));
-            nums[i] = Some(values[i].0);
+        match r {
+            Arg::AtMost { max } => {
+                require!(values[i].0 <= max.0, format!("refused: leaf {i} over its cap"));
+                nums[i] = Some(values[i].0);
+            }
+            Arg::Deadline => nums[i] = Some(deadline),
+            _ => {}
         }
     }
     for (i, r) in rules.iter().enumerate() {

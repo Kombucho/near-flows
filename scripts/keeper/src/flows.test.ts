@@ -78,3 +78,4 @@ test("no free work: a vault that can't pay its keeper's price is skipped, with t
   assert.match(m, /keeper fee unpaid/);
   assert.ok(m.includes(`run your own keeper for free: ${REPO_URL} (AGENTS.md)`), m);
 });
+

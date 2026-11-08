@@ -1,0 +1,21 @@
+# Fly.io app for the live keeper (a worker: no HTTP service, always on).
+#   fly launch --no-deploy --copy-config --name <app>      (once)
+#   fly secrets set KEEPER_PRIVATE_KEY=ed25519:... PYTH_API_KEY=...
+#   fly deploy --config scripts/keeper/fly.toml --dockerfile scripts/keeper/Dockerfile .
+app = "near-flows-keeper"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  SUFFIX = "fl06"
+  NEAR_NETWORK = "testnet"
+  TICK = "30"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[processes]
+  app = "./live.sh"

@@ -99,6 +99,22 @@ fn output_is_split_along_routes_and_the_rest_goes_back_to_free() {
 }
 
 #[test]
+fn a_partial_fill_keeps_the_unused_input_in_its_node() {
+    let f = flow();
+    let mut l = Ledger::new(f.len());
+    l.fund(&f, 0, 100).unwrap();
+    assert_eq!(l.begin(&f, 0, 0, None, false), Ok(100));
+    // 60 used for 150 USDC, 40 came back: the 40 are the node's again, not free.
+    assert_eq!(l.finish_node_partial(&f[0], 0, 150, 40), Ok(vec![("usdc".into(), 60)]));
+    assert_eq!((l.nodes[0].inbox, l.nodes[0].running, l.nodes[2].inbox), (40, 0, 90));
+    assert_eq!(l.holdings(&f), BTreeMap::from([("near".into(), 40), ("usdc".into(), 90)]));
+    // Never more back than the step took.
+    assert_eq!(l.begin(&f, 0, 0, None, false), Ok(40));
+    l.finish_node_partial(&f[0], 0, 1, 1_000).unwrap();
+    assert_eq!(l.nodes[0].inbox, 40);
+}
+
+#[test]
 fn one_step_at_a_time() {
     let f = flow();
     let mut l = Ledger::new(f.len());

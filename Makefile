@@ -7,8 +7,6 @@ build:
 	cd contracts/mock_ft && cargo near build non-reproducible-wasm --no-abi
 	cd contracts/bazaar && cargo near build non-reproducible-wasm --no-abi
 	cd contracts/mock_nft && cargo near build non-reproducible-wasm --no-abi
-	cd contracts/vault && cargo near build non-reproducible-wasm --no-abi
-	cd contracts/factory && cargo near build non-reproducible-wasm --no-abi
 	cd contracts/mock_dex && cargo near build non-reproducible-wasm --no-abi
 	cd contracts/mock_signer && cargo near build non-reproducible-wasm --no-abi
 	cd contracts/mock_pyth && cargo near build non-reproducible-wasm --no-abi
@@ -25,7 +23,8 @@ test:
 	cd contracts && cargo test -p math -p engine
 	cd contracts && cargo test -p market
 	cd contracts && cargo test -p bazaar
-	cd contracts && cargo test -p flow -p vault -p solguard -p priceboard
+	# solguard's template tests build their messages with its testkit feature.
+	cd contracts && cargo test -p flow -p solguard -p priceboard --features solguard/testkit
 	cd contracts && cargo test -p relay -p brain
 
 # Integration tests: real wasm in a local NEAR node (downloads the sandbox binary on first run).

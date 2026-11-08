@@ -37,7 +37,7 @@ Check: `ls scripts/keeper/node_modules/near-api-js` exists.
 
 ```
 make build    # every contract's wasm, into contracts/target/near/<name>/<name>.wasm
-make test     # unit tests (math, engine, market, bazaar, flow, vault, relay, brain...)
+make test     # unit tests (math, engine, market, bazaar, flow, solguard, priceboard, relay, brain)
 cd scripts/keeper && npm test    # keeper unit tests (pure logic, no network)
 ```
 
@@ -118,6 +118,7 @@ set -a; . ./.env; set +a
 npm run flows -- --once            # dry run: prints what is due, sends nothing
 npm run flows -- --send --once     # one real round
 npm run flows -- --send            # keep running (every 30 s; --tick <s> to change)
+npm run flows -- --send --board <board>   # also post the board prices (and backups) a vault reads, just before its step; never on a timer
 ```
 
 Check: the dry run's last line reads `1 of N vault(s) name this keeper, 0 step(s) sent (dry run)` and lists your due steps. After `--send`, the steps show up on https://testnet.nearblocks.io/address/<vault>, and the brain's `get_vault` shows the nodes' `runs` going up and `inbox` going down. The key comes from `KEEPER_PRIVATE_KEY` or `~/.near-credentials/testnet/$KEEPER_ACCOUNT_ID.json`.
@@ -153,11 +154,11 @@ What it costs (NEAR, testnet faucet money; from DEPLOY-RELAY.md, measured by rep
 | publish (relay global code) | nf-relay | 1.00 | **no: burned** |
 | priceboard | nf-board | 2.53 (2.529 locked) | yes: delete the account |
 | vault + flow | nf-owner | 6.32 (1 into the vault, 5 sent to it, token and Rhea storage, gas) | the vault's NEAR: withdraw it. Its 0.05 reserve, its own storage and token storage deposits (~0.14) stay |
-| later | nf-keeper | gas for steps and Pyth pushes | - |
+| later | nf-keeper | gas for steps and the price posts just before them | - |
 
 About 20.4 NEAR in total across 5 faucet accounts, each within its own 10 NEAR. Rollback order: withdraw from the vault first (it needs the brain), then delete the board, factory and brain (`near account delete-account <acc> beneficiary <yours> network-config testnet sign-with-legacy-keychain send`).
 
-Checks: `STEP=check` prints `factory.get_brain` = your brain, `vault.brain_id` = your brain, a `get_code_hash`, the vault's record cost and what it paid, and each Pyth feed's state. A Pyth feed that doesn't exist yet makes every market floor or price trigger refuse with "no price fresher than 60 s" (that's correct). Push it with the keeper's `npm run pyth` (DEPLOY-RELAY.md has the command).
+Checks: `STEP=check` prints `factory.get_brain` = your brain, `vault.brain_id` = your brain, a `get_code_hash`, the vault's record cost and what it paid, and each feed's price on the price board (every feed is read from there: Pyth's NEAR receiver refuses today's updates). Every feed that sets a market floor has a backup from a different publisher (Pyth's ETH/SOL/USDC backed by Chainlink on Arbitrum, Chainlink NEAR on Arbitrum backed by Optimism); NVDA has none and is set up `single_source` (it fires triggers, no market floor reads it: fixed floor + size caps apply). The board keeps no average and nothing posts on a timer: prices go up on demand, just before a step (`npm run flows -- --send --board <board>`), so stale prices between steps are normal. A step without fresh prices refuses with "no price fresher than 60 s" (that's correct). To post by hand: `npm run pyth -- --board <board> --vault <vault>` and `npm run chainlink-price -- --board <board> --vault <vault>` (DEPLOY-RELAY.md, "Price feeds"). The script's board is attested by the keeper, so its prices are keeper-vouched until a Wormhole Query API key makes the Evm board possible.
 
 Your brain's fees are set at deploy (`FEES` in the script: 10 bps, cap 30; 0.01 NEAR per cross-chain signature, cap 0.05). To run a brain that never charges anything, deploy it with `"fees": null`. Then run your keeper as in path (a) with `FACTORY_ID=nf-relay-$SUFFIX.testnet`.
 
