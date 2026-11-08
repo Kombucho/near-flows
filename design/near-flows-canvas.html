@@ -1,0 +1,329 @@
+<title>NEAR Flows Canvas</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Klee+One:wght@400;600&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
+<style>
+/* Layout: one graph-paper board, FigJam style. Chains are frames, boxes are "what + where", lines are rules, dashed lines are cross-chain hops. */
+:root {
+  --paper: #f4f7f5; --sheet: #ffffff; --grid: #dfe8e3; --ink: #23305c; --ink-soft: #5a6488; --line: #c5cfe0;
+  --marker: #fff0a0; --mint: #cfeedd; --mint-ink: #1f6b4a; --sky: #dbe7ff; --stamp: #c8402e; --stamp-soft: #fbe3de; --violet: #e7defd;
+  --sol: #e9e1ff; --sol-ink: #5b3fb8; --rh: #ddf3e6; --rh-ink: #1f6b4a; --near: #e2ecff; --near-ink: #2c4fa0;
+  --f-display: "DotGothic16", "Zen Kaku Gothic New", system-ui, sans-serif;
+  --f-body: "Zen Kaku Gothic New", system-ui, -apple-system, sans-serif;
+  --f-hand: "Klee One", "Zen Kaku Gothic New", cursive;
+  --f-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --paper: #161b2b; --sheet: #1d2336; --grid: #252c43; --ink: #e6eaf7; --ink-soft: #a3abc7; --line: #39425f;
+  --marker: #5a5222; --mint: #1f3d33; --mint-ink: #8fe0b8; --sky: #253457; --stamp: #ff7a63; --stamp-soft: #4a2622; --violet: #352d55;
+  --sol: #2c2450; --sol-ink: #c3b2ff; --rh: #1d3a2d; --rh-ink: #8fe0b8; --near: #1f2c4d; --near-ink: #a9c1ff;
+  color-scheme: dark } }
+:root[data-theme="dark"] {
+  --paper: #161b2b; --sheet: #1d2336; --grid: #252c43; --ink: #e6eaf7; --ink-soft: #a3abc7; --line: #39425f;
+  --marker: #5a5222; --mint: #1f3d33; --mint-ink: #8fe0b8; --sky: #253457; --stamp: #ff7a63; --stamp-soft: #4a2622; --violet: #352d55;
+  --sol: #2c2450; --sol-ink: #c3b2ff; --rh: #1d3a2d; --rh-ink: #8fe0b8; --near: #1f2c4d; --near-ink: #a9c1ff;
+  color-scheme: dark }
+
+* { box-sizing: border-box }
+html, body { height: 100% }
+body { background: var(--paper); color: var(--ink); font-family: var(--f-body); font-size: 15px; line-height: 1.45 }
+.app { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 14px 24px; max-width: 1560px; margin: 0 auto; display: grid; gap: 12px }
+
+.top { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px }
+.brand { display: flex; align-items: center; gap: 10px }
+.hanko { width: 40px; height: 40px; border: 2.5px solid var(--stamp); border-radius: 50%; color: var(--stamp); display: grid; place-items: center; font-family: var(--f-display); font-size: 13px; transform: rotate(-8deg) }
+h1 { font-family: var(--f-display); font-size: 22px; font-weight: 400; margin: 0; letter-spacing: .03em }
+.vault { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-soft); background: var(--sheet); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px }
+.spacer { flex: 1 }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; color: var(--ink-soft) }
+.legend span { display: inline-flex; align-items: center; gap: 6px }
+.lg-box { width: 18px; height: 12px; border: 1.5px solid var(--ink); border-radius: 3px; background: var(--sheet) }
+.lg-rule { width: 22px; border-top: 2px solid var(--ink) }
+.lg-hop { width: 22px; border-top: 2px dashed var(--stamp) }
+button { font: inherit; cursor: pointer }
+.run { font-family: var(--f-display); font-size: 15px; letter-spacing: .05em; color: var(--sheet); background: var(--ink); border: 0; border-radius: 8px; padding: 9px 18px; box-shadow: 0 3px 0 var(--ink-soft) }
+.run:active { transform: translateY(2px); box-shadow: 0 1px 0 var(--ink-soft) }
+.run:disabled { opacity: .55; cursor: default }
+.ghost { font-size: 13px; color: var(--ink); background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px }
+button:focus-visible, .node:focus-visible { outline: 2.5px solid var(--stamp); outline-offset: 2px }
+
+/* Board */
+.board-wrap { position: relative; border: 1px solid var(--line); border-radius: 12px; overflow: auto; background:
+  linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 24px 24px,
+  linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 24px 24px, var(--paper) }
+.board-size { position: relative }
+.board { position: absolute; left: 0; top: 0; width: 1500px; height: 860px; transform-origin: 0 0 }
+svg.wires { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none }
+.wire { fill: none; stroke: var(--ink-soft); stroke-width: 2 }
+.wire.hop { stroke: var(--stamp); stroke-dasharray: 8 7; stroke-width: 2.4 }
+.wire.live { stroke: var(--ink); stroke-width: 3 }
+.wire.hop.live { stroke: var(--stamp); animation: march 0.6s linear infinite }
+@keyframes march { to { stroke-dashoffset: -15 } }
+.dot { fill: var(--stamp) }
+
+.frame { position: absolute; border-radius: 14px; border: 1.5px solid var(--line) }
+.frame .tab { position: absolute; top: -13px; left: 16px; font-family: var(--f-display); font-size: 13px; letter-spacing: .08em; padding: 3px 10px; border-radius: 6px }
+.frame .addr { position: absolute; top: 10px; right: 14px; font-family: var(--f-mono); font-size: 11px; opacity: .8 }
+.f-sol { background: color-mix(in srgb, var(--sol) 55%, transparent) } .f-sol .tab, .f-sol .addr { color: var(--sol-ink) } .f-sol .tab { background: var(--sol) }
+.f-rh { background: color-mix(in srgb, var(--rh) 55%, transparent) } .f-rh .tab, .f-rh .addr { color: var(--rh-ink) } .f-rh .tab { background: var(--rh) }
+.f-near { background: color-mix(in srgb, var(--near) 55%, transparent) } .f-near .tab, .f-near .addr { color: var(--near-ink) } .f-near .tab { background: var(--near) }
+
+.node { position: absolute; width: 196px; background: var(--sheet); border: 1.5px solid var(--ink); border-radius: 8px; padding: 9px 11px 10px; box-shadow: 3px 3px 0 var(--line); cursor: grab; user-select: none; touch-action: none; transition: box-shadow .2s, transform .2s }
+.node.small { width: 168px; padding: 7px 10px 8px }
+.node.dragging { cursor: grabbing; box-shadow: 6px 6px 0 var(--line) }
+.node.sel { border-color: var(--stamp); box-shadow: 3px 3px 0 var(--stamp-soft) }
+.node .what { font-weight: 700; font-size: 15px }
+.node .where { font-size: 12.5px; color: var(--ink-soft) }
+.node .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px }
+.chip { font-size: 11.5px; padding: 1px 7px; border-radius: 10px; background: var(--marker); color: var(--ink) }
+.node .out { margin-top: 6px; font-family: var(--f-hand); font-size: 13.5px; color: var(--mint-ink); min-height: 0; font-variant-numeric: tabular-nums }
+.node .out:empty { display: none }
+.node.busy { animation: pulse .8s ease-in-out infinite }
+.node.done { background: color-mix(in srgb, var(--mint) 60%, var(--sheet)) }
+.node.refused { background: var(--stamp-soft) }
+@keyframes pulse { 50% { transform: translateY(-3px); box-shadow: 3px 7px 0 var(--line) } }
+.stamp { position: absolute; right: -14px; top: -16px; font-family: var(--f-display); font-size: 12px; color: var(--stamp); border: 2px solid var(--stamp); border-radius: 6px; padding: 2px 6px; background: var(--sheet); transform: rotate(8deg); pointer-events: none }
+
+.rule { position: absolute; transform: translate(-50%, -50%); font-size: 12px; background: var(--sheet); border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; white-space: nowrap; color: var(--ink) }
+.rule.hop { border-color: var(--stamp); color: var(--stamp); font-family: var(--f-display); letter-spacing: .04em }
+
+/* Under the board */
+.below { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 12px }
+@media (max-width: 760px) { .below { grid-template-columns: 1fr } }
+.card { background: var(--sheet); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-width: 0 }
+.label { font-family: var(--f-display); letter-spacing: .08em; font-size: 12px; color: var(--ink-soft); text-transform: uppercase }
+.card h2 { font-size: 17px; margin: 4px 0 8px }
+.card dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 13.5px }
+.card dt { color: var(--ink-soft) }
+.card dd { margin: 0 }
+.log { list-style: none; margin: 6px 0 0; padding: 0; font-family: var(--f-mono); font-size: 12.5px; max-height: 190px; overflow: auto; display: grid; gap: 3px }
+.log li.no { color: var(--stamp) }
+.log li.ok::before { content: "✓ "; color: var(--mint-ink) }
+.log li.no::before { content: "✕ " }
+.log li.hop::before { content: "⇢ "; color: var(--stamp) }
+.note { font-family: var(--f-hand); color: var(--ink-soft); font-size: 13px }
+@media (prefers-reduced-motion: reduce) { .node.busy, .wire.hop.live { animation: none } }
+</style>
+
+<div class="app">
+  <header class="top">
+    <div class="brand"><div class="hanko">流</div><h1>NEAR Flows</h1></div>
+    <span class="vault">alice.flows.near · 1 vault · 3 chains · keyless</span>
+    <div class="spacer"></div>
+    <div class="legend" aria-label="How to read the board">
+      <span><i class="lg-box"></i>box: what and where</span>
+      <span><i class="lg-rule"></i>line: a rule</span>
+      <span><i class="lg-hop"></i>dashed: hop to another chain</span>
+    </div>
+    <button class="ghost" id="reset">Reset</button>
+    <button class="run" id="run">Run flow</button>
+  </header>
+
+  <div class="board-wrap" id="wrap">
+    <div class="board-size" id="size">
+      <div class="board" id="board">
+        <svg class="wires" id="wires"></svg>
+      </div>
+    </div>
+  </div>
+
+  <div class="below">
+    <section class="card" id="inspector" aria-live="polite"></section>
+    <section class="card">
+      <div class="label">Steps</div>
+      <ol class="log" id="log"><li class="note">Press Run flow. Each box fires when the one before it delivers.</li></ol>
+    </section>
+  </div>
+  <p class="note">Prototype. Figures for the Solana coin, Meteora fees, the NVDA ladder and the Rhea refusal come from the local fork demo; the coin LP, the Intents hop, take-profit and NFT legs are planned. Drag boxes to rearrange.</p>
+</div>
+
+<script>
+const frames = [
+  { id: "sol", cls: "f-sol", name: "SOLANA", addr: "CBbbB6PN…vjhG", x: 30, y: 40, w: 980, h: 230 },
+  { id: "rh", cls: "f-rh", name: "ROBINHOOD CHAIN", addr: "0x5869…8e25", x: 30, y: 320, w: 1440, h: 270 },
+  { id: "near", cls: "f-near", name: "NEAR", addr: "alice.flows.near", x: 30, y: 640, w: 980, h: 190 },
+];
+const nodes = [
+  { id: "s1", what: "Buy a coin", where: "pump.fun", x: 80, y: 105, chips: ["max 0.1 SOL", "floor from curve"], out: "0.05 SOL → 80,268,543 coins",
+    rules: { Trigger: "now", Spend: "at most 0.1 SOL", "Minimum out": "764,462 coins per lamport", Signs: "the vault, via NEAR chain signatures" } },
+  { id: "s2", what: "Provide liquidity", where: "Meteora DLMM", x: 400, y: 105, chips: ["your wallet co-signs"], out: "position open, 10 bins",
+    rules: { Trigger: "when the coin arrives", Pool: "pinned by you", "Extra signer": "your own Solana wallet, nobody else" } },
+  { id: "s3", what: "Sweep fees", where: "Meteora DLMM", x: 720, y: 105, chips: ["hourly", "max 0.5 SOL"], out: "+0.000047589 SOL",
+    rules: { Trigger: "every hour", "Report cap": "0.5 SOL per sweep", Goes: "100% to the next box" } },
+  { id: "r1", what: "Buy NVDA", where: "Uniswap v4", x: 80, y: 420, chips: ["max 0.03 ETH"], out: "0.03 ETH → 0.348333 NVDA",
+    rules: { Trigger: "now", Spend: "at most 0.03 ETH", Price: "Chainlink NVDA, under 60 s old" } },
+  { id: "r2", what: "Sell ⅓", where: "at NVDA ≥ $270", x: 420, y: 360, small: true, chips: ["price trigger"], out: "$275: 0.009858 ETH",
+    rules: { Trigger: "NVDA at or above $270", Sells: "a third of the NVDA", Floor: "oracle price minus 1%" } },
+  { id: "r3", what: "Sell ⅓", where: "at NVDA ≥ $360", x: 420, y: 445, small: true, chips: ["price trigger"], out: "$365: 0.009819 ETH",
+    rules: { Trigger: "NVDA at or above $360", Sells: "a third of the NVDA", Floor: "oracle price minus 1%" } },
+  { id: "r4", what: "Sell ⅓", where: "at NVDA ≥ $540", x: 420, y: 530, small: true, chips: ["price trigger"], out: "$545: 0.009781 ETH",
+    rules: { Trigger: "NVDA at or above $540", Sells: "a third of the NVDA", Floor: "oracle price minus 1%" } },
+  { id: "r5", what: "Into the basket", where: "StonkBrokers ETHNVDA", x: 1060, y: 420, chips: ["zap deposit"], out: "0.049655 shares",
+    rules: { Trigger: "whenever ETH arrives", Receives: "ladder profits and the hopped Solana fees", Shares: "held by the vault" } },
+  { id: "n1", what: "Buy a coin", where: "Rhea · wNEAR/MEME", x: 80, y: 700, chips: ["floor: oracle −1%"], out: "10 wNEAR → 389,173,185 MEME",
+    refuse: "pumped pool: refused", refuseOut: "floor 386,688,539 MEME, offered 366,923,729",
+    rules: { Trigger: "now", Spend: "10 wNEAR", Floor: "price board minus 1%: a pumped pool is refused" } },
+  { id: "n2", what: "Take profit", where: "Rhea · at +50%", x: 400, y: 700, chips: ["price trigger"], out: "sold at +50%",
+    rules: { Trigger: "MEME up 50% from the buy", Sells: "all of it", Floor: "price board minus 1%" } },
+  { id: "n3", what: "Buy an NFT", where: "Bazaar", x: 720, y: 700, chips: ["max 5 NEAR"], out: "NFT bought, held by the vault",
+    rules: { Trigger: "when profit arrives", Spend: "at most 5 NEAR", Goes: "the NFT stays in the vault" } },
+];
+const links = [
+  { a: "s1", b: "s2", label: "all coins" },
+  { a: "s2", b: "s3", label: "earned fees" },
+  { a: "s3", b: "r5", label: "hop via NEAR Intents · SOL → ETH", hop: true },
+  { a: "r1", b: "r2", label: "⅓" }, { a: "r1", b: "r3", label: "⅓" }, { a: "r1", b: "r4", label: "⅓" },
+  { a: "r2", b: "r5", label: "ETH" }, { a: "r3", b: "r5", label: "ETH" }, { a: "r4", b: "r5", label: "ETH" },
+  { a: "n1", b: "n2", label: "hold" },
+  { a: "n2", b: "n3", label: "profit only" },
+];
+const order = ["s1", "s2", "s3", "hop", "r1", "r2", "r3", "r4", "r5", "n1", "n2", "n3"];
+
+const board = document.getElementById("board"), wires = document.getElementById("wires");
+const byId = {}; const labels = [];
+let selected = "n1";
+
+for (const f of frames) {
+  const el = document.createElement("div");
+  el.className = `frame ${f.cls}`;
+  Object.assign(el.style, { left: f.x + "px", top: f.y + "px", width: f.w + "px", height: f.h + "px" });
+  el.innerHTML = `<span class="tab">${f.name}</span><span class="addr">${f.addr}</span>`;
+  board.appendChild(el);
+}
+for (const n of nodes) {
+  const el = document.createElement("div");
+  el.className = "node" + (n.small ? " small" : "");
+  el.tabIndex = 0;
+  el.setAttribute("role", "button");
+  el.innerHTML = `<div class="what">${n.what}</div><div class="where">${n.where}</div><div class="chips">${n.chips.map(c => `<span class="chip">${c}</span>`).join("")}</div><div class="out"></div>`;
+  el.style.left = n.x + "px"; el.style.top = n.y + "px";
+  board.appendChild(el);
+  n.el = el; byId[n.id] = n;
+  drag(n);
+  el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(n.id) } });
+}
+for (const l of links) {
+  l.path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  l.path.setAttribute("class", "wire" + (l.hop ? " hop" : ""));
+  wires.appendChild(l.path);
+  l.tag = document.createElement("div");
+  l.tag.className = "rule" + (l.hop ? " hop" : "");
+  l.tag.textContent = l.label;
+  board.appendChild(l.tag);
+}
+
+function box(n) { return { x: n.x, y: n.y, w: n.el.offsetWidth, h: n.el.offsetHeight } }
+function draw() {
+  for (const l of links) {
+    const A = box(byId[l.a]), B = box(byId[l.b]);
+    const x1 = A.x + A.w, y1 = A.y + A.h / 2, x2 = B.x, y2 = B.y + B.h / 2;
+    const dx = Math.max(60, Math.abs(x2 - x1) * 0.45);
+    l.path.setAttribute("d", `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`);
+    const t = 0.5, mx = (1-t)**3*x1 + 3*(1-t)**2*t*(x1+dx) + 3*(1-t)*t**2*(x2-dx) + t**3*x2;
+    const my = (1-t)**3*y1 + 3*(1-t)**2*t*y1 + 3*(1-t)*t**2*y2 + t**3*y2;
+    l.tag.style.left = mx + "px"; l.tag.style.top = my + "px";
+  }
+}
+
+function drag(n) {
+  let sx, sy, ox, oy, moved;
+  n.el.addEventListener("pointerdown", e => {
+    sx = e.clientX; sy = e.clientY; ox = n.x; oy = n.y; moved = false;
+    n.el.setPointerCapture(e.pointerId); n.el.classList.add("dragging");
+  });
+  n.el.addEventListener("pointermove", e => {
+    if (!n.el.hasPointerCapture(e.pointerId)) return;
+    const k = scale();
+    const dx = (e.clientX - sx) / k, dy = (e.clientY - sy) / k;
+    if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    n.x = Math.max(0, Math.min(1500 - 170, ox + dx)); n.y = Math.max(0, Math.min(860 - 60, oy + dy));
+    n.el.style.left = n.x + "px"; n.el.style.top = n.y + "px"; draw();
+  });
+  n.el.addEventListener("pointerup", e => {
+    n.el.releasePointerCapture(e.pointerId); n.el.classList.remove("dragging");
+    if (!moved) select(n.id);
+  });
+}
+
+function select(id) {
+  selected = id;
+  for (const n of nodes) n.el.classList.toggle("sel", n.id === id);
+  const n = byId[id];
+  const chain = { s: "Solana", r: "Robinhood Chain", n: "NEAR" }[id[0]];
+  document.getElementById("inspector").innerHTML =
+    `<div class="label">${chain} · box</div><h2>${n.what} <span style="color:var(--ink-soft);font-weight:400">· ${n.where}</span></h2>
+     <dl>${Object.entries(n.rules).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
+     <p class="note" style="margin:10px 0 0">The keeper can press go. Only these rules decide what happens.</p>`;
+}
+
+function scale() {
+  const w = document.getElementById("wrap").clientWidth;
+  return Math.max(0.55, Math.min(1, w / 1500));
+}
+function fit() {
+  const k = scale();
+  board.style.transform = `scale(${k})`;
+  const s = document.getElementById("size");
+  s.style.width = 1500 * k + "px"; s.style.height = 860 * k + "px";
+}
+
+const log = document.getElementById("log");
+function say(text, cls) {
+  if (log.querySelector(".note")) log.innerHTML = "";
+  const li = document.createElement("li"); li.className = cls; li.textContent = text; log.appendChild(li); log.scrollTop = log.scrollHeight;
+}
+const wait = ms => new Promise(r => setTimeout(r, matchMedia("(prefers-reduced-motion: reduce)").matches ? Math.min(ms, 150) : ms));
+function linksInto(id) { return links.filter(l => l.b === id && !l.hop) }
+
+let running = false;
+async function run() {
+  if (running) return; running = true;
+  document.getElementById("run").disabled = true;
+  reset(true);
+  for (const step of order) {
+    if (step === "hop") {
+      const l = links.find(x => x.hop);
+      l.path.classList.add("live");
+      say("Solana fees hop to Robinhood Chain through NEAR Intents (SOL → ETH)", "hop");
+      await wait(1600);
+      l.path.classList.remove("live");
+      continue;
+    }
+    const n = byId[step];
+    for (const l of linksInto(step)) l.path.classList.add("live");
+    select(step);
+    n.el.classList.add("busy");
+    await wait(900);
+    if (n.refuse) {
+      n.el.classList.remove("busy"); n.el.classList.add("refused");
+      const st = document.createElement("div"); st.className = "stamp"; st.textContent = "REFUSED"; n.el.appendChild(st);
+      n.el.querySelector(".out").textContent = n.refuseOut;
+      say(`${n.what} · ${n.where}: ${n.refuse}, nothing spent`, "no");
+      await wait(1700);
+      st.remove(); n.el.classList.remove("refused");
+      say("the pool comes back to the market price", "ok");
+      n.el.classList.add("busy");
+      await wait(700);
+    }
+    n.el.classList.remove("busy"); n.el.classList.add("done");
+    n.el.querySelector(".out").textContent = n.out;
+    say(`${n.what} · ${n.where}: ${n.out}`, "ok");
+    for (const l of linksInto(step)) l.path.classList.remove("live");
+    await wait(450);
+  }
+  say("one vault, three chains, no keys handed out", "ok");
+  running = false;
+  document.getElementById("run").disabled = false;
+}
+function reset(keepLog) {
+  for (const n of nodes) { n.el.classList.remove("busy", "done", "refused"); n.el.querySelector(".out").textContent = ""; n.el.querySelector(".stamp")?.remove() }
+  for (const l of links) l.path.classList.remove("live");
+  if (!keepLog) log.innerHTML = '<li class="note">Press Run flow. Each box fires when the one before it delivers.</li>';
+  else log.innerHTML = "";
+}
+
+document.getElementById("run").addEventListener("click", run);
+document.getElementById("reset").addEventListener("click", () => { if (!running) { reset(false); select("n1") } });
+addEventListener("resize", () => { fit(); draw() });
+fit(); draw(); select(selected);
+document.fonts?.ready.then(draw);
+</script>
