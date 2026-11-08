@@ -184,3 +184,63 @@ async fn a_stealth_vault_closes_by_its_owners_signed_command_to_the_account_it_n
     assert!(got > NEAR / 4);
     Ok(())
 }
+
+/// A closed name must be tombstoned before the vault is gone: otherwise anyone
+/// could make a new vault under it and control its derived addresses on other
+/// chains. With the factory out of storage stake the tombstone can't be written,
+/// so the close is refused and nothing is deleted; once it can, the close goes
+/// through and the name is never made again. Making a vault never eats the
+/// factory's own NEAR: each leaves enough for its list entry and its tombstone.
+#[tokio::test]
+async fn a_vault_is_deleted_only_after_its_name_is_tombstoned() -> anyhow::Result<()> {
+    let w = relay_world().await?;
+    let factory = factory_of(&w);
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let public = format!("ed25519:{}", bs58::encode(key.verifying_key().as_bytes()).into_string());
+    let before = spare(&w, &factory).await?;
+    w.keeper.call(&factory, "create_stealth_vault").args_json(json!({"name": "k7xq2m", "owner_key": public, "keeper": w.keeper.id()}))
+        .deposit(NearToken::from_millinear(500)).max_gas().transact().await?.into_result()?;
+    let sv: AccountId = format!("k7xq2m.{factory}").parse()?;
+    assert!(exists(&w, &sv).await);
+    let made = spare(&w, &factory).await?;
+    println!("factory spare: {before} before, {made} after making a vault");
+
+    let mut nonce = 0u64;
+    let mut sign = |method: &str, args: Value| {
+        nonce += 1;
+        let args = args.to_string();
+        let expires = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64 + 3_600_000_000_000;
+        let text = format!("near-flows stealth v1\nvault: {sv}\nnonce: {nonce}\nexpires_ns: {expires}\ntgas: 60\nmethod: {method}\nargs: {args}");
+        json!({"method": method, "args": args, "nonce": nonce.to_string(), "expires_ns": expires.to_string(), "tgas": 60, "signature": hex::encode(key.sign(text.as_bytes()).to_bytes())})
+    };
+    let exec = |s: Value| {
+        let (k, sv) = (w.keeper.clone(), sv.clone());
+        async move { anyhow::Ok(k.call(&sv, "exec").args_json(s).gas(near_workspaces::types::Gas::from_tgas(300)).transact().await?) }
+    };
+    let owner = w.worker.dev_create_account().await?;
+    let sink = w.worker.dev_create_account().await?;
+    drain(&w.factory, sink.id(), 0).await?;
+    let r = exec(sign("close", json!({"to": owner.id()}))).await?;
+    let closed = w.worker.view(&factory, "is_closed").args_json(json!({"vault": sv})).await?.json::<bool>()?;
+    println!("factory out of stake: vault exists {}, name tombstoned {closed}", exists(&w, &sv).await);
+    assert!(exists(&w, &sv).await || closed, "the vault is gone but its name isn't tombstoned");
+    assert!(fails_with(&r, "couldn't tombstone"), "{:?}", r.failures());
+    // Mallory can't take the name over.
+    let mallory = w.worker.dev_create_account().await?;
+    let mkey = format!("ed25519:{}", bs58::encode([8u8; 32]).into_string());
+    sink.transfer_near(&factory, NearToken::from_millinear(10)).await?.into_result()?;
+    let r = mallory.call(&factory, "create_stealth_vault").args_json(json!({"name": "k7xq2m", "owner_key": mkey, "keeper": null}))
+        .deposit(NearToken::from_millinear(100)).max_gas().transact().await?;
+    assert!(!r.json::<bool>().unwrap_or(false), "Mallory took over a closed vault's name");
+
+    // The factory has room again: the owner closes, and the name is tombstoned for good.
+    let r = exec(sign("close", json!({"to": owner.id()}))).await?;
+    assert!(r.is_success(), "{:?}", r.failures());
+    assert!(!exists(&w, &sv).await);
+    assert!(w.worker.view(&factory, "is_closed").args_json(json!({"vault": sv})).await?.json::<bool>()?);
+    let r = mallory.call(&factory, "create_stealth_vault").args_json(json!({"name": "k7xq2m", "owner_key": mkey, "keeper": null}))
+        .deposit(NearToken::from_millinear(100)).max_gas().transact().await?;
+    assert!(fails_with(&r, "never reused"), "{:?}", r.failures());
+    assert!(made >= before + 2_000_000_000_000_000_000_000, "a vault leaves the factory room for its list entry and tombstone");
+    Ok(())
+}

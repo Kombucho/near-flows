@@ -286,7 +286,9 @@ async fn a_forged_brain_answer_is_refused() -> anyhow::Result<()> {
     let evil = evil.deploy(&wasm("relay")).await?.into_result()?;
     let mut init = vec![fake.id().len() as u8];
     init.extend(fake.id().as_bytes());
-    let _ = w.mallory.call(evil.id(), "new").args(init).max_gas().transact().await?;
+    init.push(w.mallory.id().len() as u8);
+    init.extend(w.mallory.id().as_bytes());
+    let _ =w.mallory.call(evil.id(), "new").args(init).max_gas().transact().await?;
 
     // 1. "Brain answer" delivered to Alice's vault's cb by another contract: refused (wrong predecessor).
     forge(&fake, answer(&[(w.vault.as_str(), "cb", b"")])).await?;
@@ -309,10 +311,13 @@ async fn a_forged_brain_answer_is_refused() -> anyhow::Result<()> {
     let evil2 = evil2.deploy(&wasm("relay")).await?.into_result()?;
     let mut init = vec![w.brain.id().len() as u8];
     init.extend(w.brain.id().as_bytes());
+    init.push(w.mallory.id().len() as u8);
+    init.extend(w.mallory.id().as_bytes());
     init.extend(json!({"init": {"owner": w.mallory.id(), "keeper": null}}).to_string().as_bytes());
     let r = w.mallory.call(evil2.id(), "new").args(init).max_gas().transact().await?;
     assert!(fails_with(&r, "vaults are made by the factory"), "{:?}", r.failures());
     assert!(w.brain.view("get_vault").args_json(json!({"vault": evil2.id()})).await?.json::<Option<Value>>()?.is_none());
+    assert!(w.worker.view_account(evil2.id()).await.is_err(), "a relay the brain refused deletes itself, its NEAR to the payer");
 
     assert_eq!(balance(&w.wnear, &w.vault).await?, 1_000 * ONE, "Alice's vault untouched");
     // And with an honest answer, a relay does exactly what it says (here: pay Alice 1 NEAR).
