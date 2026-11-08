@@ -397,9 +397,15 @@ async fn settling_owed_near_fees_never_takes_the_reserve_or_a_flows_near() -> an
     let before = near_of(w, &w.vault).await?;
     let r = x(&stranger, &w.vault, "settle_fees", json!({"token": "near"})).await?;
     let after = near_of(w, &w.vault).await?;
-    assert!(fails_with(&r, "nothing to settle with"), "{:?} {:?}", r.logs(), r.failures());
+    // fund_all_near leaves under 0.0001 NEAR free: the settle takes at most that sliver, or nothing.
+    let settled = fee - owed(&m, &"near".parse()?).await?;
+    assert!(settled <= CENTI / 100, "settled {settled} of {fee}, more than the vault had free");
+    if settled == 0 {
+        assert!(fails_with(&r, "nothing to settle with"), "{:?} {:?}", r.logs(), r.failures());
+    }
     assert!(after + CENTI / 100 >= before, "the settle took {} yoctoNEAR the vault didn't have free", before - after);
-    assert_eq!(owed(&m, &"near".parse()?).await?, fee);
+    let fee = fee - settled;
+    assert!(fee > 0, "most of the fee still owed");
 
     // Topped up: it settles exactly what's owed.
     w.alice.transfer_near(&w.vault, NearToken::from_near(1)).await?.into_result()?;
@@ -418,13 +424,14 @@ async fn a_recipes_fixed_deposit_comes_from_free_near_never_from_other_flows() -
     let m = world().await?;
     let w = &m.w;
     near_flow(&m, NEAR).await?;
-    drain_near(w).await?;
     let node = json!({"input": m.wnear.id(), "when": {"when": "now"}, "action": {"label": "Stake then swap", "calls": [
         {"call": "fn", "contract": m.dex.id(), "method": "deposit_and_stake", "args": "{}", "deposit": {"kind": "fixed", "yocto": (NEAR / 2).to_string()}, "tgas": 30},
         {"call": "ft", "receiver": m.dex.id(), "tgas": 50, "msg": format!(r#"{{"token_out":"{}","min_out":"1"}}"#, m.usdc.id())}],
         "out": m.usdc.id(), "min_out_per_in": null, "price": null}});
     let f: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "f", "nodes": [node]})).await?.json()?;
     x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": (10 * ONE).to_string()})).await?.into_result()?;
+    // Saved and funded first (the record's storage is paid from free NEAR), then no NEAR free.
+    drain_near(w).await?;
     let before = near_of(w, &w.vault).await?;
     let r = x(&w.alice, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
     let after = near_of(w, &w.vault).await?;
