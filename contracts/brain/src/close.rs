@@ -5,8 +5,9 @@
 //! Who may close:
 //! - the owner, any time (a stealth owner through a signed `exec`, naming
 //!   where the NEAR goes: a stealth vault has no owner account);
-//! - anyone, once the owner turned auto-close on (normally the keeper, after
-//!   the last step): the NEAR can only go where the owner said.
+//! - its keeper, once the owner turned auto-close on (after the last step):
+//!   the NEAR can only go where the owner said. Nobody else: a stranger never
+//!   picks the moment a vault disappears.
 //!
 //! What must be true first, all checked here (refused otherwise):
 //! - no step running, no remote step waiting for its report;
@@ -83,12 +84,13 @@ impl Talk {
         self.vs.owner.clone()
     }
 
-    pub(crate) fn close(&mut self, by_owner: bool, confirm_remote: bool, to: Option<AccountId>) -> Reply {
+    pub(crate) fn close(&mut self, by_owner: bool, by_keeper: bool, confirm_remote: bool, to: Option<AccountId>) -> Reply {
         let to = if by_owner {
             self.beneficiary(to)
         } else {
             let b = self.vs.auto_close.clone().unwrap_or_else(|| env::panic_str("auto-close is off: only the owner closes this vault"));
             require!(to.is_none() || to.as_ref() == Some(&b), "the vault closes only where its owner said");
+            require!(by_keeper, "only the owner or its keeper closes this vault");
             b
         };
         if self.vs.crosschain {

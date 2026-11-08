@@ -1,7 +1,8 @@
 //! Vault auto-close: an empty vault deletes itself and its NEAR goes back to the
 //! owner; the name is tombstoned at the factory. Refused while anything is
 //! still in it (every token the vault ever used: hidden and deleted flows,
-//! removed trust), while a step runs, for a stranger without auto-close, and
+//! removed trust), while a step runs, for anyone but the owner and its keeper,
+//! for the keeper without auto-close, and
 //! for a vault that ever touched another chain or may hold funds inside
 //! another contract unless its owner confirms.
 //! Build the wasm first: make build
@@ -153,22 +154,24 @@ async fn close_is_refused_while_a_token_a_flow_or_a_step_still_holds_anything() 
     assert!(fails_with(&x(&stranger, &w.vault, "close", json!({})).await?, "auto-close is off"));
     x(&w.alice, &w.vault, "set_auto_close", json!({"on": true})).await?.into_result()?;
     assert!(fails_with(&x(&stranger, &w.vault, "close", json!({"to": stranger.id()})).await?, "only where its owner said"));
+    // Auto-close on: still nobody but the owner and its keeper picks the moment it closes.
+    assert!(fails_with(&x(&stranger, &w.vault, "close", json!({})).await?, "only the owner or its keeper"));
     x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": dex.id(), "methods": ["deposit_and_stake"]}, {"contract": lst.id()}], "remove": []})).await?.into_result()?;
 
     // A flow holding NEAR.
     let f: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "s", "nodes": [{"input": "near", "action": spend_near(&dex), "when": {"when": "now"}}]})).await?.json()?;
     x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": (NEAR / 10).to_string()})).await?.into_result()?;
-    assert!(fails_with(&x(&stranger, &w.vault, "close", json!({})).await?, "still holds funds"));
+    assert!(fails_with(&x(&w.keeper, &w.vault, "close", json!({})).await?, "still holds funds"));
 
     // A step running: the close lands while the step's rounds are in flight.
     let step = w.keeper.call(&w.vault, "x").args(json!({"step": {"flow_id": f, "node": 0}}).to_string().into_bytes()).max_gas().transact_async().await?;
-    let r = x(&stranger, &w.vault, "close", json!({})).await?;
+    let r = x(&w.keeper, &w.vault, "close", json!({})).await?;
     assert!(fails_with(&r, "a step is running"), "{:?}", r.failures());
     step.await?.into_result()?;
 
     // The vault called a contract's own methods (a stake, out: null): what it holds there
     // can't be read from here, so only its owner closes it now, saying it swept it.
-    assert!(fails_with(&x(&stranger, &w.vault, "close", json!({})).await?, "may hold funds inside other contracts"));
+    assert!(fails_with(&x(&w.keeper, &w.vault, "close", json!({})).await?, "may hold funds inside other contracts"));
     assert!(fails_with(&x(&w.alice, &w.vault, "close", json!({})).await?, "confirm_remote"));
     assert!(fails_with(&x(&w.alice, &w.vault, "set_auto_close", json!({"on": true})).await?, "may hold funds inside other contracts"));
 
@@ -204,8 +207,9 @@ async fn a_token_trusted_with_a_method_list_keeps_a_stranger_from_closing_over_i
         "out": null, "min_out_per_in": null, "price": null});
     x(&w.alice, &w.vault, "save_flow", json!({"name": "stake", "nodes": [{"input": "near", "action": stake, "when": {"when": "now"}}]})).await?.into_result()?;
     let stranger = w.worker.dev_create_account().await?;
-    let r = x(&stranger, &w.vault, "close", json!({})).await?;
-    assert!(r.is_failure(), "a stranger closed a vault holding 5 LST");
+    assert!(fails_with(&x(&stranger, &w.vault, "close", json!({})).await?, "only the owner or its keeper"));
+    let r = x(&w.keeper, &w.vault, "close", json!({})).await?;
+    assert!(r.is_failure(), "the keeper auto-closed a vault holding 5 LST");
     assert!(exists(&w, &w.vault).await);
     assert_eq!(bal(&lst, &w.vault).await?, 5 * ONE);
     // The owner's own close reads it too.
@@ -232,8 +236,9 @@ async fn an_out_null_stake_keeps_a_stranger_from_closing_over_an_untrusted_lst()
     assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?} {:?}", r.logs(), r.failures());
     assert_eq!(bal(&lst, &w.vault).await?, NEAR / 2, "the stake's LST landed in the vault");
     let stranger = w.worker.dev_create_account().await?;
-    let r = x(&stranger, &w.vault, "close", json!({})).await?;
-    assert!(r.is_failure(), "a stranger closed the vault over its LST");
+    assert!(fails_with(&x(&stranger, &w.vault, "close", json!({})).await?, "only the owner or its keeper"));
+    let r = x(&w.keeper, &w.vault, "close", json!({})).await?;
+    assert!(fails_with(&r, "may hold funds inside other contracts"), "the keeper auto-closed the vault over its LST: {:?}", r.failures());
     assert!(exists(&w, &w.vault).await);
     assert_eq!(bal(&lst, &w.vault).await?, NEAR / 2);
     Ok(())
@@ -257,17 +262,16 @@ async fn close_still_reads_the_tokens_of_hidden_and_deleted_flows_and_of_removed
     assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?} {:?}", r.logs(), r.failures());
     x(&w.alice, &w.vault, "delete_flow", json!({"flow_id": f})).await?.into_result()?;
     x(&w.alice, &w.vault, "trust", json!({"add": [], "remove": [a.id(), b.id(), dex.id()]})).await?.into_result()?;
-    let stranger = w.worker.dev_create_account().await?;
-    let r = x(&stranger, &w.vault, "close", json!({})).await?;
+    let r = x(&w.keeper, &w.vault, "close", json!({})).await?;
     assert!(fails_with(&r, &format!("holds {} of {}", 20 * ONE, b.id())), "{:?}", r.failures());
     assert_eq!(bal(&b, &w.vault).await?, 20 * ONE);
     Ok(())
 }
 
 /// A swap on an out: null node still sends its output to the vault; the brain never
-/// measured it, so a stranger's close is refused.
+/// measured it, so the keeper's auto-close is refused.
 #[tokio::test]
-async fn an_out_null_swap_keeps_a_stranger_from_closing() -> anyhow::Result<()> {
+async fn an_out_null_swap_keeps_the_keeper_from_auto_closing() -> anyhow::Result<()> {
     let w = relay_world().await?;
     let (a, b, dex, minter) = pair(&w, &[&w.vault]).await?;
     x(&w.alice, &w.vault, "set_auto_close", json!({"on": true})).await?.into_result()?;
@@ -278,8 +282,7 @@ async fn an_out_null_swap_keeps_a_stranger_from_closing() -> anyhow::Result<()> 
     let r = x(&w.keeper, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?;
     assert!(r.logs().iter().any(|l| l.contains(r#""event":"step""#)), "{:?} {:?}", r.logs(), r.failures());
     x(&w.alice, &w.vault, "trust", json!({"add": [], "remove": [dex.id()]})).await?.into_result()?;
-    let stranger = w.worker.dev_create_account().await?;
-    let r = x(&stranger, &w.vault, "close", json!({})).await?;
+    let r = x(&w.keeper, &w.vault, "close", json!({})).await?;
     assert!(fails_with(&r, "may hold funds inside other contracts"), "{:?}", r.failures());
     assert_eq!(bal(&b, &w.vault).await?, 20 * ONE);
     Ok(())

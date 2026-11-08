@@ -752,7 +752,7 @@ impl Talk {
             self.vs.crosschain = true;
         }
         match req {
-            Req::Close { confirm_remote, to } => return self.close(owner, confirm_remote, to),
+            Req::Close { confirm_remote, to } => return self.close(owner, keeper, confirm_remote, to),
             Req::Init { .. } | Req::InitStealth { .. } | Req::NftOnTransfer { .. } | Req::MtOnTransfer { .. } => env::panic_str("not here"),
             Req::Step { flow_id, node } => {
                 require!(!self.flow(flow_id).is_hidden(), "a hidden flow runs with step_hidden");

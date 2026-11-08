@@ -209,8 +209,10 @@ impl Talk {
             Err(l) => ("step_failed", "returned", l),
         };
         self.emit(ev, &format!(r#""flow":{flow_id},"node":{node},"amount":"{}","{k}":"{v}","remote":true,"reported_by":"{}""#, p.amount.0, if by_owner { "owner" } else { "keeper" }));
-        // The keeper ran it and it worked: its price.
-        if result.is_ok() && !by_owner { self.pay_keeper(Answer::default()) } else { Answer::default() }
+        // The keeper ran it and it worked: its price, if it spent input or brought something
+        // back (a collector that found nothing did no work worth paying for).
+        let produced = p.amount.0 > 0 || matches!(result, Ok(o) if o > 0);
+        if result.is_ok() && produced && !by_owner { self.pay_keeper(Answer::default()) } else { Answer::default() }
     }
 
     pub(crate) fn pending(&self, flow_id: u32, node: u16) -> Option<Pending> {
