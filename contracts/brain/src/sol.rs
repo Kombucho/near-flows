@@ -27,6 +27,9 @@ pub enum FieldJ {
     Any,
     AtMost { max: U128 },
     AtLeast { of: u8, num: U128, den: U128 },
+    /// At least the larger of `field[of] * num / den` and what the oracle says `field[of]` is
+    /// worth, less slippage (the EVM `market` leaf): the brain reads the prices before it checks.
+    Market { of: u8, num: U128, den: U128, market: crate::oracle::Market },
 }
 
 #[near(serializers = [borsh, json])]
@@ -96,8 +99,36 @@ fn key(b58: &str) -> [u8; 32] {
     near_sdk::bs58::decode(b58).into_vec().ok().and_then(|v| v.try_into().ok()).unwrap_or_else(|| env::panic_str(&format!("not a Solana address: {b58}")))
 }
 
+/// A market floor's ratio per unit of input, scaled (amounts are u64: 1e24 keeps it exact to a unit).
+const MARKET_SCALE: u128 = 1_000_000_000_000_000_000_000_000;
+
+/// The larger of two minimums per unit of input, `a_num / a_den` and `b_num / b_den`.
+fn larger(a: (u128, u128), b: (u128, u128)) -> (u128, u128) {
+    use math::wide::U256;
+    if U256::from(a.0) * U256::from(b.1) >= U256::from(b.0) * U256::from(a.1) { a } else { b }
+}
+
 impl SolTemplate {
-    pub fn to_guard(&self) -> Template {
+    /// The feeds this template's market fields need.
+    pub fn market_feeds(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for f in &self.fields {
+            if let FieldJ::Market { market, .. } = &f.rule {
+                for n in [&market.sell, &market.buy] {
+                    if !out.contains(n) {
+                        out.push(n.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The template solguard checks. `prices` (feed, USD 1e18): market fields become at-least
+    /// rules at the larger of their fixed ratio and the market's; a missing price refuses. Without
+    /// prices (saving, a first look at a message) a market field is its fixed ratio alone.
+    pub fn to_guard(&self, prices: Option<&[(String, u128)]>) -> Template {
+        let price = |f: &String| prices.unwrap_or(&[]).iter().find(|(n, _)| n == f).map(|(_, p)| *p).unwrap_or_else(|| env::panic_str("refused: no price"));
         Template {
             name: self.name.clone(),
             program: key(&self.program),
@@ -112,6 +143,16 @@ impl SolTemplate {
                         FieldJ::Any => FieldRule::Any,
                         FieldJ::AtMost { max } => FieldRule::AtMost(max.0),
                         FieldJ::AtLeast { of, num, den } => FieldRule::AtLeast { of: *of, num: num.0, den: den.0 },
+                        FieldJ::Market { of, num, den, market } => {
+                            let (num, den) = match prices {
+                                None => (num.0, den.0),
+                                Some(_) => {
+                                    let per_in = crate::oracle::market_per_in(market, price(&market.sell), price(&market.buy), MARKET_SCALE);
+                                    larger((num.0, den.0), (per_in, MARKET_SCALE))
+                                }
+                            };
+                            FieldRule::AtLeast { of: *of, num, den }
+                        }
                     },
                 })
                 .collect(),
@@ -304,7 +345,13 @@ impl Talk {
     }
 
     pub(crate) fn sol_template(&mut self, template: SolTemplate) {
-        template.to_guard().validate().unwrap_or_else(|e| env::panic_str(&e));
+        template.to_guard(None).validate().unwrap_or_else(|e| env::panic_str(&e));
+        for (i, f) in template.fields.iter().enumerate() {
+            if let FieldJ::Market { market: m, .. } = &f.rule {
+                require!(m.slippage_bps <= 5_000 && m.dec_in <= 36 && m.dec_out <= 36 && !m.sell.is_empty() && !m.buy.is_empty(),
+                    format!("field {i}: market: two feeds, slippage <= 50%, decimals <= 36"));
+            }
+        }
         for s in &template.spends {
             require!(matches!(template.fields.get(s.field as usize).map(|f| &f.rule), Some(FieldJ::AtMost { .. })), "spends: an at_most field");
         }
@@ -321,7 +368,8 @@ impl Talk {
     }
 
     /// The owner's templates, checked against a message (every instruction must match one).
-    pub(crate) fn sol_matched(&self, bytes: &[u8]) -> Vec<solguard::template::Matched> {
+    /// `prices`: the market floors' (see `to_guard`); None checks the fixed floors alone.
+    pub(crate) fn sol_matched(&self, bytes: &[u8], prices: Option<&[(String, u128)]>) -> Vec<solguard::template::Matched> {
         let cfg = self.sol_cfg();
         let address = cfg.address.clone().unwrap_or_else(|| env::panic_str("the vault's Solana address isn't known yet"));
         let policy = solguard::template::TxPolicy {
@@ -330,15 +378,54 @@ impl Talk {
             max_cu_price: cfg.max_cu_price,
             max_cu_limit: cfg.max_cu_limit,
         };
-        let guards: Vec<Template> = cfg.templates.iter().map(SolTemplate::to_guard).collect();
+        // A market template whose prices weren't read can't match (its instruction finds no template).
+        let priced = |t: &&SolTemplate| prices.map_or(true, |p| t.market_feeds().iter().all(|f| p.iter().any(|(n, _)| n == f)));
+        let guards: Vec<Template> = cfg.templates.iter().filter(priced).map(|t| t.to_guard(prices)).collect();
         solguard::template::check_tx(bytes, &guards, &policy).unwrap_or_else(|e| env::panic_str(&format!("refused: {e:?}")))
     }
 
-    /// Owner or keeper: a transaction made only of approved templates, signed.
+    /// The feeds the market fields of these matched templates need, each once.
+    pub(crate) fn sol_feeds(&self, names: &[&str]) -> Vec<String> {
+        let cfg = self.sol_cfg();
+        let mut out: Vec<String> = Vec::new();
+        for t in cfg.templates.iter().filter(|t| names.contains(&t.name.as_str())) {
+            for f in t.market_feeds() {
+                if !out.contains(&f) {
+                    out.push(f);
+                }
+            }
+        }
+        out
+    }
+
+    /// The feeds a message's templates need (matched against their fixed floors first).
+    fn sol_tx_feeds(&self, bytes: &[u8]) -> Vec<String> {
+        let matched = self.sol_matched(bytes, None);
+        self.sol_feeds(&matched.iter().map(|m| m.template.as_str()).collect::<Vec<_>>())
+    }
+
+    /// Owner or keeper: a transaction made only of approved templates, signed. A template
+    /// with a market field: the brain reads the prices first, then checks again (`on_sol_tx_prices`).
     pub(crate) fn sol_sign_tx(&mut self, message: String) -> Reply {
+        let feeds = self.sol_tx_feeds(&decode_message(&message));
+        if feeds.is_empty() {
+            return self.sol_sign_tx_at(message, &[]);
+        }
+        let views = self.feed_views(&feeds);
+        self.need_after = GAS_SIGN.as_tgas() + GAS_SIGNED.as_tgas() + crate::RELAY_TGAS;
+        self.read(views, Read::SolTxPrices(message), GAS_CHECK)
+    }
+
+    pub(crate) fn on_sol_tx_prices(&mut self, message: String) -> Reply {
+        let feeds = self.sol_tx_feeds(&decode_message(&message));
+        let prices = self.named_prices(&feeds, 0);
+        self.sol_sign_tx_at(message, &prices)
+    }
+
+    fn sol_sign_tx_at(&mut self, message: String, prices: &[(String, u128)]) -> Reply {
         let bytes = decode_message(&message);
         let cfg = self.sol_cfg();
-        let matched = self.sol_matched(&bytes);
+        let matched = self.sol_matched(&bytes, Some(prices));
         // Spending is read from the message itself.
         for m in &matched {
             let t = cfg.templates.iter().find(|t| t.name == m.template).unwrap();
