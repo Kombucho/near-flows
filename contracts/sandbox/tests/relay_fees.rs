@@ -199,7 +199,7 @@ async fn a_cross_chain_signature_costs_the_flat_fee_and_is_refused_without_the_n
     let msg = Tx::new(me).ix(pubkey(SYSTEM_PROGRAM), vec![me, wsol], transfer).ix(pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"), vec![wsol], vec![17]).bytes();
     let b64 = { use base64::Engine; base64::engine::general_purpose::STANDARD.encode(&msg) };
     let before = near_of(w, m.treasury.id()).await?;
-    let r = x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": b64})).await?;
+    let r = x(&w.alice, &w.vault, "sol_sign_tx", json!({"message": b64})).await?;
     assert!(r.logs().iter().any(|l| l.contains("sol_signed")), "{:?} {:?}", r.logs(), r.failures());
     println!("GAS sol_sign_tx with the signature fee: {:.1} Tgas", tgas(&r));
     assert_eq!(near_of(w, m.treasury.id()).await? - before, CENTI, "exactly 0.01 NEAR");
@@ -211,7 +211,7 @@ async fn a_cross_chain_signature_costs_the_flat_fee_and_is_refused_without_the_n
         r = x(&w.alice, &w.vault, "withdraw", json!({"token": "near", "amount": free.to_string()})).await?;
     }
     assert!(r.is_success(), "withdrew {free}");
-    let r = x(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": b64})).await?;
+    let r = x(&w.alice, &w.vault, "sol_sign_tx", json!({"message": b64})).await?;
     assert!(fails_with(&r, "signature fee") && !r.logs().iter().any(|l| l.contains("sol_signed")), "{:?}", r.failures());
     Ok(())
 }

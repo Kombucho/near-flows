@@ -1,6 +1,6 @@
 //! The vault BODY: one per user, published once as a global contract.
 //!
-//! WHY it exists: the full vault is ~600 KB, and publishing code costs 0.1 NEAR
+//! WHY it exists: the old full vault (removed) was ~600 KB, and publishing code costs 0.1 NEAR
 //! per KB (59 NEAR per version). This body is a few KB. It holds the user's
 //! money and positions and is the predecessor for Chain Signatures (so every
 //! user keeps their own addresses on other chains), but it decides NOTHING.
@@ -18,7 +18,7 @@
 //!   receiver hook) reach the brain unchanged. A hook's return value is the
 //!   brain's (e.g. mt_on_transfer: "refund nothing", one "0" per token).
 //! - `ft_on_transfer`: accepts any token sent to it (it becomes free balance,
-//!   exactly like the full vault). No brain round trip: nothing to decide.
+//!   as the old full vault did). No brain round trip: nothing to decide.
 //! - `brain_id`: view, which brain this vault obeys.
 //!
 //! Why named doors and not "forward any unknown method": NEAR has no fallback

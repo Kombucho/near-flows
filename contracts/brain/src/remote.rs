@@ -1,4 +1,4 @@
-//! Remote nodes, as vault/src/remote.rs: a flow node whose action is a
+//! Remote nodes: a flow node whose action is a
 //! transaction on another chain (an EVM template, a Solana template).
 //!
 //! The brain decides everything the vault decided: the trigger (block clock,
@@ -234,8 +234,10 @@ impl Talk {
             out.push(p.feed.clone());
             out.extend(p.quote.clone());
         }
-        if let RemoteCall::Evm { template, .. } = &r.call {
-            out.extend(crate::evm::market_feeds(&crate::evm::leaves(&self.evm_template_named(template))));
+        match &r.call {
+            RemoteCall::Evm { template, .. } => out.extend(crate::evm::market_feeds(&crate::evm::leaves(&self.evm_template_named(template)))),
+            // The node's template; a template riding along with a market field finds no price and is refused.
+            RemoteCall::Sol { template, .. } => out.extend(self.sol_feeds(&[template.as_str()])),
         }
         let mut seen = Vec::new();
         out.retain(|f| if seen.contains(f) { false } else { seen.push(f.clone()); true });
@@ -290,7 +292,7 @@ impl Talk {
                 self.charge_signature(ans).then("on_vault", near_sdk::borsh::to_vec(&next).unwrap(), GAS_SIGNED_CB).into()
             }
             (RemoteCall::Sol { template, amount_field, min_field }, RemoteArgs::Sol { message }) => {
-                let (bytes, values) = self.sol_check_node(&message, template, &n.input);
+                let (bytes, values) = self.sol_check_node(&message, template, &n.input, prices);
                 if let Some(f) = amount_field {
                     require!(values.get(*f as usize) == Some(&amount), format!("refused: the message must spend exactly the node's {amount}"));
                 }
@@ -345,10 +347,10 @@ impl Talk {
 
     /// A Solana message of the owner's templates with exactly one `template`
     /// instruction (the node's), any others spending nothing. Spending is counted.
-    fn sol_check_node(&mut self, message: &str, template: &str, input: &str) -> (Vec<u8>, Vec<u128>) {
+    fn sol_check_node(&mut self, message: &str, template: &str, input: &str, prices: &[(String, u128)]) -> (Vec<u8>, Vec<u128>) {
         let bytes = crate::sol::decode_message(message);
         let cfg = self.sol_cfg();
-        let matched = self.sol_matched(&bytes);
+        let matched = self.sol_matched(&bytes, Some(prices));
         let mut mine = None;
         for m in &matched {
             let t = cfg.templates.iter().find(|t| t.name == m.template).unwrap();
@@ -391,7 +393,7 @@ fn trigger_price(p: &FeedPrice, prices: &[(String, u128)]) -> u128 {
     }
 }
 
-// The vault's own tests (vault/src/remote.rs), unchanged.
+// The full vault's tests, carried over unchanged when it was removed.
 #[cfg(test)]
 mod tests {
     use super::*;

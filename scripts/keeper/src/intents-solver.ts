@@ -10,7 +10,7 @@
 // only a counterparty: if it offers less than the vault's minimum, nothing settles.
 //
 // The solver key lives in SOLVER_KEY_FILE (default ~/.flows/solver-<keeper>.json), never in the repo.
-// Environment: KEEPER_ACCOUNT_ID (the solver account), NEAR_RPC, KEEPER_PRIVATE_KEY or near-cli key file.
+// Environment: KEEPER_ACCOUNT_ID (the solver account; on a relay vault the OWNER, intents_sign_swap is owner only), NEAR_RPC, KEEPER_PRIVATE_KEY or near-cli key file.
 
 import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign as edSign } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";

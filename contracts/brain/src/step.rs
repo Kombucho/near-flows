@@ -1,4 +1,4 @@
-//! One step of a flow, as in vault/src/step.rs. Balances and prices are views,
+//! One step of a flow. Balances and prices are views,
 //! so the brain reads them ITSELF (its own promises, `on_read`); only the
 //! recipe's calls go through the vault, because only they must come from it:
 //!

@@ -1,7 +1,7 @@
 //! The take-profit ladder end to end on a local fork of Robinhood Chain mainnet:
 //! a NEAR flow buys NVDA with ETH (Uniswap v4), sells a third at each of 1.5x /
 //! 2x / 3x of $180 as the oracle (mock_pyth) walks the price up, and zaps every
-//! sale's ETH into StonkBrokers' ETHNVDA pair token. The vault decides each step
+//! sale's ETH into StonkBrokers' ETHNVDA pair token. The relay vault's brain decides each step
 //! (trigger, amount, minimum, deadline) and signs; the keeper broadcasts on the
 //! fork and reports what arrived, which the vault accepts only within bounds.
 //! At the end the fork's balances must equal what the flow's ledger says.
@@ -10,12 +10,13 @@
 
 mod common;
 mod ladder;
+mod relayw;
 
 use common::{num, signed, Fork};
 use ladder::*;
 use serde_json::{json, Value};
 
-const PORT: u16 = 9200;
+const PORT: u16 = 9802;
 
 #[tokio::test]
 async fn a_nvda_take_profit_ladder_walks_up_on_a_robinhood_fork_into_the_ethnvda_basket() -> anyhow::Result<()> {
@@ -23,7 +24,7 @@ async fn a_nvda_take_profit_ladder_walks_up_on_a_robinhood_fork_into_the_ethnvda
     let Some(fork) = Fork::start(&url, PORT).await else { return Ok(()) };
     assert_eq!(fork.cast(&["chain-id"]), "4663", "a fork of Robinhood Chain");
     let w = world().await?;
-    let me = w.vault.view("get_evm").await?.json::<Value>()?["address"].as_str().unwrap().to_string();
+    let me = evm_address(&w).await?;
     println!("Robinhood fork at block {}, vault's address {me}", fork.cast(&["block-number"]));
     fork.cast(&["rpc", "anvil_setBalance", &me, "0xDE0B6B3A7640000"]); // 1 ETH
     let eth_of = |f: &Fork| num(&f.cast(&["balance", &me]));
@@ -35,13 +36,13 @@ async fn a_nvda_take_profit_ladder_walks_up_on_a_robinhood_fork_into_the_ethnvda
     let now: u128 = num(&fork.cast(&["block", "latest", "--field", "timestamp"]));
     for (name, values) in [("approve_nvda_permit2", vec![0, E18]), ("permit2_nvda_universal_router", vec![0, 0, E18, now + 86_400])] {
         let a = json!({"name": name, "values": values.iter().map(|v| v.to_string()).collect::<Vec<_>>(), "nonce": nonce(&fork), "max_fee": max_fee.to_string(), "max_tip": "0", "gas": 200_000u64});
-        let r = w.keeper.call(w.vault.id(), "evm_call").args_json(a).max_gas().transact().await?;
+        let r = req(&w, &w.keeper, "evm_call", a).await?;
         assert_eq!(send(&fork, &signed(&r)).0, 1, "{name}");
     }
 
-    let f: u32 = w.alice.call(w.vault.id(), "save_flow").args_json(json!({"name": "NVDA ladder", "nodes": ladder()})).max_gas().transact().await?.into_result()?.json()?;
+    let f: u32 = req(&w, &w.alice, "save_flow", json!({"name": "NVDA ladder", "nodes": ladder()})).await?.into_result()?.json()?;
     let eth_in = 30_000_000_000_000_000u128; // 0.03 ETH
-    w.alice.call(w.vault.id(), "fund").args_json(json!({"flow_id": f, "node": 0, "amount": eth_in.to_string()})).max_gas().transact().await?.into_result()?;
+    req(&w, &w.alice, "fund", json!({"flow_id": f, "node": 0, "amount": eth_in.to_string()})).await?.into_result()?;
 
     // 1. Buy (trigger: now). The keeper quotes 99% of the pool's own quote; the vault signs at least that or its floor.
     let q = v4_quote(&fork, true, eth_in);

@@ -50,3 +50,13 @@ export function curveQuery(mints: string[], nonce = Math.floor(Math.random() * 2
   const query = Buffer.concat([v(Buffer.from("finalized")), u64(0n), u64(0n), u64(0n), Buffer.from([mints.length]), ...pdas]);
   return Buffer.concat([Buffer.from([1]), u32(nonce), Buffer.from([1]), Buffer.from([0, 1, 5]), v(query)]);
 }
+
+/** Why a Pyth (Hermes) price shouldn't be relayed to an attested board (null: fine).
+ *  The board drops Pyth's confidence (it keeps its attesters' spread), so a price
+ *  Pyth itself is unsure of is refused here instead. */
+export function unsignable(p: { price: string; conf: string }, maxConfBps: number): string | null {
+  const price = BigInt(p.price);
+  if (price <= 0n) return `price ${p.price} is not positive`;
+  if (BigInt(p.conf) * 10_000n > price * BigInt(maxConfBps)) return `confidence ${p.conf} is wider than ${maxConfBps} bps of ${p.price}`;
+  return null;
+}

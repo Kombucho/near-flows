@@ -2,10 +2,15 @@
 //! off the market (by a bot, or a thin pool) can't fill the vault at a bad price.
 //! The vault reads Pyth-format prices itself (here a stand-in with the real
 //! receiver's interface) and refuses stale, uncertain or jumpy prices.
+//! Run on a relay vault: the brain reads the prices and decides.
+//! (relay_crosschain.rs has a shorter twin of the first test; this one keeps the
+//! exact floor, the unguarded flow's loss and every kind of bad price.)
 
 mod common;
+mod relayw;
 
 use common::wasm;
+use relayw::{relay_world, view, x, RelayWorld};
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::types::NearToken;
 use near_workspaces::{Account, AccountId, Contract};
@@ -17,13 +22,14 @@ const NEAR_ID: &str = "c415de8d2eba7db216527dff4b60e8f3a5311c740dadb233e13e12547
 const USDC_ID: &str = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"; // Pyth USDC/USD
 
 struct World {
+    brain: Contract,
     alice: Account,
     keeper: Account,
     wnear: Contract,
     usdc: Contract,
     dex: Contract,
     pyth: Contract,
-    vault: Contract,
+    vault: AccountId,
 }
 
 async fn token(w: &near_workspaces::Worker<near_workspaces::network::Sandbox>, owner: &Account, sym: &str) -> anyhow::Result<Contract> {
@@ -45,30 +51,26 @@ async fn price(w: &World, id: &str, usd_e8: i64, conf_bps: i64, ema_e8: i64, age
 }
 
 async fn setup() -> anyhow::Result<World> {
-    let worker = near_workspaces::sandbox().await?;
+    let RelayWorld { worker, brain, alice, keeper, vault, .. } = relay_world().await?;
     let root = worker.dev_create_account().await?;
-    let (alice, keeper) = (worker.dev_create_account().await?, worker.dev_create_account().await?);
     let (wnear, usdc) = (token(&worker, &root, "wNEAR").await?, token(&worker, &root, "USDC").await?);
     let dex = worker.dev_deploy(&wasm("mock_dex")).await?;
     dex.call("new").args_json(json!({"lst": wnear.id()})).transact().await?.into_result()?;
     let pyth = worker.dev_deploy(&wasm("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
-    let vault = worker.dev_deploy(&wasm("vault")).await?;
-    vault.call("new").args_json(json!({"owner": alice.id(), "keeper": keeper.id()})).transact().await?.into_result()?;
     for t in [&wnear, &usdc] {
-        for who in [alice.id(), dex.id(), vault.id()] {
+        for who in [alice.id(), dex.id(), &vault] {
             root.call(t.id(), "storage_deposit").args_json(json!({"account_id": who})).deposit(NearToken::from_millinear(10)).transact().await?.into_result()?;
         }
         root.call(t.id(), "ft_transfer").args_json(json!({"receiver_id": dex.id(), "amount": (100_000_000 * ONE).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
     }
-    root.call(wnear.id(), "ft_transfer").args_json(json!({"receiver_id": vault.id(), "amount": (1_000 * ONE).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
-    alice.call(vault.id(), "trust").args_json(json!({"add": [{"contract": wnear.id()}, {"contract": usdc.id()}, {"contract": dex.id()}], "remove": []}))
-        .transact().await?.into_result()?;
+    root.call(wnear.id(), "ft_transfer").args_json(json!({"receiver_id": vault, "amount": (1_000 * ONE).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
+    x(&alice, &vault, "trust", json!({"add": [{"contract": wnear.id()}, {"contract": usdc.id()}, {"contract": dex.id()}], "remove": []})).await?.into_result()?;
     // Feeds: NEAR and USDC from Pyth, each confirmed by its EMA within 2%; fresh = under 60 s; confidence under 1%.
-    alice.call(vault.id(), "oracle_setup").args_json(json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
+    x(&alice, &vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
         {"name": "near", "contract": pyth.id(), "price_id": NEAR_ID, "backup": {"kind": "ema"}},
-        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_ID, "backup": {"kind": "ema"}}]}})).transact().await?.into_result()?;
-    let w = World { alice, keeper, wnear, usdc, dex, pyth, vault };
+        {"name": "usdc", "contract": pyth.id(), "price_id": USDC_ID, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
+    let w = World { brain, alice, keeper, wnear, usdc, dex, pyth, vault };
     price(&w, NEAR_ID, 200_000_000, 5, 199_000_000, 0).await?; // NEAR $2.00 (EMA $1.99)
     price(&w, USDC_ID, 100_000_000, 5, 100_000_000, 0).await?; // USDC $1.00
     Ok(w)
@@ -82,17 +84,17 @@ fn swap(w: &World, market: bool) -> Value {
 }
 
 async fn flow(w: &World, node: Value, amount: u128) -> anyhow::Result<u32> {
-    let f: u32 = w.alice.call(w.vault.id(), "save_flow").args_json(json!({"name": "sell", "nodes": [node]})).max_gas().transact().await?.into_result()?.json()?;
-    w.alice.call(w.vault.id(), "fund").args_json(json!({"flow_id": f, "node": 0, "amount": amount.to_string()})).max_gas().transact().await?.into_result()?;
+    let f: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "sell", "nodes": [node]})).await?.into_result()?.json()?;
+    x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": amount.to_string()})).await?.into_result()?;
     Ok(f)
 }
 
 async fn step(w: &World, f: u32) -> anyhow::Result<ExecutionFinalResult> {
-    Ok(w.keeper.call(w.vault.id(), "step").args_json(json!({"flow_id": f, "node": 0})).max_gas().transact().await?)
+    x(&w.keeper, &w.vault, "step", json!({"flow_id": f, "node": 0})).await
 }
 
 async fn inbox(w: &World, f: u32) -> anyhow::Result<u128> {
-    let v: Value = w.vault.view("get_flow").args_json(json!({"flow_id": f})).await?.json()?;
+    let v = view(&w.brain, &w.vault, "get_flow", json!({"flow_id": f})).await?;
     Ok(v["ledger"]["nodes"][0]["inbox"].as_str().unwrap().parse()?)
 }
 
@@ -122,7 +124,7 @@ async fn a_market_floor_stops_a_pool_pushed_off_the_market() -> anyhow::Result<(
     rate(&w, 2 * SCALE).await?;
     let r = step(&w, guarded).await?;
     assert!(r.logs().join("\n").contains(r#""out":"200000000000000000000""#), "{:?}", r.logs());
-    assert_eq!(balance(&w.usdc, w.vault.id()).await?, 390 * ONE);
+    assert_eq!(balance(&w.usdc, &w.vault).await?, 390 * ONE);
     Ok(())
 }
 
@@ -144,7 +146,7 @@ async fn no_fresh_tight_confirmed_price_no_trade() -> anyhow::Result<()> {
         assert!(failures.contains(why), "{name}: {failures}");
         assert!(!r.logs().join("\n").contains(r#""event":"step""#), "{name}: it ran");
         assert_eq!(inbox(&w, f).await?, 100 * ONE, "{name}: nothing taken");
-        assert!(w.vault.view("get_busy").await?.json::<Option<Value>>()?.is_none(), "{name}: the vault isn't left busy");
+        assert!(view(&w.brain, &w.vault, "get_vault", Value::Null).await?["busy"].is_null(), "{name}: the vault isn't left busy");
     }
     // A feed nobody set up is refused too.
     let mut node = swap(&w, true);

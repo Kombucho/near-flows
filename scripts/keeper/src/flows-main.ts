@@ -20,10 +20,17 @@
 // price is skipped (the brain would refuse it): its owner can top up, or run
 // their own keeper for free (AGENTS.md).
 //
+// Prices on demand (--board <board>): no price loop. Just before a step goes,
+// the keeper posts fresh prices for the feeds that vault reads from the board
+// (Chainlink feeds always, Pyth's if PYTH_API_KEY is set), so its market floor
+// reads a price seconds old. A price trigger that reads the board gets one post
+// before it is checked. A vault with nothing due costs nothing.
+//
 // Environment: FACTORY_ID (the relay factory), KEEPER_ACCOUNT_ID, NEAR_NETWORK (default testnet),
-// NEAR_RPC (default FastNEAR testnet), KEEPER_PRIVATE_KEY (or a near-cli key file).
+// NEAR_RPC (default FastNEAR testnet), KEEPER_PRIVATE_KEY (or a near-cli key file), PYTH_API_KEY.
 
-import { parseArgs } from "node:util";
+import { execFile } from "node:child_process";
+import { parseArgs, promisify } from "node:util";
 import { Chain, loadKey } from "./chain.ts";
 import { canPayKeeper, due, fired, keeperUnpaid, priceOf, runnable, type Flow, type FlowNode, type VaultState } from "./flows.ts";
 import { loadStore, unlock, type Node } from "./hidden.ts";
@@ -33,6 +40,7 @@ const { values: opt } = parseArgs({
     tick: { type: "string", default: "30" }, // seconds between rounds
     send: { type: "boolean", default: false },
     once: { type: "boolean", default: false },
+    board: { type: "string" }, // post this board's prices on demand
   },
 });
 
@@ -45,6 +53,27 @@ const chain = new Chain(rpc, factory, keeperId, opt.send ? loadKey(network, keep
 const brain = await chain.view<string>(factory, "get_brain");
 const log = (s: string) => console.log(`${new Date().toISOString().slice(11, 19)} ${s}`);
 
+// Feeds posted for a vault this round (one post per vault per round is enough).
+let fresh = new Set<string>();
+const run = promisify(execFile);
+/** Post fresh board prices for every feed `vault` reads from the board. Never throws:
+ *  a vault with no board feeds, or a source that's down, just gets no post (the
+ *  vault then refuses a stale price itself). */
+async function freshen(vault: string) {
+  if (!opt.board || !opt.send || fresh.has(vault)) return;
+  fresh.add(vault);
+  const scripts = ["chainlink-price", ...(process.env.PYTH_API_KEY ? ["pyth"] : [])];
+  for (const s of scripts) {
+    try {
+      const { stdout } = await run("npm", ["run", "-s", s, "--", "--board", opt.board, "--vault", vault], { timeout: 60_000 });
+      for (const l of stdout.split("\n")) if (l.includes(` on ${opt.board}: `)) log(`  ${s}: ${l.trim()}`);
+    } catch (e) {
+      const m = (e as { stderr?: string }).stderr ?? (e as Error).message;
+      if (!/which feeds\?|has no oracle/.test(m)) log(`  ${s} for ${vault} failed: ${m.split("\n").find((l) => /Error/.test(l))?.trim() ?? m.slice(0, 160)}`);
+    }
+  }
+}
+
 async function allVaults(): Promise<string[]> {
   const n = await chain.view<number>(factory, "get_vault_count");
   const all: string[] = [];
@@ -53,6 +82,7 @@ async function allVaults(): Promise<string[]> {
 }
 
 async function round() {
+  fresh = new Set();
   const vaults = await allVaults();
   const now = BigInt(Date.now()) * 1_000_000n;
   let mine = 0;
@@ -90,11 +120,13 @@ async function round() {
       }
       if (d.price) {
         const s = d.price.source;
+        if (s.contract === opt.board) await freshen(vault);
         const raw = await chain.view<string>(s.contract, s.method, JSON.parse(s.args)).catch(() => null);
         if (raw === null || !fired(d, priceOf(raw, s.per))) continue;
       }
       log(`${vault} flow ${d.flow} node ${d.node} "${d.label}" is due${fee > 0n ? ` (pays ${Number(fee) / 1e24} NEAR)` : ""}`);
       if (!opt.send) continue;
+      await freshen(vault);
       try {
         const h = hidden.get(d.flow);
         if (h) await chain.vaultCall(vault, "step_hidden", { flow_id: d.flow, node: d.node, reveal: h.nodes[d.node], salt: h.salts[d.node] });

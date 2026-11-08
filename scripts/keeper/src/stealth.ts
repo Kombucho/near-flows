@@ -3,8 +3,8 @@
 // A stealth vault is owned by an Ed25519 key, not an account. The owner signs a
 // command here, any account sends it to the vault's `exec` door and pays the gas,
 // and the brain checks the signature (contracts/brain/src/stealth.rs). The owner's
-// wallet never touches the vault. The relay vault's `exec` takes the same args the
-// full vault did, so only the gas changed (see execTgas).
+// wallet never touches the vault. The relay vault's `exec` door takes the signed
+// command as its args (see execTgas for the gas it needs).
 //
 // The key lives in a keypair file in near-cli's format
 // ({"public_key": "ed25519:...", "private_key": "ed25519:..."}). Keep it apart from
