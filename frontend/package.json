@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b --pretty false && vite build",
+    "build": "tsc -b --pretty false && vite build && cp dist/index.html dist/404.html",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "preview": "vite preview --host 127.0.0.1 --port 4173"
