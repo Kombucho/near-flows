@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useState } from "react";
 import { NavLink, Route, Routes, useNavigate } from "react-router-dom";
 import { ABI } from "./model/abi";
 import { PALETTE } from "./model/draft";
-import { remainderBps, serializeFlow, validateFlow, visibleNodes, type ChainId, type FlowNode } from "./model/flow";
+import { contractSerialize, exportLocalDraft, importLocalDraft, proposeRoute, remainderBps, validateFlow, visibleNodes, type ChainId, type FlowNode } from "./model/flow";
 import { LIMITS, SOURCE_COMMIT } from "./model/limits";
 import { parseDemoLog, projectLegs, type ReplayDocument, type Stage } from "./model/replay";
 import { useApp, type VaultDraft } from "./state";
@@ -231,6 +231,10 @@ function FlowWorkspace() {
   const [detail, setDetail] = useState(false);
   const [review, setReview] = useState(false);
   const [listMode, setListMode] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [routeNote, setRouteNote] = useState<string | null>(null);
+  const [draftNote, setDraftNote] = useState<string | null>(null);
   const visible = useMemo(() => visibleNodes(flow.nodes, app.lens), [flow.nodes, app.lens]);
   const issues = useMemo(() => validateFlow(flow.nodes), [flow.nodes]);
   const revealed = app.replay ? app.replay.events.slice(0, app.replayCursor) : [];
@@ -245,7 +249,44 @@ function FlowWorkspace() {
         <span className="badge">{flow.name}</span>
         <span className="muted num">{visible.length} visible / {flow.nodes.length} total</span>
         <span className="spacer" />
+        <button type="button" className="btn" onClick={() => setPaletteOpen((value) => !value)}>{paletteOpen ? "Hide palette" : "Show palette"}</button>
+        <button type="button" className="btn" onClick={() => setInspectorOpen((value) => !value)}>{inspectorOpen ? "Hide inspector" : "Show inspector"}</button>
         <button type="button" className="btn" onClick={() => setListMode((value) => !value)}>{listMode ? "Graph" : "List"}</button>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => {
+            const text = exportLocalDraft(flow);
+            localStorage.setItem("near-flows.local-draft-file", text);
+            const hidden = flow.nodes.length - visible.length;
+            const uiOnly = flow.nodes.filter((node) => !node.serializable).map((node) => node.title);
+            setDraftNote(`Local draft saved. ${flow.nodes.length} nodes kept. Hidden by the lens: ${hidden}. UI-only: ${uiOnly.join(", ") || "none"}.`);
+          }}
+        >
+          Save local draft
+        </button>
+        <label className="btn">
+          Import local draft
+          <input
+            aria-label="Import local draft"
+            type="file"
+            accept="application/json,.json"
+            hidden
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (!file) return;
+              file.text().then((text) => {
+                try {
+                  const restored = importLocalDraft(text);
+                  app.replaceNodes(restored.nodes);
+                  setDraftNote(`Imported ${restored.nodes.length} nodes, including UI-only nodes.`);
+                } catch {
+                  setDraftNote("Import refused. The file is not a local draft.");
+                }
+              });
+            }}
+          />
+        </label>
         <button type="button" className="btn-primary" onClick={() => setReview(true)}>Review</button>
       </header>
       <div className="toolbar">
@@ -269,19 +310,21 @@ function FlowWorkspace() {
             {services.map((service) => <option key={service} value={service}>{service}</option>)}
           </select>
         </label>
-        <span className="muted">Filter is a lens. Save uses the full document.</span>
+        <span className="muted">A lens hides nodes on screen. Save local draft keeps every node, including the Intents hop.</span>
+        {draftNote ? <span className="muted">{draftNote}</span> : null}
+        {routeNote ? <span role="status">{routeNote}</span> : null}
         <span className="badge">Public / private <strong>read-only</strong></span>
       </div>
-      <div className="workspace">
-        <aside className="palette">
+      <div className={`workspace${paletteOpen ? "" : " no-palette"}${inspectorOpen ? "" : " no-inspector"}`}>
+        {paletteOpen ? <aside className="palette">
           <p className="kicker">Palette</p>
           {PALETTE.map((item) => (
             <button key={item.id} type="button" className="item" onClick={() => app.addFromPalette(item.id)}>
               <strong>{item.title}</strong>
-              <div className="muted">{item.serializable ? item.venue : "Visible only. Not serialized."}</div>
+              <div className="muted">{item.serializable ? item.venue : "Stays in the local draft. Blocks a contract payload."}</div>
             </button>
           ))}
-        </aside>
+        </aside> : null}
         {listMode ? (
           <ol className="steps" style={{ display: "grid" }}>
             {visible.map((node) => (
@@ -293,11 +336,20 @@ function FlowWorkspace() {
             nodes={visible}
             stages={stages}
             selectedId={app.selectedNodeId}
-            onSelect={(id) => { app.selectNode(id); setDetail(true); }}
+            onSelect={(id) => app.selectNode(id)}
+            onDetails={(id) => { app.selectNode(id); setDetail(true); }}
             onMove={app.moveNode}
+            onConnectEnds={(sourceId, targetId) => {
+              const result = proposeRoute(flow.nodes, sourceId, targetId, 1000);
+              if (!result.ok) setRouteNote(`${result.code}: ${result.message}`);
+              else {
+                app.replaceNodes(result.nodes);
+                setRouteNote("Route stored at 1000 bps. Unallocated bps stay free balance.");
+              }
+            }}
           />
         )}
-        <Inspector node={selected} issues={issues.filter((issue) => !selected || issue.nodeId === selected.id || !issue.nodeId)} onChange={app.updateVisibleNode} />
+        {inspectorOpen ? <Inspector node={selected} nodes={flow.nodes} issues={issues.filter((issue) => !selected || issue.nodeId === selected.id || !issue.nodeId)} onChange={app.updateVisibleNode} onRouteNote={setRouteNote} /> : null}
       </div>
       {detail && selected ? <Detail node={selected} onClose={() => setDetail(false)} /> : null}
       {review ? <Review flowName={flow.name} nodes={flow.nodes} onClose={() => setReview(false)} /> : null}
@@ -305,7 +357,19 @@ function FlowWorkspace() {
   );
 }
 
-function Inspector({ node, issues, onChange }: { node: FlowNode | null; issues: { code: string; message: string }[]; onChange: (node: FlowNode) => void }) {
+function Inspector({
+  node,
+  nodes,
+  issues,
+  onChange,
+  onRouteNote,
+}: {
+  node: FlowNode | null;
+  nodes: FlowNode[];
+  issues: { code: string; message: string }[];
+  onChange: (node: FlowNode) => void;
+  onRouteNote: (note: string) => void;
+}) {
   if (!node) {
     return <aside className="inspector"><p className="kicker">Inspector</p><p className="muted">Select a node. Nothing is live.</p></aside>;
   }
@@ -327,8 +391,38 @@ function Inspector({ node, issues, onChange }: { node: FlowNode | null; issues: 
       {node.params.map((param) => <p key={param.label} className="muted"><strong style={{ color: "var(--text)" }}>{param.label}.</strong> {param.value}</p>)}
       <label>
         Title
-        <input value={node.title} onChange={(event) => onChange({ ...node, title: event.target.value })} />
+        <input aria-label="Node title" value={node.title} onChange={(event) => onChange({ ...node, title: event.target.value })} />
       </label>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          const data = new FormData(event.currentTarget);
+          const targetId = String(data.get("target") ?? "");
+          const bps = Number(data.get("bps"));
+          const result = proposeRoute(nodes, node.id, targetId, bps);
+          if (!result.ok) onRouteNote(`${result.code}: ${result.message}`);
+          else {
+            const next = result.nodes.find((item) => item.id === node.id);
+            if (next) onChange(next);
+            onRouteNote("Route stored. The rest of the output is free balance, not another route.");
+          }
+        }}
+      >
+        <label>
+          Route to
+          <select name="target" aria-label="Route target" defaultValue="">
+            <option value="" disabled>Choose a later node</option>
+            {nodes.filter((item) => item.index > node.index).map((item) => (
+              <option key={item.id} value={item.id}>{item.index}. {item.title}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Basis points
+          <input name="bps" aria-label="Route basis points" defaultValue="1000" inputMode="numeric" />
+        </label>
+        <button type="submit" className="btn">Add route</button>
+      </form>
       {issues.length > 0 ? (
         <ul className="list">
           {issues.map((issue) => <li key={issue.code + issue.message}>{issue.code}: {issue.message}</li>)}
@@ -366,7 +460,8 @@ function Detail({ node, onClose }: { node: FlowNode; onClose: () => void }) {
 function Review({ flowName, nodes, onClose }: { flowName: string; nodes: FlowNode[]; onClose: () => void }) {
   const titleId = useId();
   const issues = validateFlow(nodes);
-  const payload = serializeFlow(nodes);
+  const local = exportLocalDraft({ id: "review", vaultId: "local", name: flowName, nodes });
+  const contract = contractSerialize(nodes);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -377,12 +472,23 @@ function Review({ flowName, nodes, onClose }: { flowName: string; nodes: FlowNod
       <div className="dialog" role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <p className="kicker">Review · disarmed</p>
         <h2 id={titleId} style={{ margin: 0 }}>{flowName}</h2>
-        <p className="muted">{issues.length} validation notes. Payload below is the full document, including nodes hidden by the current lens. It is not submitted.</p>
+        <p className="muted">Local draft below keeps every node. It is not submitted. A lens does not remove nodes from it.</p>
+        {!contract.ok ? (
+          <>
+            <h3>Contract serialization blocked</h3>
+            <ul className="list">
+              {contract.blocked.map((block) => (
+                <li key={block.id}>{block.title} · id {block.id} · index {block.index}. {block.reason}</li>
+              ))}
+            </ul>
+            <p className="muted">No contract payload was built. These nodes were not dropped from the local draft.</p>
+          </>
+        ) : <p className="muted">Every node in this draft has a recipe shape. Submission is still disabled.</p>}
         <ul className="list">
           {issues.slice(0, 8).map((issue) => <li key={issue.code + issue.message}>{issue.code}: {issue.message}</li>)}
         </ul>
-        <textarea readOnly value={JSON.stringify(payload, null, 2)} aria-label="Save payload preview" />
-        <p className="muted">Direct evm_call, sol_sign and intents_sign_swap stay out of this payload. A keeper is not granted them here.</p>
+        <textarea readOnly value={local} aria-label="Local draft" />
+        <p className="muted">Direct evm_call, sol_sign and intents_sign_swap are not flow nodes. A keeper is not granted them here.</p>
         <div style={{ display: "flex", gap: 8 }}>
           <button type="button" className="btn" onClick={onClose}>Back</button>
           <button type="button" className="btn-primary" disabled>Submit testnet request</button>
@@ -445,12 +551,12 @@ function Demo() {
         ) : (
           <article className="card">
             <h2>Imported log</h2>
-            <p>Original timestamps: not present in DEMO| lines. Display speed is not chain time. Legs found: {app.replay.legs.length}. Events: {app.replay.events.length}. Cursor: {app.replayCursor}.</p>
+            <p>{app.replay.timing} Legs: {app.replay.legs.length}. Rows: {app.replay.events.length}. Display cursor: {app.replayCursor}. No original event time is shown.</p>
             {app.replay.warnings.map((warning) => <p key={warning}>{warning}</p>)}
             <ol className="list">
               {revealed.map((event) => (
                 <li key={event.id}>
-                  <span className="num">L{event.line}</span> {event.leg ? `leg ${event.leg}` : "no leg"} · {event.evidenced.length ? event.evidenced.join(", ") : "narrative only"}
+                  <span className="num">row {event.sourceRow}</span> {event.leg ? `leg ${event.leg}` : "no leg"} · {event.evidenced.length ? event.evidenced.join(", ") : "no stage marker"} · not recorded: {event.notRecorded.join(", ")}
                   <div>{event.raw}</div>
                 </li>
               ))}
@@ -458,7 +564,7 @@ function Demo() {
           </article>
         )}
         <div className="card" style={{ height: 720, padding: 0, overflow: "hidden" }}>
-          <FlowBoard nodes={visibleNodes(flow.nodes, { chain: "all", service: "all" })} stages={stages} selectedId={app.selectedNodeId} onSelect={app.selectNode} onMove={app.moveNode} />
+          <FlowBoard nodes={visibleNodes(flow.nodes, { chain: "all", service: "all" })} stages={stages} selectedId={app.selectedNodeId} onSelect={app.selectNode} onDetails={app.selectNode} onMove={app.moveNode} onConnectEnds={() => undefined} />
         </div>
         <StageLegend />
       </div>
@@ -470,8 +576,8 @@ function StageLegend() {
   const items: { id: Stage | "none"; text: string }[] = [
     { id: "none", text: "Awaiting evidence is not success." },
     { id: "signed", text: "Signed is not sent." },
-    { id: "sent", text: "Sent is not landed. This log format rarely says sent." },
-    { id: "landed", text: "Landed needs execution text. It does not fill earlier gaps." },
+    { id: "sent", text: "Sent is not recorded. demo.rs never prints a sent marker." },
+    { id: "landed", text: "Landed only for executed on the fork or executed:. It does not fill earlier gaps." },
     { id: "reported", text: "Reported is not an independent balance." },
     { id: "failed", text: "REFUSED stays failed." },
   ];

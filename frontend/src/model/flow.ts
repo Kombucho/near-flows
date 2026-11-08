@@ -30,8 +30,8 @@ export type FlowNode = {
   params: { label: string; value: string }[];
   position: { x: number; y: number };
   /**
-   * False for an Intents hop annotation: visible, not a Recipe on this commit.
-   * Omitted from the serialized route list.
+   * False for a UI-only node such as the Intents hop. It stays in the local draft.
+   * Contract serialization must refuse the whole document and name the node.
    */
   serializable: boolean;
   catalogId?: string;
@@ -86,7 +86,7 @@ export function validateFlow(nodes: FlowNode[]): FlowIssue[] {
       issues.push({
         code: "UnsupportedNode",
         nodeId: node.id,
-        message: `${node.title} is visible but not a serializable recipe on this commit. It stays in the draft and is omitted from a save payload.`,
+        message: `${node.title} (id ${node.id}, index ${node.index}) has no contract recipe on this commit. Contract serialization is blocked. The local draft still includes it.`,
       });
     }
     if (isCollector(node) && node.trigger.when !== "every" && node.trigger.when !== "manual") {
@@ -200,11 +200,55 @@ export type SerializedNode = {
   title: string;
 };
 
-/** Save payload: full document, unsupported nodes omitted, routes unchanged. */
-export function serializeFlow(nodes: FlowNode[]): SerializedNode[] {
-  return nodes
-    .filter((node) => node.serializable)
+export type LocalDraftFile = {
+  kind: "near-flows-local-draft";
+  version: 1;
+  note: "Local draft. Not a contract call. UI-only nodes are kept.";
+  flow: FlowDocument;
+};
+
+/** Browser/file persistence. Every node is kept, including UI-only nodes and nodes a lens hides. */
+export function exportLocalDraft(flow: FlowDocument): string {
+  const file: LocalDraftFile = {
+    kind: "near-flows-local-draft",
+    version: 1,
+    note: "Local draft. Not a contract call. UI-only nodes are kept.",
+    flow,
+  };
+  return JSON.stringify(file);
+}
+
+export function importLocalDraft(text: string): FlowDocument {
+  const parsed = JSON.parse(text) as Partial<LocalDraftFile>;
+  if (parsed.kind !== "near-flows-local-draft" || parsed.version !== 1 || !parsed.flow || !Array.isArray(parsed.flow.nodes)) {
+    throw new Error("not a local draft");
+  }
+  return parsed.flow;
+}
+
+export type ContractBlock = {
+  id: string;
+  index: number;
+  title: string;
+  catalogId?: string;
+  reason: string;
+};
+
+/** Contract payload. Refuses the document when any node cannot be a recipe. Does not omit those nodes. */
+export function contractSerialize(nodes: FlowNode[]): { ok: true; nodes: SerializedNode[] } | { ok: false; blocked: ContractBlock[] } {
+  const blocked = nodes
+    .filter((node) => !node.serializable)
     .map((node) => ({
+      id: node.id,
+      index: node.index,
+      title: node.title,
+      catalogId: node.catalogId,
+      reason: "No flow recipe on this commit. intents_sign_swap is a separate owner call, not this node, and a keeper is not offered that call.",
+    }));
+  if (blocked.length > 0) return { ok: false, blocked };
+  return {
+    ok: true,
+    nodes: nodes.map((node) => ({
       index: node.index,
       input: node.input,
       output: node.output,
@@ -212,5 +256,42 @@ export function serializeFlow(nodes: FlowNode[]): SerializedNode[] {
       next: node.routes.map((route) => ({ to: route.to, bps: route.bps })),
       catalogId: node.catalogId,
       title: node.title,
-    }));
+    })),
+  };
+}
+
+export function proposeRoute(
+  nodes: FlowNode[],
+  sourceId: string,
+  targetId: string,
+  bps: number,
+): { ok: true; nodes: FlowNode[] } | { ok: false; code: string; message: string } {
+  const source = nodes.find((node) => node.id === sourceId);
+  const target = nodes.find((node) => node.id === targetId);
+  if (!source || !target) return { ok: false, code: "NoSuchNode", message: "One end of the route is not in the document." };
+  if (!Number.isInteger(bps) || bps <= 0) return { ok: false, code: "BadBps", message: "Basis points must be a positive integer." };
+  if (target.index <= source.index) {
+    return { ok: false, code: "RouteBackwards", message: `${source.title} (index ${source.index}) cannot route backward to ${target.title} (index ${target.index}).` };
+  }
+  if (!source.output || target.input !== source.output || target.input === "none") {
+    return {
+      ok: false,
+      code: "RouteTokenMismatch",
+      message: `${source.title} outputs ${source.output ?? "nothing"}; ${target.title} accepts ${target.input}.`,
+    };
+  }
+  if (source.routes.length >= LIMITS.maxRoutes) {
+    return { ok: false, code: "TooManyRoutes", message: `${source.title} already has ${LIMITS.maxRoutes} routes.` };
+  }
+  if (source.routes.some((route) => route.to === target.index)) {
+    return { ok: false, code: "DuplicateRoute", message: `${source.title} already routes to index ${target.index}.` };
+  }
+  const room = LIMITS.maxBps - routeSum(source);
+  if (bps > room) {
+    return { ok: false, code: "RoutesOverfull", message: `Only ${room} bps remain on ${source.title}. ${bps} was not stored.` };
+  }
+  return {
+    ok: true,
+    nodes: nodes.map((node) => (node.id === source.id ? { ...node, routes: [...node.routes, { to: target.index, bps }] } : node)),
+  };
 }

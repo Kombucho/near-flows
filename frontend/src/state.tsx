@@ -69,6 +69,7 @@ type Api = AppState & {
   updateVisibleNode: (node: FlowNode) => void;
   moveNode: (id: string, position: { x: number; y: number }) => void;
   addFromPalette: (catalogId: string) => void;
+  replaceNodes: (nodes: FlowNode[]) => void;
   setReplay: (doc: ReplayDocument | null) => void;
   setCursor: (cursor: number) => void;
   setPlaying: (playing: boolean) => void;
@@ -113,6 +114,11 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
               ? flow
               : { ...flow, nodes: flow.nodes.map((node) => (node.id === id ? { ...node, position } : node)) },
           ),
+        })),
+      replaceNodes: (nodes) =>
+        setState((s) => ({
+          ...s,
+          flows: s.flows.map((flow) => (flow.id === s.selectedFlowId ? { ...flow, nodes } : flow)),
         })),
       addFromPalette: (catalogId) =>
         setState((s) => ({

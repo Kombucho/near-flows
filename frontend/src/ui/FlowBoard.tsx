@@ -5,6 +5,8 @@ import {
   Handle,
   Position,
   ReactFlow,
+  ReactFlowProvider,
+  useReactFlow,
   type Edge,
   type Node,
   type NodeProps,
@@ -59,7 +61,7 @@ function StepNode({ data, selected }: NodeProps<Node<Data>>) {
         {left != null && left > 0 ? <span className="chip">{left} bps free</span> : null}
       </div>
       <footer>
-        <span className={latest ? `stage ${latest}` : "stage"}>{stageLabel(stages)}</span>
+        <span className={latest ? `stage ${latest}` : "stage"}>{stages.length ? stageLabel(stages) : "Not recorded"}</span>
         <button type="button" className="btn-quiet nodrag nopan" onClick={() => data.onOpen(data.node.id)}>
           Details
         </button>
@@ -71,29 +73,34 @@ function StepNode({ data, selected }: NodeProps<Node<Data>>) {
 
 const nodeTypes = { step: StepNode };
 
-export function FlowBoard({
+function BoardInner({
   nodes,
   stages,
   selectedId,
   onSelect,
+  onDetails,
   onMove,
+  onConnectEnds,
 }: {
   nodes: FlowNode[];
   stages: NodeStage[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onDetails: (id: string) => void;
   onMove: (id: string, position: { x: number; y: number }) => void;
+  onConnectEnds: (sourceId: string, targetId: string) => void;
 }) {
+  const flow = useReactFlow();
   const stageById = useMemo(() => new Map(stages.map((stage) => [stage.nodeId, stage.evidenced])), [stages]);
   const flowNodes = useMemo<Node<Data>[]>(() => {
     return nodes.map((node) => ({
       id: node.id,
       type: "step",
       position: { x: node.position.x, y: node.position.y },
-      data: { node, stages: stageById.get(node.id) ?? [], onOpen: onSelect },
+      data: { node, stages: stageById.get(node.id) ?? [], onOpen: onDetails },
       selected: node.id === selectedId,
     }));
-  }, [nodes, stageById, selectedId, onSelect]);
+  }, [nodes, stageById, selectedId, onDetails]);
 
   const edges = useMemo<Edge[]>(() => {
     const byIndex = new Map(nodes.map((node) => [node.index, node]));
@@ -117,17 +124,39 @@ export function FlowBoard({
     return stored;
   }, [nodes, selectedId]);
 
+  const selected = nodes.find((node) => node.id === selectedId);
+  const defaultViewport = selected
+    ? { x: 120 - selected.position.x, y: 80 - selected.position.y, zoom: 1 }
+    : { x: 48, y: 48, zoom: 1 };
+
   return (
     <div className="canvas-wrap">
+      <div className="canvas-tools">
+        <button type="button" className="btn" onClick={() => flow.fitView({ padding: 0.15, duration: 180, maxZoom: 1 })}>
+          Fit full board
+        </button>
+        <button
+          type="button"
+          className="btn"
+          disabled={!selected}
+          onClick={() => selected && flow.fitView({ nodes: [{ id: selected.id }], padding: 0.4, duration: 180, maxZoom: 1 })}
+        >
+          Focus selected
+        </button>
+      </div>
       <ReactFlow
         nodes={flowNodes}
         edges={edges}
         nodeTypes={nodeTypes}
-        fitView
-        minZoom={0.35}
+        defaultViewport={defaultViewport}
+        minZoom={0.4}
+        maxZoom={1.5}
         proOptions={{ hideAttribution: true }}
         onNodeClick={(_, node) => onSelect(node.id)}
         onNodeDragStop={(_, node) => onMove(node.id, node.position)}
+        onConnect={(connection) => {
+          if (connection.source && connection.target) onConnectEnds(connection.source, connection.target);
+        }}
         nodesDraggable
         elementsSelectable
         panOnScroll
@@ -136,5 +165,21 @@ export function FlowBoard({
         <Controls showInteractive={false} />
       </ReactFlow>
     </div>
+  );
+}
+
+export function FlowBoard(props: {
+  nodes: FlowNode[];
+  stages: NodeStage[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onDetails: (id: string) => void;
+  onMove: (id: string, position: { x: number; y: number }) => void;
+  onConnectEnds: (sourceId: string, targetId: string) => void;
+}) {
+  return (
+    <ReactFlowProvider>
+      <BoardInner {...props} />
+    </ReactFlowProvider>
   );
 }
