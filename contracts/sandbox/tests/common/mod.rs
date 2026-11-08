@@ -24,6 +24,18 @@ pub fn templates(chain: &str) -> Vec<Value> {
 pub fn sol_template(name: &str, fill: &[(&str, &str)]) -> Value {
     let lib: Value = serde_json::from_str(&std::fs::read_to_string(format!("{}/../../nodes/sol-templates.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap();
     let t = lib["templates"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap_or_else(|| panic!("no Solana template {name}"));
+    filled(name, t, fill)
+}
+
+/// An EVM Intents deposit template (nodes/evm-templates.json, a chain's `intents_deposits`),
+/// with the owner's deposit address and caps filled in.
+pub fn intents_deposit_template(chain: &str, name: &str, fill: &[(&str, &str)]) -> Value {
+    let lib: Value = serde_json::from_str(&std::fs::read_to_string(format!("{}/../../nodes/evm-templates.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap();
+    let t = lib["chains"][chain]["intents_deposits"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap_or_else(|| panic!("no {chain} deposit template {name}"));
+    filled(name, t, fill)
+}
+
+fn filled(name: &str, t: &Value, fill: &[(&str, &str)]) -> Value {
     let mut text = t.to_string();
     for (k, v) in fill {
         text = text.replace(&format!("{{{k}}}"), v);
