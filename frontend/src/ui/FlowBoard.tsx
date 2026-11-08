@@ -14,6 +14,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import type { FlowNode } from "../model/flow";
 import { remainderBps } from "../model/flow";
+import { chainLabel } from "../model/shell";
 import type { NodeStage, Stage } from "../model/replay";
 
 type Data = {
@@ -48,17 +49,18 @@ function StepNode({ data, selected }: NodeProps<Node<Data>>) {
   const latest = stages.at(-1);
   const left = remainderBps(data.node);
   return (
-    <article className={selected ? "step selected" : "step"}>
+    <article className={selected ? "step selected" : "step"} data-chain={data.node.chain}>
       <Handle type="target" position={Position.Left} />
       <header>
         <strong>{data.node.title}</strong>
-        <span className="muted">{data.node.chain}</span>
+        <span className="muted">{chainLabel(data.node.chain)}</span>
       </header>
       <p className="venue">{data.node.venue}</p>
       <div className="chips">
         <span className="chip">{shortToken(data.node.input)}</span>
         <span className="chip">{data.node.output ? shortToken(data.node.output) : "no output"}</span>
         {left != null && left > 0 ? <span className="chip">{left} bps free</span> : null}
+        {!data.node.serializable ? <span className="chip">Local</span> : null}
       </div>
       <footer>
         <span className={latest ? `stage ${latest}` : "stage"}>{stages.length ? stageLabel(stages) : "Not recorded"}</span>
@@ -77,6 +79,8 @@ function BoardInner({
   nodes,
   stages,
   selectedId,
+  theme,
+  focusKey,
   onSelect,
   onDetails,
   onMove,
@@ -85,6 +89,8 @@ function BoardInner({
   nodes: FlowNode[];
   stages: NodeStage[];
   selectedId: string | null;
+  theme: "light" | "dark";
+  focusKey: string;
   onSelect: (id: string) => void;
   onDetails: (id: string) => void;
   onMove: (id: string, position: { x: number; y: number }) => void;
@@ -113,46 +119,53 @@ function BoardInner({
           source: node.id,
           target: target.id,
           label: `${(route.bps / 100).toFixed(2).replace(/\.00$/, "")}%`,
-          style: { stroke: "#71717a", strokeWidth: node.id === selectedId || target.id === selectedId ? 2 : 1.5 },
-          labelStyle: { fill: "#fafafa", fontSize: 12 },
-          labelBgStyle: { fill: "#18181b" },
+          style: { stroke: theme === "light" ? "#a8a29e" : "#78716c", strokeWidth: node.id === selectedId || target.id === selectedId ? 2 : 1.5 },
+          labelStyle: { fill: theme === "light" ? "#1c1917" : "#f5f4f1", fontSize: 12, fontWeight: 560 },
+          labelBgStyle: { fill: theme === "light" ? "#fffcf8" : "#1c1b19" },
           labelBgPadding: [6, 3] as [number, number],
           labelBgBorderRadius: 8,
         }];
       }),
     );
     return stored;
-  }, [nodes, selectedId]);
+  }, [nodes, selectedId, theme]);
 
+  const anchor = nodes.reduce<{ x: number; y: number } | null>((best, node) => {
+    if (!best || node.position.x < best.x || (node.position.x === best.x && node.position.y < best.y)) return node.position;
+    return best;
+  }, null);
+  const narrow = typeof window !== "undefined" && window.matchMedia("(max-width: 860px)").matches;
+  const top = narrow ? 288 : 176;
+  const left = narrow ? 16 : 80;
+  const defaultViewport = anchor ? { x: left - anchor.x, y: top - anchor.y, zoom: 1 } : { x: left, y: top, zoom: 1 };
   const selected = nodes.find((node) => node.id === selectedId);
-  const defaultViewport = selected
-    ? { x: 120 - selected.position.x, y: 80 - selected.position.y, zoom: 1 }
-    : { x: 48, y: 48, zoom: 1 };
 
   return (
     <div className="canvas-wrap">
       <div className="canvas-tools">
-        <button type="button" className="btn" onClick={() => flow.fitView({ padding: 0.15, duration: 180, maxZoom: 1 })}>
-          Fit full board
+        <button type="button" onClick={() => flow.fitView({ padding: 0.28, duration: 180, maxZoom: 1 })}>
+          Fit
         </button>
         <button
           type="button"
-          className="btn"
           disabled={!selected}
-          onClick={() => selected && flow.fitView({ nodes: [{ id: selected.id }], padding: 0.4, duration: 180, maxZoom: 1 })}
+          onClick={() => selected && flow.fitView({ nodes: [{ id: selected.id }], padding: 0.45, duration: 180, maxZoom: 1 })}
         >
-          Focus selected
+          Focus
         </button>
       </div>
       <ReactFlow
+        key={focusKey}
         nodes={flowNodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        colorMode={theme}
         defaultViewport={defaultViewport}
-        minZoom={0.4}
-        maxZoom={1.5}
+        minZoom={0.45}
+        maxZoom={1.6}
         proOptions={{ hideAttribution: true }}
         onNodeClick={(_, node) => onSelect(node.id)}
+        onPaneClick={() => onSelect("")}
         onNodeDragStop={(_, node) => onMove(node.id, node.position)}
         onConnect={(connection) => {
           if (connection.source && connection.target) onConnectEnds(connection.source, connection.target);
@@ -160,8 +173,9 @@ function BoardInner({
         nodesDraggable
         elementsSelectable
         panOnScroll
+        fitView={false}
       >
-        <Background color="#27272a" gap={24} size={1} />
+        <Background color={theme === "light" ? "#d6d1c8" : "#2a2926"} gap={28} size={1.2} />
         <Controls showInteractive={false} />
       </ReactFlow>
     </div>
@@ -172,6 +186,8 @@ export function FlowBoard(props: {
   nodes: FlowNode[];
   stages: NodeStage[];
   selectedId: string | null;
+  theme: "light" | "dark";
+  focusKey: string;
   onSelect: (id: string) => void;
   onDetails: (id: string) => void;
   onMove: (id: string, position: { x: number; y: number }) => void;

@@ -236,9 +236,12 @@ export const PALETTE: { id: string; title: string; venue: string; chain: FlowNod
   { id: "node.rhea_swap", title: "Swap on Rhea", venue: "Rhea", chain: "near", service: "rhea", input: "wrap.testnet", output: "meme.testnet", serializable: true },
   { id: "node.linear_stake", title: "Stake with LiNEAR", venue: "LiNEAR", chain: "near", service: "linear", input: "near", output: "linear-protocol.testnet", serializable: true },
   { id: "node.bazaar_claim_idea", title: "Claim an idea", venue: "Bazaar", chain: "near", service: "bazaar", input: "none", output: "coin.testnet", serializable: true },
-  { id: "sol_template.pump_buy", title: "pump.fun buy", venue: "pump.fun", chain: "solana", service: "pump", input: "sol:SOL", output: "sol:mint", serializable: true },
-  { id: "evm_template.robinhood.v4_swap_eth_nvda", title: "Swap ETH to NVDA", venue: "Uniswap v4", chain: "robinhood", service: "uniswap-v4", input: "evm:4663:eth", output: "evm:4663:nvda", serializable: true },
   { id: "intents-hop", title: "Intents hop", venue: "NEAR Intents", chain: "near", service: "intents", input: "sol:SOL", output: "evm:4663:eth", serializable: false },
+  { id: "sol_template.pump_buy", title: "Buy a coin", venue: "pump.fun", chain: "solana", service: "pump", input: "sol:SOL", output: "sol:mint", serializable: true },
+  { id: "sol_template.dlmm_open", title: "Open a position", venue: "Meteora DLMM", chain: "solana", service: "meteora", input: "sol:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", output: null, serializable: true },
+  { id: "sol_template.dlmm_claim", title: "Sweep fees", venue: "Meteora DLMM", chain: "solana", service: "meteora", input: "none", output: "sol:SOL", serializable: true },
+  { id: "evm_template.robinhood.v4_swap_eth_nvda", title: "Swap ETH to NVDA", venue: "Uniswap v4", chain: "robinhood", service: "uniswap-v4", input: "evm:4663:eth", output: "evm:4663:nvda", serializable: true },
+  { id: "evm_template.robinhood.pairtoken_ethnvda_zap_eth", title: "Into the basket", venue: "ETHNVDA pair token", chain: "robinhood", service: "stonk", input: "evm:4663:eth", output: "evm:4663:ethnvda", serializable: true },
 ];
 
 export function nodeFromPalette(item: (typeof PALETTE)[number], index: number): FlowNode {
@@ -253,8 +256,8 @@ export function nodeFromPalette(item: (typeof PALETTE)[number], index: number): 
     output: item.output,
     trigger: item.input === "none" ? { when: "manual" } : { when: "now" },
     routes: [],
-    params: [{ label: "Catalog", value: `${item.id} on commit 6afddea. Not installed on a vault.` }],
-    position: { x: 80 + (index % 4) * 40, y: 80 + index * 24 },
+    params: [{ label: "Catalog", value: item.id }],
+    position: { x: 80 + (index % 4) * 280, y: 160 + Math.floor(index / 4) * 210 },
     serializable: item.serializable,
     catalogId: item.id,
   };

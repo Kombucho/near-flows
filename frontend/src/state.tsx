@@ -11,6 +11,8 @@ export type VaultDraft = {
   loginLabel: string;
 };
 
+export type Surface = "flow" | "pnl" | "replay";
+
 type AppState = {
   loginLabel: string;
   vaults: VaultDraft[];
@@ -18,6 +20,7 @@ type AppState = {
   flows: FlowDocument[];
   selectedFlowId: string;
   lens: Lens;
+  surface: Surface;
   selectedNodeId: string | null;
   replay: ReplayDocument | null;
   replayCursor: number;
@@ -40,7 +43,8 @@ function seed(): AppState {
     flows: [flow],
     selectedFlowId: flow.id,
     lens: { chain: "all", service: "all" },
-    selectedNodeId: "nvda",
+    surface: "flow",
+    selectedNodeId: null,
     replay: null,
     replayCursor: 0,
     replayPlaying: false,
@@ -52,9 +56,19 @@ function load(): AppState {
   try {
     const raw = localStorage.getItem(STORAGE);
     if (!raw) return seed();
-    const parsed = JSON.parse(raw) as AppState;
+    const parsed = JSON.parse(raw) as Partial<AppState>;
     if (!parsed.vaults?.length || !parsed.flows?.length) return seed();
-    return { ...seed(), ...parsed, replay: null, replayCursor: 0, replayPlaying: false };
+    const surface: Surface = parsed.surface === "pnl" || parsed.surface === "replay" ? parsed.surface : "flow";
+    return {
+      ...seed(),
+      ...parsed,
+      vaults: parsed.vaults,
+      flows: parsed.flows,
+      surface,
+      replay: null,
+      replayCursor: 0,
+      replayPlaying: false,
+    };
   } catch {
     return seed();
   }
@@ -64,7 +78,9 @@ type Api = AppState & {
   selectVault: (id: string) => void;
   addVault: (vault: VaultDraft) => void;
   selectFlow: (id: string) => void;
+  createFlow: (name: string) => void;
   setLens: (lens: Lens) => void;
+  setSurface: (surface: Surface) => void;
   selectNode: (id: string | null) => void;
   updateVisibleNode: (node: FlowNode) => void;
   moveNode: (id: string, position: { x: number; y: number }) => void;
@@ -92,10 +108,26 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       (lens.chain === "all" || node.chain === lens.chain) && (lens.service === "all" || node.service === lens.service);
     return {
       ...state,
-      selectVault: (id) => setState((s) => ({ ...s, selectedVaultId: id })),
+      selectVault: (id) =>
+        setState((s) => {
+          const own = s.flows.filter((flow) => flow.vaultId === id);
+          const next = own.find((flow) => flow.id === s.selectedFlowId) ?? own[0];
+          return { ...s, selectedVaultId: id, selectedFlowId: next?.id ?? s.selectedFlowId, selectedNodeId: null };
+        }),
       addVault: (vault) => setState((s) => ({ ...s, vaults: [...s.vaults, vault], selectedVaultId: vault.id })),
-      selectFlow: (id) => setState((s) => ({ ...s, selectedFlowId: id, selectedNodeId: null })),
-      setLens: (lens) => setState((s) => ({ ...s, lens })),
+      selectFlow: (id) => setState((s) => ({ ...s, selectedFlowId: id, selectedNodeId: null, surface: "flow" })),
+      createFlow: (name) =>
+        setState((s) => {
+          const flow: FlowDocument = {
+            id: `flow-${Date.now()}`,
+            vaultId: s.selectedVaultId,
+            name: name.trim() || "Untitled",
+            nodes: [],
+          };
+          return { ...s, flows: [...s.flows, flow], selectedFlowId: flow.id, selectedNodeId: null, surface: "flow" };
+        }),
+      setLens: (lens) => setState((s) => ({ ...s, lens, ...(lens.chain === "all" ? { surface: "flow" as const } : {}) })),
+      setSurface: (surface) => setState((s) => ({ ...s, surface })),
       selectNode: (id) => setState((s) => ({ ...s, selectedNodeId: id })),
       updateVisibleNode: (node) =>
         setState((s) => ({
@@ -131,6 +163,13 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
             const created = nodeFromPalette(item, index);
             return { ...flow, nodes: [...flow.nodes, created] };
           }),
+          selectedNodeId: (() => {
+            const flow = s.flows.find((item) => item.id === s.selectedFlowId);
+            const entry = PALETTE.find((item) => item.id === catalogId);
+            if (!flow || !entry) return s.selectedNodeId;
+            const index = flow.nodes.reduce((max, node) => Math.max(max, node.index), -1) + 1;
+            return nodeFromPalette(entry, index).id;
+          })(),
         })),
       setReplay: (doc) => setState((s) => ({ ...s, replay: doc, replayCursor: 0, replayPlaying: false })),
       setCursor: (cursor) => setState((s) => ({ ...s, replayCursor: cursor })),
