@@ -1,4 +1,4 @@
-//! Market prices, as vault/src/oracle.rs: a swap's minimum follows the market,
+//! Market prices: a swap's minimum follows the market,
 //!     max(keeper's quote, owner's hard floor, oracle price x (1 - slippage)).
 //! Every feed must be fresh, tight (confidence) and confirmed by its backup
 //! (Pyth's EMA, or another Pyth-compatible contract such as a priceboard).
@@ -187,9 +187,9 @@ mod tests {
         PythPrice { price: I64(price), conf: U64(0), expo, publish_time: 0 }
     }
 
-    /// The vault's own vectors (vault/src/oracle.rs), exact digits from Python fractions.
+    /// The full vault's vectors (exact digits from Python fractions), now the brain's own.
     #[test]
-    fn floors_match_the_vaults_to_the_last_digit() {
+    fn floors_from_prices_keep_every_digit() {
         let eth = usd_e18(&p(222_450_000_000, -8)).unwrap();
         let usdc = usd_e18(&p(100_010_000, -8)).unwrap();
         let m = Market { sell: "eth".into(), buy: "usdc".into(), dec_in: 18, dec_out: 6, slippage_bps: 50 };
@@ -201,5 +201,36 @@ mod tests {
         let buy = Market { sell: "near".into(), buy: "meme".into(), dec_in: 24, dec_out: 6, slippage_bps: 100 };
         assert_eq!(market_min(&buy, 10u128.pow(24), near, meme), 38_668_853_995_781);
         assert!(usd_e18(&p(-1, -8)).is_none() && usd_e18(&p(i64::MAX, 30)).is_none());
+    }
+
+    const E18: u128 = 1_000_000_000_000_000_000;
+
+    /// The rest of the full vault's oracle vectors (vault/src/oracle.rs, removed
+    /// with the vault): kept here so the brain alone proves every digit.
+    #[test]
+    fn floors_per_input_limits_and_memecoin_sells_keep_every_digit() {
+        let eth = usd_e18(&p(222_450_000_000, -8)).unwrap();
+        let usdc = usd_e18(&p(100_010_000, -8)).unwrap();
+        assert_eq!(eth, 2_224_500_000_000_000_000_000);
+        let m = Market { sell: "eth".into(), buy: "usdc".into(), dec_in: 18, dec_out: 6, slippage_bps: 50 };
+        // The same floor per unit of input, scaled 1e24, gives the same minimum.
+        let per_in = market_per_in(&m, eth, usdc, 1_000_000_000_000_000_000_000_000);
+        assert_eq!(crate::mul_div(100_000_000_000_000_000, per_in, 1_000_000_000_000_000_000_000_000) / 10_000, 22_131);
+        // 1,000 USDC -> at least 1000 / 2224.5 x 0.995 = 0.4473 WETH.
+        let back = Market { sell: "usdc".into(), buy: "eth".into(), dec_in: 6, dec_out: 18, slippage_bps: 50 };
+        assert_eq!(market_min(&back, 1_000_000_000, usdc, eth) / 100_000_000_000_000, 4_473);
+        // Limits: zero amount -> zero; full slippage -> zero; a zero price is no price.
+        assert_eq!(market_min(&m, 0, eth, usdc), 0);
+        assert_eq!(market_min(&Market { slippage_bps: 10_000, ..m.clone() }, 1, eth, usdc), 0);
+        assert!(usd_e18(&p(0, -8)).is_none());
+        // Positive exponents work (huge ones are refused, test above).
+        assert_eq!(usd_e18(&p(5, 2)).unwrap(), 500 * E18);
+        // A pump.fun coin at $5.1204e-8 keeps its digits; selling 1e9 coins at NEAR $2.00,
+        // 1% slippage = 25.345980 NEAR exactly (Python fractions).
+        let meme = usd_e18(&p(51_204, -12)).unwrap();
+        assert_eq!(meme, 51_204_000_000);
+        let near = usd_e18(&p(200_000_000, -8)).unwrap();
+        let sell = Market { sell: "meme".into(), buy: "near".into(), dec_in: 6, dec_out: 24, slippage_bps: 100 };
+        assert_eq!(market_min(&sell, 10u128.pow(15), meme, near), 25_345_980_000_000_000_000_000_000);
     }
 }

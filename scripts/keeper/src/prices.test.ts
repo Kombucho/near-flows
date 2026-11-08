@@ -4,7 +4,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { KeyPair } from "near-api-js";
 import { createPublicKey, verify } from "node:crypto";
-import { attestation, curveQuery, feedId, toUnits } from "./prices.ts";
+import { attestation, curveQuery, feedId, toUnits, unsignable } from "./prices.ts";
+
+test("a Hermes price is relayed only if positive and no less certain than the limit", () => {
+  assert.equal(unsignable({ price: "300000000000", conf: "150000000" }, 100), null); // 0.05%
+  assert.match(unsignable({ price: "300000000000", conf: "3000000001" }, 100)!, /wider than 100 bps/);
+  assert.match(unsignable({ price: "0", conf: "0" }, 100)!, /not positive/);
+});
 
 const MEME = "GDFVPqix6jYh4xvr1CBx14JWUaLMTvAT2rYA9FyApump";
 const MEME_HEX = "e202a830669968911d12fb8957d8651fcfa7a56a28cb6b84b7fc21239d8859df";

@@ -1,5 +1,5 @@
 {
-  "about": "Ready-made flow nodes for the vault (contracts/vault). Each `recipe` is saved as a node's `action`; `${...}` are filled in by the canvas or the agent; `{amount}`, `{min_out}`, `{scaled}`, `{owner}`, `{vault}` are filled in by the vault at run time. `trust` lists what the vault must trust for the node to run. `tested` names the test that runs this recipe against real code, or says it isn't tested in a flow yet.",
+  "about": "Ready-made flow nodes for a relay vault (contracts/relay; its rules live in the shared brain, contracts/brain). Every request goes through the vault's `x` door as `{\"<method>\": <args>}` (e.g. x {\"save_flow\": {name, nodes}}); views are the brain's, with the vault named (e.g. brain.get_flow({vault, flow_id})). Each `recipe` is saved as a node's `action`; `${...}` are filled in by the canvas or the agent; `{amount}`, `{min_out}`, `{scaled}`, `{owner}`, `{vault}` are filled in by the brain at run time. `trust` lists what the vault must trust (x {\"trust\": {add, remove}}) for the node to run. `tested` names the test that runs this recipe against real code, or says it isn't tested in a flow yet.",
   "network": "testnet",
   "nodes": [
     {
@@ -420,37 +420,37 @@
     {
       "id": "intents_swap",
       "label": "Swap via NEAR Intents",
-      "kind": "vault action (not a recipe): the vault builds and MPC-signs its own token_diff intent",
-      "setup": "intents_setup(verifier, signer) once; intents_allow({token_in, token_out, max_in, floor_out, floor_per_in})",
-      "call": "intents_sign_swap({token_in, token_out, amount_in, min_out, valid_secs}) -> event intents_signed {signed}; a solver matches and submits execute_intents",
+      "kind": "vault action (not a recipe), OWNER ONLY: the brain builds the vault's own token_diff intent, the vault MPC-signs it",
+      "setup": "x {\"intents_setup\": {verifier, signer}} once; x {\"intents_allow\": {\"pair\": {token_in, token_out, max_in, floor_out, floor_per_in, market?}}}",
+      "call": "x {\"intents_sign_swap\": {token_in, token_out, amount_in, min_out, valid_secs}} -> returns the signed intent (event intents_signed); a solver matches and submits execute_intents",
       "guards": "only allowed pairs; amount <= max_in and the spending limit 'intents:<token>'; minimum = max(min_out, owner floor); salt read from the verifier; withdrawals only to the vault",
       "tested": "sandbox/tests/intents.rs (real intents.near v0.4.5 wasm); LIVE testnet: intvault.nf-owner-ksleb.testnet on verifier.tidepool-sandbox.testnet, real MPC signature, settled tx EDqZApU7fKJwx5S3F1mYndztvnjMx1mc7TFnvAqcbghj"
     },
     {
       "id": "solana_jupiter_swap",
       "label": "Swap on Solana via Jupiter",
-      "kind": "vault action: the vault checks every byte of a Jupiter message, then MPC-signs it (Ed25519)",
-      "setup": "sol_setup(signer, max_cu_price, max_cu_limit); sol_allow({in_mint, out_mint, max_in, min_out_per_in_e12})",
-      "call": "sol_sign_swap({message}) -> event sol_signed {signature}; helper: scripts/keeper `npm run jupiter` (simulates; --broadcast to send)",
+      "kind": "vault action, OWNER ONLY: the brain checks every byte of a Jupiter message, then the vault MPC-signs it (Ed25519)",
+      "setup": "x {\"sol_setup\": {signer, max_cu_price, max_cu_limit}}; x {\"sol_allow\": {\"pair\": {in_mint, out_mint, max_in, min_out_per_in_e12}}}",
+      "call": "x {\"sol_sign_swap\": {message}} -> event sol_signed {signature}; helper: scripts/keeper `npm run jupiter` (simulates; --broadcast to send)",
       "guards": "solguard: one signer (the vault), no lookup tables, only ComputeBudget/ATA/Jupiter v1 routes, proceeds to the vault's own accounts, no platform fee, floor after slippage, size and fee caps",
-      "tested": "contracts/solguard (synthetic attacks + real Jupiter txs), sandbox/tests/sol.rs; LIVE: solvault.nf-keeper-ksleb.testnet, real MPC signature over a live Jupiter route, verified; Jupiter is mainnet-only so not broadcast; EXECUTED on a Solana mainnet fork (surfpool, scripts/fork-solana.sh): live testnet vault + real MPC signature, 0.1 USDC -> 0.0011 SOL"
+      "tested": "contracts/solguard (synthetic attacks + real Jupiter txs), sandbox/tests/sol.rs; LIVE: solvault.nf-keeper-ksleb.testnet, real MPC signature over a live Jupiter route, verified; Jupiter is mainnet-only so not broadcast; EXECUTED on a Solana mainnet fork (surfpool, with a full vault before relay vaults): live testnet vault + real MPC signature, 0.1 USDC -> 0.0011 SOL"
     },
     {
       "id": "evm_template_call",
       "label": "Any EVM call from a template (Uniswap v3/v4, Aave, StonkBrokers Smart LP and pair tokens, Permit2, approvals)",
-      "kind": "vault action: the vault BUILDS the call from an owner-set template (contract + function + a rule per argument), then MPC-signs it (secp256k1)",
-      "setup": "evm_setup(signer, chain_id, max_fee, max_tip, gas_cap); evm_template({name, to, function, args: rule tree [fixed|vault|at_most|floor|same|bytes|encoded|tuple|list], value, spends}); ready-made Base and Robinhood Chain templates in nodes/evm-templates.json",
-      "call": "evm_call({name, values, nonce, max_fee, max_tip, gas}) -> event evm_signed {raw}; broadcast with eth_sendRawTransaction",
+      "kind": "vault action, OWNER ONLY (a keeper signs on other chains only through remote flow nodes): the brain BUILDS the call from an owner-set template (contract + function + a rule per argument), then the vault MPC-signs it (secp256k1)",
+      "setup": "x {\"evm_setup\": {signer, chain_id, max_fee, max_tip, gas_cap}}; x {\"evm_template\": {\"template\": {name, to, function, args: rule tree [fixed|vault|at_most|floor|same|bytes|encoded|tuple|list], value, spends}}}; ready-made Base and Robinhood Chain templates in nodes/evm-templates.json",
+      "call": "x {\"evm_call\": {name, values, nonce, max_fee, max_tip, gas}} -> event evm_signed {raw}; broadcast with eth_sendRawTransaction",
       "guards": "addresses are fixed or the vault itself (no rule lets a caller pick one); bytes fixed or nested encodings with the same rules; amounts capped; minimums = max(quote, amount x num / den); repeated amounts and attached ETH tied with 'same'; spending limits 'evm:<chain>:<token>' and 'evm:<chain>:eth'; gas caps; low-s",
       "tested": "sandbox/tests/evm.rs (templates vs the viem-checked encoder, 13 refusals); sandbox/tests/evm_fork.rs EXECUTED on a Base mainnet fork: Uniswap 0.1 WETH -> ~222 USDC, Aave supply 445 USDC -> aUSDC and withdraw back. Earlier LIVE: real MPC-signed Sepolia swap (pre-template code); sandbox/tests/evm_fork_robinhood.rs EXECUTED on a Robinhood Chain fork: StonkBrokers Smart LP sdAMZN-FR zapDeposit 50 USDG -> 49.67 shares, zapWithdraw -> 49.80 USDG (0.4% round trip); Uniswap v4 via Universal Router (ETH -> NVDA -> ETH, Permit2) and the ETHNVDA pair token (zap 0.01 ETH -> 0.017 shares -> 0.0098 ETH) executed on the Robinhood fork; ABI encoder checked against Foundry"
     },
     {
       "id": "remote_flow_node",
       "label": "A flow node on another chain (EVM or Solana template)",
-      "kind": "flow node: Recipe.remote instead of calls; the vault checks the trigger, puts the node's own input in the template, signs; the keeper broadcasts and reports the output",
-      "setup": "evm_setup / sol_setup and the templates; oracle_setup for price triggers; save_flow with nodes whose action is {calls: [], out: null, remote: {call: {chain: 'evm', template, amount_leaf, min_leaf, deadline_leaf} | {chain: 'sol', template, amount_field, min_field}, out: 'evm:<chain>:<token|eth>' | 'sol:<mint>', max_out_per_in, max_out, price: {feed, quote}}}; fund(flow, node, amount) takes the owner's word for remote balances",
-      "call": "step_remote({flow_id, node, args: {chain: 'evm', values, nonce, max_fee, max_tip, gas} | {chain: 'sol', message}, reveal, salt}) -> events remote_step {amount, min_out, max_out, expires_ns} and evm_signed / sol_signed; after broadcast: remote_report({flow_id, node, out}) (out null = failed)",
-      "guards": "trigger checked by the vault (time from the block, price from the oracle: fresh, tight, confirmed; never a keeper number); amount = the node's inbox/chunk, whatever the keeper sends; the amount leaf must spend the node's own token; EVM deadline filled by the vault; Solana: exactly one instruction of the node's template, others may not spend, amount field = the node's input; output CAPPED AND FLOORED, NOT MEASURED: a report must be >= the signed minimum and <= max_out_per_in x input / max_out; a keeper may report failure only after the signed tx can no longer land (deadline / ~3 min for Solana), the owner anytime; one step in flight per flow; spending limits; hidden flows via reveal + salt",
+      "kind": "flow node: Recipe.remote instead of calls; the brain checks the trigger and puts the node's own input in the template, the vault signs; the keeper broadcasts and reports the output",
+      "setup": "evm_setup / sol_setup and the templates; oracle_setup for price triggers (all through x); x {\"save_flow\": {name, nodes}} with nodes whose action is {calls: [], out: null, remote: {call: {chain: 'evm', template, amount_leaf, min_leaf, deadline_leaf} | {chain: 'sol', template, amount_field, min_field}, out: 'evm:<chain>:<token|eth>' | 'sol:<mint>', max_out_per_in, max_out, price: {feed, quote}}}; x {\"fund\": {flow_id, node, amount}} takes the owner's word for remote balances",
+      "call": "x {\"step_remote\": {flow_id, node, args: {chain: 'evm', values, nonce, max_fee, max_tip, gas} | {chain: 'sol', message}, reveal, salt}} -> events remote_step {amount, min_out, max_out, expires_ns} and evm_signed / sol_signed; after broadcast: x {\"remote_report\": {flow_id, node, out}} (out null = failed)",
+      "guards": "trigger checked by the brain (time from the block, price from the oracle: fresh, tight, confirmed; never a keeper number); amount = the node's inbox/chunk, whatever the keeper sends; the amount leaf must spend the node's own token; EVM deadline filled by the brain; Solana: exactly one instruction of the node's template, others may not spend, amount field = the node's input; output CAPPED AND FLOORED, NOT MEASURED: a report must be >= the signed minimum and <= max_out_per_in x input / max_out; a keeper may report failure only after the signed tx can no longer land (deadline / ~3 min for Solana), the owner anytime; one step in flight per flow; spending limits; hidden flows via reveal + salt",
       "tested": "sandbox/tests/remote.rs (NVDA ladder on mock Pyth: rungs fire only at their oracle price, stale price refused, out-of-bounds reports refused, failure timing, pause after 3, wrong-token wiring and limits refused, hidden nodes; Solana LP-fee sweep into a memecoin buy); sandbox/tests/ladder_fork_robinhood.rs EXECUTED on a Robinhood Chain fork: 0.03 ETH -> 0.3496 NVDA, sold a third at each of $275 / $365 / $545 -> 0.02946 ETH, zapped into 0.0497 ETHNVDA shares; fork balances equal the ledger"
     }
   ]

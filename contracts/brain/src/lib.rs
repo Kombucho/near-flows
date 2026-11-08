@@ -5,8 +5,9 @@
 //! knows which vault is talking: the predecessor. A vault only ever touches
 //! its own record.
 //!
-//! WHY: the full vault is ~640 KB, ~64 NEAR to publish per version. The body is
-//! ~10 KB (~1 NEAR); the brain is deployed normally (storage staked, refundable).
+//! WHY: the old full vault (one ~640 KB contract per user, removed 2026-11) cost
+//! ~64 NEAR to publish per version. The body is ~10 KB (~1 NEAR); the brain is
+//! deployed normally (storage staked, refundable).
 //!
 //! Three ways in, each with its own proof of who's talking:
 //! - `handle`: a request the vault forwards (relay `x`, a named door, `new`).
@@ -20,15 +21,15 @@
 //!   decides in this private callback; its answer becomes the value the vault's
 //!   `cb` receives. One relay round less per read. #[private]: only the brain.
 //!
-//! # Porting status
+//! # What the brain does
 //!
-//! Everything the full vault does, with the same request names and arguments
-//! as the vault's methods (apps and keepers change only the door: `x` with
-//! `{"<method>": <args>}`; stealth relayers call `exec` unchanged):
+//! Everything the old full vault did, with the same request names and arguments
+//! its methods had (apps and keepers call the relay's `x` door with
+//! `{"<method>": <args>}`; stealth relayers call `exec`):
 //! - core: trust, save/delete/fund/drain/resume/unstick, step, withdraw,
 //!   withdraw_to, set_keeper, act.
-//! - limits, hidden (fingerprints byte-identical to the vault's pins, remote
-//!   nodes included), stealth (same signed text), intents.
+//! - limits, hidden (fingerprints pinned with the keeper's, remote nodes
+//!   included), stealth (same signed text as the keeper's), intents.
 //! - oracle: market floors on recipes, EVM leaves, Solana pairs and Intents
 //!   pairs; Pyth / priceboard reads issued by the brain itself.
 //! - evm: templates and rule trees, built and checked here, signed by the
@@ -37,7 +38,7 @@
 //!   co-sign), signed by the vault's `sign`.
 //! - remote: flow nodes on other chains, keeper-reported outputs capped and floored.
 //!
-//! What can't port as is:
+//! What differs from the old full vault:
 //! - The vault's synchronous state: balance and storage are a snapshot in the
 //!   header. A race with another receipt only makes the vault's transfer fail,
 //!   never the brain's books.
@@ -144,7 +145,7 @@ pub enum Deposit {
     Fixed { yocto: U128 },
 }
 
-/// One contract call in a recipe (same as the vault's; see vault/src/lib.rs).
+/// One contract call in a recipe.
 #[near(serializers = [borsh, json])]
 #[serde(tag = "call", rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq)]
@@ -329,14 +330,16 @@ pub enum Req {
     SolOwnerWallet { wallet: Option<String> },
     SolTemplate { template: sol::SolTemplate },
     SolTemplateRemove { name: String },
-    // Owner or keeper.
-    Step { flow_id: u32, node: u16 },
-    StepHidden { flow_id: u32, node: u16, reveal: Node<Recipe>, salt: String },
+    // Owner only: direct signatures, outside any flow.
     IntentsSignSwap { token_in: AccountId, token_out: AccountId, amount_in: U128, min_out: U128, valid_secs: u64 },
-    IntentsWithdraw { token: AccountId, amount: U128 },
     EvmCall { name: String, values: Vec<U128>, nonce: u64, max_fee: U128, max_tip: U128, gas: u64 },
     SolSignSwap { message: String },
     SolSignTx { message: String },
+    // Owner or keeper.
+    /// Bring tokens back from the vault's Intents account (always to the vault).
+    IntentsWithdraw { token: AccountId, amount: U128 },
+    Step { flow_id: u32, node: u16 },
+    StepHidden { flow_id: u32, node: u16, reveal: Node<Recipe>, salt: String },
     StepRemote { flow_id: u32, node: u16, args: remote::RemoteArgs, #[serde(default)] reveal: Option<Node<Recipe>>, #[serde(default)] salt: Option<String> },
     RemoteReport { flow_id: u32, node: u16, out: Option<U128> },
     // Anyone.
@@ -403,6 +406,8 @@ pub(crate) enum Read {
     Tombstoned { to: AccountId },
     /// Settling fees: the vault's balance of the token.
     Settle { token: AccountId },
+    /// A Solana template transaction with a market field: the oracle answered.
+    SolTxPrices(String),
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
@@ -561,6 +566,7 @@ impl Brain {
             Read::Close { to, tokens, intents } => t.on_close(to, tokens, intents, &self.factory),
             Read::Tombstoned { to } => t.on_tombstoned(to),
             Read::Settle { token } => t.on_settle(token),
+            Read::SolTxPrices(m) => t.on_sol_tx_prices(m),
         };
         t.finish(r);
     }
@@ -765,8 +771,11 @@ impl Talk {
                 return self.begin_step(&sender, flow_id, node, n, false);
             }
             Req::StepHidden { flow_id, node, reveal, salt } => return self.step_hidden(&sender, flow_id, node, reveal, salt),
+            // The direct signing doors skip every flow rule (trigger, inbox, the node's caps):
+            // only the owner may use them. The keeper reaches other chains through remote
+            // nodes (step_remote), which check all of that first.
             Req::IntentsSignSwap { token_in, token_out, amount_in, min_out, valid_secs } => {
-                crew_only();
+                owner_only();
                 return self.intents_sign_swap(owner, token_in, token_out, amount_in.0, min_out.0, valid_secs);
             }
             Req::IntentsWithdraw { token, amount } => {
@@ -774,15 +783,15 @@ impl Talk {
                 return self.intents_withdraw(token, amount.0).into();
             }
             Req::EvmCall { name, values, nonce, max_fee, max_tip, gas } => {
-                crew_only();
+                owner_only();
                 return self.evm_call(evm::EvmArgs { name, values, nonce, max_fee, max_tip, gas });
             }
             Req::SolSignSwap { message } => {
-                crew_only();
+                owner_only();
                 return self.sol_sign_swap(message);
             }
             Req::SolSignTx { message } => {
-                crew_only();
+                owner_only();
                 return self.sol_sign_tx(message);
             }
             Req::StepRemote { flow_id, node, args, reveal, salt } => return self.step_remote(&sender, flow_id, node, args, reveal, salt),

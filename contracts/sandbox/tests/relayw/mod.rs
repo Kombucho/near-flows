@@ -74,3 +74,12 @@ pub fn fails_with(r: &ExecutionFinalResult, why: &str) -> bool {
 pub fn tgas(r: &ExecutionFinalResult) -> f64 {
     r.total_gas_burnt.as_gas() as f64 / 1e12
 }
+
+/// A brain view about one vault. WHY: a relay vault keeps no state of its own,
+/// so the full vault's `vault.view(method, args)` becomes
+/// `brain.view(method, {"vault": .., ..args})`.
+pub async fn view(brain: &Contract, vault: &AccountId, method: &str, args: Value) -> anyhow::Result<Value> {
+    let mut args = if args.is_null() { json!({}) } else { args };
+    args["vault"] = json!(vault);
+    Ok(brain.view(method).args_json(args).await?.json()?)
+}

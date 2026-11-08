@@ -170,7 +170,9 @@ fn sol_is_wrapped_only_into_the_vaults_own_wsol_account() {
     let transfer = |to: [u8; 32], lamports: u64| (vec![v, to], { let mut d = vec![2, 0, 0, 0]; d.extend(lamports.to_le_bytes()); d });
     let ts = wsol_templates();
     let (accs, data) = transfer(mine, 500_000_000);
-    let ok = Tx::new(v).ix(pubkey(SYSTEM), accs, data).ix(pubkey(TOKEN_PROGRAM), vec![mine], vec![17]).ix(pubkey(TOKEN_PROGRAM), vec![mine, v, v], vec![9]).bytes();
+    // (3 instructions: without a unit limit the runtime's 600k default is over the policy's 400k.)
+    let limit = [vec![2], 300_000u32.to_le_bytes().to_vec()].concat();
+    let ok = Tx::new(v).ix(pubkey(solguard::COMPUTE_BUDGET), vec![], limit).ix(pubkey(SYSTEM), accs, data).ix(pubkey(TOKEN_PROGRAM), vec![mine], vec![17]).ix(pubkey(TOKEN_PROGRAM), vec![mine, v, v], vec![9]).bytes();
     let m = check_tx(&ok, &ts, &policy()).expect("wrap, sync, unwrap the vault's own wSOL");
     assert_eq!(m.iter().map(|m| m.template.as_str()).collect::<Vec<_>>(), ["wsol_wrap", "wsol_sync", "wsol_unwrap"]);
 
@@ -188,6 +190,52 @@ fn sol_is_wrapped_only_into_the_vaults_own_wsol_account() {
 }
 
 #[test]
+fn without_a_unit_limit_each_instruction_counts_200k_units() {
+    // Wrap, sync, unwrap with no SetComputeUnitLimit: the runtime allows 3 x 200k = 600k units,
+    // over the policy's 400k (the priority fee would be price x 600k).
+    let v = vault();
+    let mine = ata_of(&v, &pubkey(WSOL));
+    let wrap = { let mut d = vec![2, 0, 0, 0]; d.extend(1_000u64.to_le_bytes()); d };
+    let price = [vec![3], 1_000_000u64.to_le_bytes().to_vec()].concat();
+    let txs = |limit: Option<u32>| {
+        let mut t = Tx::new(v).ix(pubkey(solguard::COMPUTE_BUDGET), vec![], price.clone());
+        if let Some(l) = limit {
+            t = t.ix(pubkey(solguard::COMPUTE_BUDGET), vec![], [vec![2], l.to_le_bytes().to_vec()].concat());
+        }
+        t.ix(pubkey(SYSTEM), vec![v, mine], wrap.clone()).ix(pubkey(TOKEN_PROGRAM), vec![mine], vec![17]).ix(pubkey(TOKEN_PROGRAM), vec![mine, v, v], vec![9]).bytes()
+    };
+    let r = check_tx(&txs(None), &wsol_templates(), &policy());
+    assert!(matches!(r, Err(Refusal::ComputeBudget(_))), "{r:?}");
+    check_tx(&txs(Some(300_000)), &wsol_templates(), &policy()).expect("an explicit limit under the cap");
+}
+
+#[test]
+fn only_token_accounts_the_templates_use_can_be_created() {
+    // Each create locks ~0.002 SOL of the vault's in rent: a helper could add a dozen for random
+    // mints to any template transaction. Only the vault's accounts the matched templates name pass.
+    let v = vault();
+    let (wsol, junk) = (pubkey(WSOL), key(99));
+    let create = |mint: [u8; 32]| (pubkey(solguard::ATA_PROGRAM), vec![v, ata_of(&v, &mint), v, mint, pubkey(SYSTEM), pubkey(TOKEN_PROGRAM)], vec![1u8]);
+    let wrap = |t: Tx| { let mut d = vec![2, 0, 0, 0]; d.extend(1_000u64.to_le_bytes()); t.ix(pubkey(SYSTEM), vec![v, ata_of(&v, &wsol)], d).bytes() };
+    let (p, a, d) = create(wsol);
+    check_tx(&wrap(Tx::new(v).ix(p, a, d)), &wsol_templates(), &policy()).expect("the wSOL account the wrap pays into");
+    let (p, a, d) = create(junk);
+    let r = check_tx(&wrap(Tx::new(v).ix(p, a, d)), &wsol_templates(), &policy());
+    assert!(matches!(r, Err(Refusal::AtaCreate(_))), "an account for a mint no template uses: {r:?}");
+    let mut five = Tx::new(v);
+    for _ in 0..5 {
+        let (p, a, d) = create(wsol);
+        five = five.ix(p, a, d);
+    }
+    assert!(matches!(check_tx(&wrap(five), &wsol_templates(), &policy()), Err(Refusal::AtaCreate(_))), "five creates");
+    // A pump buy may create the vault's account for the coin it buys (a VaultAta position).
+    let mint = key(40);
+    let (p, a, d) = create(mint);
+    let buy = Tx::new(v).ix(p, a, d).ix(pubkey(PUMP), pump_accounts(ata_of(&v, &mint), v), pump_data(1, 1)).bytes();
+    check_tx(&buy, &[pump_buy()], &policy()).expect("the coin's account");
+}
+
+#[test]
 fn templates_are_checked_when_saved() {
     let mut t = pump_buy();
     t.fields[1].rule = FieldRule::AtLeast { of: 2, num: 1, den: 1 };
@@ -199,4 +247,88 @@ fn templates_are_checked_when_saved() {
     t.accounts[5] = Acc::VaultAta { mint_at: 40, program_at: 8 };
     assert!(t.validate().is_err(), "mint position out of range");
     assert!(pump_buy().validate().is_ok() && dlmm_open().validate().is_ok());
+}
+
+const ROUTER: &str = "hyRouTRDAgn65xyyJ3L5c4k5SFmSdr3NxDV8Euzjy3f";
+
+/// Hylo's router route_v2 for one pair (nodes/sol-templates.json, hylo_*), shrunk to the accounts
+/// that matter: [router config, user, user's input ATA, user's output ATA, input mint, output
+/// mint, token program]. Data: discriminator, token_a, token_b, amount, Some(slippage config):
+/// expected out {bits, exp -6}, tolerance {bits, exp -4}.
+fn hylo(name: &str, a: [u8; 32], b: [u8; 32]) -> Template {
+    Template {
+        name: name.into(),
+        program: pubkey(ROUTER),
+        prefix: discriminator("route_v2").to_vec(),
+        fields: vec![
+            Field { ty: Ty::Bytes(32), rule: FieldRule::Fixed(a.to_vec()) },
+            Field { ty: Ty::Bytes(32), rule: FieldRule::Fixed(b.to_vec()) },
+            Field { ty: Ty::U64, rule: FieldRule::AtMost(1_000_000_000) },
+            Field { ty: Ty::U8, rule: FieldRule::Fixed(vec![1]) },
+            Field { ty: Ty::U64, rule: FieldRule::AtLeast { of: 2, num: 2_000, den: 1_000 } },
+            Field { ty: Ty::U8, rule: FieldRule::Fixed(vec![0xfa]) },
+            Field { ty: Ty::U64, rule: FieldRule::AtMost(100) },
+            Field { ty: Ty::U8, rule: FieldRule::Fixed(vec![0xfc]) },
+        ],
+        accounts: vec![
+            Acc::Fixed(key(90)),
+            Acc::Vault,
+            Acc::VaultAta { mint_at: 4, program_at: 6 },
+            Acc::VaultAta { mint_at: 5, program_at: 6 },
+            Acc::Fixed(a),
+            Acc::Fixed(b),
+            Acc::Fixed(pubkey(TOKEN_PROGRAM)),
+        ],
+        extra_accounts: 0,
+        needs_owner: false,
+    }
+}
+
+fn route_data(a: [u8; 32], b: [u8; 32], amount: u64, expected: Option<u64>, tolerance: u64) -> Vec<u8> {
+    let mut d = discriminator("route_v2").to_vec();
+    d.extend(a);
+    d.extend(b);
+    d.extend(amount.to_le_bytes());
+    match expected {
+        Some(e) => {
+            d.push(1);
+            d.extend(e.to_le_bytes());
+            d.push(0xfa);
+            d.extend(tolerance.to_le_bytes());
+            d.push(0xfc);
+        }
+        None => d.push(0),
+    }
+    d
+}
+
+#[test]
+fn a_hylo_mint_passes_only_with_a_slippage_floor_and_proceeds_to_the_vault() {
+    let (v, jito, xsol, hyusd, thief) = (vault(), key(41), key(42), key(43), key(66));
+    let ts = [hylo("hylo_mint_xsol", jito, xsol), hylo("hylo_mint_hyusd", jito, hyusd)];
+    for t in &ts {
+        assert!(t.validate().is_ok(), "{}", t.name);
+    }
+    let accounts = |out_owner: [u8; 32]| vec![key(90), v, ata_of(&v, &jito), ata_of(&out_owner, &xsol), jito, xsol, pubkey(TOKEN_PROGRAM)];
+    let tx = |acc: Vec<[u8; 32]>, data: Vec<u8>| Tx::new(v).ix(pubkey(ROUTER), acc, data).bytes();
+    // 0.5 jitoSOL for at least 2 xSOL units per jitoSOL unit (2,000 xSOL per jitoSOL), 0.5% slippage.
+    let m = check_tx(&tx(accounts(v), route_data(jito, xsol, 500_000_000, Some(1_400_000_000), 50)), &ts, &policy()).expect("honest mint");
+    assert_eq!((m[0].template.as_str(), m[0].values[2], m[0].values[4]), ("hylo_mint_xsol", 500_000_000, 1_400_000_000));
+
+    // Every refusal names the template the instruction was meant for (hylo_mint_xsol: its pair
+    // matched), not hylo_mint_hyusd, which shares the router's discriminator.
+    let cases: Vec<(&str, Vec<u8>, &str)> = vec![
+        ("xSOL to the thief's token account", tx(accounts(thief), route_data(jito, xsol, 500_000_000, Some(1_400_000_000), 50)), "hylo_mint_xsol: account 3"),
+        ("over the 1 jitoSOL cap", tx(accounts(v), route_data(jito, xsol, 1_500_000_000, Some(4_000_000_000), 50)), "hylo_mint_xsol: field 2"),
+        ("an expected out under the floor", tx(accounts(v), route_data(jito, xsol, 500_000_000, Some(1), 50)), "hylo_mint_xsol: field 4"),
+        ("a 5% tolerance", tx(accounts(v), route_data(jito, xsol, 500_000_000, Some(1_400_000_000), 500)), "hylo_mint_xsol: field 6"),
+        ("no slippage config at all", tx(accounts(v), route_data(jito, xsol, 500_000_000, None, 0)), "data is"),
+        ("a pair the owner never approved", tx(accounts(v), route_data(xsol, jito, 500_000_000, Some(1_400_000_000), 50)), "field 0: not the fixed value"),
+    ];
+    for (name, msg, why) in cases {
+        match check_tx(&msg, &ts, &policy()) {
+            Err(Refusal::Program(r)) => assert!(r.contains(why), "{name}: {r}"),
+            r => panic!("{name}: {r:?}"),
+        }
+    }
 }

@@ -2,16 +2,17 @@
 //! and gets them signed. The signer here is a test stand-in that really signs
 //! (secp256k1, and sometimes high-s like any ECDSA signer), so we recover the
 //! signer's address from each transaction exactly as an Ethereum node would.
+//! Run on a relay vault: the brain builds and checks, the vault asks for the signature.
 
+mod common;
+mod relayw;
+
+use common::wasm;
 use evmtx::*;
+use relayw::*;
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use near_workspaces::types::NearToken;
 use serde_json::{json, Value};
-
-fn wasm(name: &str) -> Vec<u8> {
-    let path = format!("{}/../target/near/{name}/{name}.wasm", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read(&path).unwrap_or_else(|_| panic!("missing {path}: run `make build` first"))
-}
 
 // Uniswap on Sepolia: SwapRouter02, USDC, WETH.
 const ROUTER: &str = "0x3bfa4769fb09eefc5a80d6e87c3b9c650f7ae48e";
@@ -55,16 +56,13 @@ fn call(name: &str, values: &[u128], nonce: u64, fee_gwei: u128) -> Value {
 
 #[tokio::test]
 async fn the_vault_builds_and_signs_evm_calls_only_from_its_templates() -> anyhow::Result<()> {
-    let worker = near_workspaces::sandbox().await?;
-    let (alice, keeper, mallory) = (worker.dev_create_account().await?, worker.dev_create_account().await?, worker.dev_create_account().await?);
-    let signer = worker.dev_deploy(&wasm("mock_signer")).await?;
-    let vault = worker.dev_deploy(&wasm("vault")).await?;
-    vault.call("new").args_json(json!({"owner": alice.id(), "keeper": keeper.id()})).transact().await?.into_result()?;
-    alice.call(vault.id(), "evm_setup").args_json(json!({"signer": signer.id(), "chain_id": 11155111u64,
-        "max_fee": (50 * GWEI).to_string(), "max_tip": (3 * GWEI).to_string(), "gas_cap": 300_000u64})).max_gas().transact().await?.into_result()?;
-    let cfg: Value = vault.view("get_evm").await?.json()?;
+    let RelayWorld { worker, brain, alice, keeper, signer, vault } = relay_world().await?;
+    let mallory = worker.dev_create_account().await?;
+    x(&alice, &vault, "evm_setup", json!({"signer": signer.id(), "chain_id": 11155111u64,
+        "max_fee": (50 * GWEI).to_string(), "max_tip": (3 * GWEI).to_string(), "gas_cap": 300_000u64})).await?.into_result()?;
+    let cfg = view(&brain, &vault, "get_evm", Value::Null).await?;
     let me_hex = cfg["address"].as_str().unwrap().to_string();
-    let pk: String = signer.view("derived_public_key").args_json(json!({"path": "evm-1", "predecessor": vault.id(), "domain_id": 0})).await?.json()?;
+    let pk: String = signer.view("derived_public_key").args_json(json!({"path": "evm-1", "predecessor": vault, "domain_id": 0})).await?.json()?;
     let me = address_of(&bs58::decode(pk.trim_start_matches("secp256k1:")).into_vec()?).unwrap();
     assert_eq!(me_hex, hex_address(&me));
     println!("vault's EVM address: {me_hex}");
@@ -82,17 +80,16 @@ async fn the_vault_builds_and_signs_evm_calls_only_from_its_templates() -> anyho
     let mut t = swap_t(); t["args"][0]["args"][5] = json!({"rule": "floor", "of": 2, "num": "1", "den": "1"}); bad.push(("floor relative to a fixed value", t));
     let mut t = swap_t(); t["spends"] = json!({"arg": 0, "token": USDC}); bad.push(("spends a fixed argument", t));
     for (name, t) in bad {
-        assert!(alice.call(vault.id(), "evm_template").args_json(json!({"template": t})).transact().await?.is_failure(), "{name}");
+        assert!(x(&alice, &vault, "evm_template", json!({"template": t})).await?.is_failure(), "{name}");
     }
-    assert!(mallory.call(vault.id(), "evm_template").args_json(json!({"template": approve_t()})).transact().await?.is_failure(), "only the owner sets templates");
+    assert!(x(&mallory, &vault, "evm_template", json!({"template": approve_t()})).await?.is_failure(), "only the owner sets templates");
     for t in [approve_t(), swap_t()] {
-        alice.call(vault.id(), "evm_template").args_json(json!({"template": t})).transact().await?.into_result()?;
+        x(&alice, &vault, "evm_template", json!({"template": t})).await?.into_result()?;
     }
-    alice.call(vault.id(), "set_limit").args_json(json!({"token": format!("evm:11155111:{USDC}"), "max": "150000000", "window_ns": 86_400_000_000_000u64}))
-        .transact().await?.into_result()?;
+    x(&alice, &vault, "set_limit", json!({"token": format!("evm:11155111:{USDC}"), "max": "150000000", "window_ns": 86_400_000_000_000u64})).await?.into_result()?;
 
     // 1. Approve the router: exactly the bytes of the hand-written encoder (checked against viem), signed by the vault's key.
-    let r = keeper.call(vault.id(), "evm_call").args_json(call("approve_usdc", &[0, 100_000_000], 0, 30)).max_gas().transact().await?;
+    let r = x(&keeper, &vault, "evm_call", call("approve_usdc", &[0, 100_000_000], 0, 30)).await?;
     let logs = r.logs().iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let ev = field(&logs, "evm_signed").unwrap_or_else(|| panic!("{logs:?} {:?}", r.failures())).clone();
     let approve = Eip1559 { chain_id: 11155111, nonce: 0, max_priority_fee: 2 * GWEI, max_fee: 30 * GWEI, gas_limit: 250_000, to: parse_address(USDC).unwrap(), value: 0,
@@ -100,7 +97,7 @@ async fn the_vault_builds_and_signs_evm_calls_only_from_its_templates() -> anyho
     assert_eq!(recover(&approve.signing_hash(), &get(&ev, "r"), &get(&ev, "s"), get(&ev, "v").parse()?), me, "signed by the vault");
 
     // 2. Swap 40 USDC; the keeper's quote asks for only 1 wei: the owner's floor (0.01 WETH) wins.
-    let r = keeper.call(vault.id(), "evm_call").args_json(call("swap_usdc_weth", &[0, 0, 0, 0, 40_000_000, 1, 0], 1, 30)).max_gas().transact().await?;
+    let r = x(&keeper, &vault, "evm_call", call("swap_usdc_weth", &[0, 0, 0, 0, 40_000_000, 1, 0], 1, 30)).await?;
     println!("GAS build + sign a Uniswap swap from its template: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
     let logs = r.logs().iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let ev = field(&logs, "evm_signed").unwrap_or_else(|| panic!("{logs:?} {:?}", r.failures())).clone();
@@ -121,18 +118,18 @@ async fn the_vault_builds_and_signs_evm_calls_only_from_its_templates() -> anyho
         ("approving more than the cap", &keeper, call("approve_usdc", &[0, 100_000_001], 2, 30)),
         ("a stranger", &mallory, call("swap_usdc_weth", &[0, 0, 0, 0, 1_000_000, 0, 0], 2, 30)),
     ] {
-        let r = who.call(vault.id(), "evm_call").args_json(args).max_gas().transact().await?;
+        let r = x(&who, &vault, "evm_call", args).await?;
         assert!(r.is_failure(), "{name}");
         assert!(!r.logs().iter().any(|l| l.contains("evm_signed")), "{name} got signed");
     }
     // A keeper's "value" for a fixed or vault argument is ignored: it can't pick the recipient.
-    let r = keeper.call(vault.id(), "evm_call").args_json(call("swap_usdc_weth", &[1, 2, 3, 0xbad, 1_000_000, 0, 9], 2, 30)).max_gas().transact().await?;
+    let r = x(&keeper, &vault, "evm_call", call("swap_usdc_weth", &[1, 2, 3, 0xbad, 1_000_000, 0, 9], 2, 30)).await?;
     let data = r.logs().iter().find(|l| l.contains("evm_call_requested")).unwrap().to_string();
     assert!(data.contains(&hex::encode(abi::exact_input_single(&parse_address(USDC).unwrap(), &parse_address(WETH).unwrap(), 3000, &me, 1_000_000, 250_000_000_000_000))));
     // 4. The spending limit: 40 + 1 + 100 = 141 of 150 USDC a day; another 20 is refused.
-    let ok = keeper.call(vault.id(), "evm_call").args_json(call("swap_usdc_weth", &[0, 0, 0, 0, 100_000_000, 0, 0], 3, 30)).max_gas().transact().await?;
+    let ok = x(&keeper, &vault, "evm_call", call("swap_usdc_weth", &[0, 0, 0, 0, 100_000_000, 0, 0], 3, 30)).await?;
     assert!(ok.logs().iter().any(|l| l.contains("evm_signed")), "{:?}", ok.failures());
-    let r = keeper.call(vault.id(), "evm_call").args_json(call("swap_usdc_weth", &[0, 0, 0, 0, 20_000_000, 0, 0], 4, 30)).max_gas().transact().await?;
+    let r = x(&keeper, &vault, "evm_call", call("swap_usdc_weth", &[0, 0, 0, 0, 20_000_000, 0, 0], 4, 30)).await?;
     assert!(format!("{:?}", r.failures()).contains("spending limit"));
 
     // 5. A market floor: the minimum follows the oracle (USDC $1.0001, ETH $2,224.50, 0.5% slippage),
@@ -143,24 +140,23 @@ async fn the_vault_builds_and_signs_evm_calls_only_from_its_templates() -> anyho
     let set = |id: &str, p: i64, age: i64| json!({"price_id": id, "price": p.to_string(), "conf": "0", "expo": -8, "ema": p.to_string(), "age_s": age});
     alice.call(pyth.id(), "set_price").args_json(set(eth_id, 222_450_000_000, 0)).transact().await?.into_result()?;
     alice.call(pyth.id(), "set_price").args_json(set(usdc_id, 100_010_000, 0)).transact().await?.into_result()?;
-    alice.call(vault.id(), "oracle_setup").args_json(json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
+    x(&alice, &vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
         {"name": "eth", "contract": pyth.id(), "price_id": eth_id, "backup": {"kind": "ema"}},
-        {"name": "usdc", "contract": pyth.id(), "price_id": usdc_id, "backup": {"kind": "ema"}}]}})).transact().await?.into_result()?;
+        {"name": "usdc", "contract": pyth.id(), "price_id": usdc_id, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
     let mut t = swap_t();
     t["name"] = json!("swap_usdc_weth_market");
     t["args"][0]["args"][5] = json!({"rule": "market", "of": 4, "num": "0", "den": "1",
         "market": {"sell": "usdc", "buy": "eth", "dec_in": 6, "dec_out": 18, "slippage_bps": 50}});
-    alice.call(vault.id(), "evm_template").args_json(json!({"template": t})).transact().await?.into_result()?;
-    alice.call(vault.id(), "set_limit").args_json(json!({"token": format!("evm:11155111:{USDC}"), "max": "1000000000", "window_ns": 86_400_000_000_000u64}))
-        .transact().await?.into_result()?;
-    let r = keeper.call(vault.id(), "evm_call").args_json(call("swap_usdc_weth_market", &[0, 0, 0, 0, 5_000_000, 1, 0], 5, 30)).max_gas().transact().await?;
+    x(&alice, &vault, "evm_template", json!({"template": t})).await?.into_result()?;
+    x(&alice, &vault, "set_limit", json!({"token": format!("evm:11155111:{USDC}"), "max": "1000000000", "window_ns": 86_400_000_000_000u64})).await?.into_result()?;
+    let r = x(&keeper, &vault, "evm_call", call("swap_usdc_weth_market", &[0, 0, 0, 0, 5_000_000, 1, 0], 5, 30)).await?;
     let req = r.logs().iter().find(|l| l.contains("evm_call_requested")).unwrap_or_else(|| panic!("{:?} {:?}", r.logs(), r.failures())).to_string();
     assert!(req.contains(&format!("{:064x}", 2_236_681_276_691_391u128)), "the oracle floor is the minimum: {req}");
     assert!(r.logs().iter().any(|l| l.contains("evm_signed")));
     // A stale price: nothing is signed.
     alice.call(pyth.id(), "set_price").args_json(set(eth_id, 222_450_000_000, 300)).transact().await?.into_result()?;
-    let r = keeper.call(vault.id(), "evm_call").args_json(call("swap_usdc_weth_market", &[0, 0, 0, 0, 5_000_000, 1, 0], 6, 30)).max_gas().transact().await?;
+    let r = x(&keeper, &vault, "evm_call", call("swap_usdc_weth_market", &[0, 0, 0, 0, 5_000_000, 1, 0], 6, 30)).await?;
     assert!(!r.logs().iter().any(|l| l.contains("evm_signed")) && format!("{:?}", r.failures()).contains("no price fresher"), "{:?}", r.failures());
-    let _ = alice.transfer_near(vault.id(), NearToken::from_millinear(1)).await?;
+    let _ = alice.transfer_near(&vault, NearToken::from_millinear(1)).await?;
     Ok(())
 }

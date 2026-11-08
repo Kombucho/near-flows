@@ -12,6 +12,22 @@ A keeper can charge a price per run, which you set when you name it. If your vau
 
 Setting it up with an AI coding agent (Claude Code, Codex...)? Point it at **[AGENTS.md](AGENTS.md)**. It has the exact commands, the checks for each step, the costs, and the safety rules (testnet first, keys never in the repo).
 
+## Live on testnet
+
+Deployed 2026-11-06 with `SUFFIX=fl06 scripts/deploy-relay-testnet.sh` (testnet NEAR only, no real value):
+
+| | Account |
+|---|---|
+| Brain (all rules, shared) | [`nf-brain-fl06.testnet`](https://testnet.nearblocks.io/address/nf-brain-fl06.testnet) |
+| Relay factory (`FACTORY_ID`) | [`nf-relay-fl06.testnet`](https://testnet.nearblocks.io/address/nf-relay-fl06.testnet) |
+| Relay code (global, by hash) | `CsgeCTj9dVdTnWnHtTJpDa3dMYuejdy7WsM42smmwov2` |
+| Price board | [`nf-board-fl06.testnet`](https://testnet.nearblocks.io/address/nf-board-fl06.testnet) |
+| Demo vault | [`demo.nf-relay-fl06.testnet`](https://testnet.nearblocks.io/address/demo.nf-relay-fl06.testnet) |
+
+The demo vault's flow ran on the real testnet contracts through the keeper: 1 NEAR staked with LiNEAR (0.4378 LiNEAR), 2 NEAR wrapped and split into two Rhea swaps (about 1.24 testnet USDT, and 157,967.84 of a meme.cooking coin), and 0.5 NEAR waiting to DCA into LiNEAR every 10 minutes. The 0.1% protocol fee was taken on each step.
+
+Prices: Pyth's NEAR receiver currently rejects Pyth's post-2026-08-26 updates ("Source for attestation is not allowed"), so prices on testnet come from the price board, attested by the keeper from Pyth's Hermes and Chainlink, with every source logged.
+
 ## Build and test
 
 ```

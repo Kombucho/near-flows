@@ -392,7 +392,7 @@ async fn an_intents_swap_with_a_market_floor_fits_in_300_tgas() -> anyhow::Resul
     x(&w.alice, &w.vault, "trust", json!({"add": [{"contract": verifier.id()}], "remove": []})).await?.into_result()?;
     x(&w.alice, &w.vault, "intents_allow", json!({"pair": {"token_in": m.wnear.id(), "token_out": m.usdc.id(), "max_in": (200 * ONE).to_string(), "floor_out": "1", "floor_per_in": "1",
         "market": {"sell": "near", "buy": "usdc", "dec_in": 18, "dec_out": 18, "slippage_bps": 100}}})).await?.into_result()?;
-    let r = x300(&w.keeper, &w.vault, "intents_sign_swap", json!({"token_in": m.wnear.id(), "token_out": m.usdc.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600})).await?;
+    let r = x300(&w.alice, &w.vault, "intents_sign_swap", json!({"token_in": m.wnear.id(), "token_out": m.usdc.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600})).await?;
     let done = r.is_success() && logged(&r, "intents_signed");
     row("intents_sign_swap + market floor", &r, done);
     assert!(done, "{:?} {:?}", r.logs(), r.failures());
@@ -415,7 +415,7 @@ async fn solana_signing_fits_in_300_tgas() -> anyhow::Result<()> {
     transfer.extend(500_000_000u64.to_le_bytes());
     let msg = Tx::new(me).ix(pubkey(SYSTEM_PROGRAM), vec![me, wsol], transfer).ix(pubkey(TOKEN_PROGRAM_ID), vec![wsol], vec![17]).bytes();
     let b64 = |b: &[u8]| { use base64::Engine; base64::engine::general_purpose::STANDARD.encode(b) };
-    let r = x300(&w.keeper, &w.vault, "sol_sign_tx", json!({"message": b64(&msg)})).await?;
+    let r = x300(&w.alice, &w.vault, "sol_sign_tx", json!({"message": b64(&msg)})).await?;
     let done = r.is_success() && logged(&r, "sol_signed");
     row("sol_sign_tx (template: wrap + sync)", &r, done);
     assert!(done, "{:?} {:?}", r.logs(), r.failures());
@@ -430,7 +430,7 @@ async fn solana_signing_fits_in_300_tgas() -> anyhow::Result<()> {
         {"name": "usdc", "contract": pyth.id(), "price_id": USDC_FEED, "backup": {"kind": "ema"}}]}})).await?.into_result()?;
     x(&w.alice, &w.vault, "sol_allow", json!({"pair": {"in_mint": USDC_MINT, "out_mint": WSOL_MINT, "max_in": "50000000", "min_out_per_in_e12": "4000000000000",
         "market": {"sell": "usdc", "buy": "sol", "dec_in": 6, "dec_out": 9, "slippage_bps": 100}}})).await?.into_result()?;
-    let r = x300(&w.keeper, &w.vault, "sol_sign_swap", json!({"message": b64(&honest_for(me, pubkey(USDC_MINT), pubkey(WSOL_MINT), 1_000_000, 5_000_000))})).await?;
+    let r = x300(&w.alice, &w.vault, "sol_sign_swap", json!({"message": b64(&honest_for(me, pubkey(USDC_MINT), pubkey(WSOL_MINT), 1_000_000, 5_000_000))})).await?;
     let done = r.is_success() && logged(&r, "sol_signed");
     row("sol_sign_swap (Jupiter) + market floor", &r, done);
     assert!(done, "{:?} {:?}", r.logs(), r.failures());

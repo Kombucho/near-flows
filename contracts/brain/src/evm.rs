@@ -1,4 +1,4 @@
-//! EVM chains through NEAR Chain Signatures, as vault/src/evm.rs: the brain
+//! EVM chains through NEAR Chain Signatures: the brain
 //! BUILDS every transaction from a template the owner set (rule trees over the
 //! ABI: fixed / vault / at_most / floor / market / same / bytes / encoded /
 //! tuple / list), applies caps, floors and market minimums, counts spending,
@@ -149,7 +149,7 @@ impl Talk {
         cfg.templates.iter().find(|t| t.name == name).cloned().unwrap_or_else(|| env::panic_str("refused: no such template"))
     }
 
-    /// Owner or keeper: build, check and have template `a.name` signed.
+    /// Owner only (a keeper goes through remote nodes): build, check and have template `a.name` signed.
     pub(crate) fn evm_call(&mut self, a: EvmArgs) -> Reply {
         let t = self.evm_template_named(&a.name);
         let feeds = market_feeds(&leaves(&t));
