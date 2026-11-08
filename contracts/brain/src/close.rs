@@ -24,7 +24,11 @@
 //! inherit the derived addresses and anything stranded at them) and, only once
 //! that succeeded, the record is deleted, what the vault paid for it is refunded
 //! to the same beneficiary, and the answer is the relay's DELETE action alone.
-//! A tombstone that fails refuses the close: nothing is deleted.
+//! A tombstone that fails refuses the close: nothing is deleted. The brain keeps
+//! its own tombstone too (a few bytes, out of the refund) and never gives the
+//! name a record again: a creation of the name already on its way when the
+//! factory wrote its tombstone (past the factory's check, its receipt delayed
+//! until after the delete) is refused here, so that vault deletes itself.
 //!
 //! What can't be checked: a token the vault never trusted nor used in a flow
 //! (anyone may send one), and tokens arriving after the balance reads. They
@@ -167,7 +171,8 @@ impl Talk {
         // name stays tombstoned and the vault keeps working; its owner closes it later.
         self.idle();
         env::storage_remove(&crate::key(&self.vault));
-        let refund = self.vs.paid.0;
+        env::storage_write(&crate::tomb_key(&self.vault), b"");
+        let refund = self.vs.paid.0.saturating_sub(crate::tomb_cost(&self.vault));
         if refund > 0 {
             Promise::new(to.clone()).transfer(NearToken::from_yoctonear(refund)).detach();
         }

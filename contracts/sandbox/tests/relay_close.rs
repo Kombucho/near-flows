@@ -238,6 +238,8 @@ async fn a_vault_is_deleted_only_after_its_name_is_tombstoned() -> anyhow::Resul
     assert!(r.is_success(), "{:?}", r.failures());
     assert!(!exists(&w, &sv).await);
     assert!(w.worker.view(&factory, "is_closed").args_json(json!({"vault": sv})).await?.json::<bool>()?);
+    // The brain keeps its own tombstone: a creation already past the factory's check never gets a record.
+    assert!(w.brain.view("is_closed").args_json(json!({"vault": sv})).await?.json::<bool>()?);
     let r = mallory.call(&factory, "create_stealth_vault").args_json(json!({"name": "k7xq2m", "owner_key": mkey, "keeper": null}))
         .deposit(NearToken::from_millinear(100)).max_gas().transact().await?;
     assert!(fails_with(&r, "never reused"), "{:?}", r.failures());

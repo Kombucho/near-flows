@@ -288,7 +288,7 @@ async fn a_forged_brain_answer_is_refused() -> anyhow::Result<()> {
     init.extend(fake.id().as_bytes());
     init.push(w.mallory.id().len() as u8);
     init.extend(w.mallory.id().as_bytes());
-    let _ =w.mallory.call(evil.id(), "new").args(init).max_gas().transact().await?;
+    let _ = w.mallory.call(evil.id(), "new").args(init).max_gas().transact().await?;
 
     // 1. "Brain answer" delivered to Alice's vault's cb by another contract: refused (wrong predecessor).
     forge(&fake, answer(&[(w.vault.as_str(), "cb", b"")])).await?;

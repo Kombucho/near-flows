@@ -629,6 +629,11 @@ impl Brain {
         fingerprint(&node, &salt)
     }
 
+    /// Whether `vault` was closed here (its name never gets a record again).
+    pub fn is_closed(&self, vault: AccountId) -> bool {
+        env::storage_has_key(&tomb_key(&vault))
+    }
+
     /// What this vault's record costs and what it has paid.
     pub fn get_storage(&self, vault: AccountId) -> (U128, U128) {
         let vs = must_load(&vault);
@@ -644,6 +649,7 @@ impl Brain {
         let name = vault.as_str().strip_suffix(&format!(".{}", self.factory)).unwrap_or("");
         require!(!name.is_empty() && !name.contains('.'), "not one of the factory's vaults");
         require!(load(&vault).is_none(), "already a vault");
+        require!(!env::storage_has_key(&tomb_key(&vault)), "that name belonged to a closed vault: it is never reused");
         let vs = VaultState {
             owner,
             keeper,
@@ -1068,6 +1074,16 @@ pub(crate) fn amount_result(i: u64) -> Option<u128> {
 
 pub(crate) fn key(vault: &AccountId) -> Vec<u8> {
     [b"v:".as_slice(), vault.as_bytes()].concat()
+}
+
+/// A closed vault's tombstone (close.rs): the name never gets a record again.
+pub(crate) fn tomb_key(vault: &AccountId) -> Vec<u8> {
+    [b"t:".as_slice(), vault.as_bytes()].concat()
+}
+
+/// What a tombstone costs the brain's storage, kept out of the close's refund.
+pub(crate) fn tomb_cost(vault: &AccountId) -> u128 {
+    (RECORD_OVERHEAD + tomb_key(vault).len() as u64) as u128 * env::storage_byte_cost().as_yoctonear()
 }
 
 fn load(vault: &AccountId) -> Option<VaultState> {
