@@ -452,3 +452,191 @@ fn a_curve_read_is_the_spot_at_the_slot_read_and_nothing_vouches_for_it() {
     post_curve(&mut b, t + 600, 0);
     assert_eq!(b.get_price_unsafe(feed), before);
 }
+
+// ---------- Pyth Core updates (real Hermes bytes, real signers) ----------
+
+const ETH_ID: &str = "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace";
+const USDC_ID: &str = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a";
+/// The emitter Pyth's NEAR receivers still want (pre-upgrade): refused here.
+const OLD_EMITTER: &str = "e101faedac5851e32b9b23b5f9411a8c2bac4aae3ed4dd7b811dd1a72ea4aa71";
+
+fn pyth_data() -> serde_json::Value {
+    serde_json::from_str(&data("pyth_core.json")).unwrap()
+}
+
+fn pyth_set(i: u32) -> Vec<String> {
+    pyth_data()[format!("guardian_set_{i}")].as_array().unwrap().iter().map(|g| g.as_str().unwrap().to_string()).collect()
+}
+
+fn addrs(set: &[String]) -> Vec<[u8; 20]> {
+    set.iter().map(|g| hex::decode(g).unwrap().try_into().unwrap()).collect()
+}
+
+/// A recorded Hermes update: its bytes, and what Hermes said each price was.
+fn pyth_update(name: &str) -> (Vec<u8>, Vec<(String, Price)>) {
+    let u = &pyth_data()["updates"][name];
+    let parsed = u["parsed"].as_array().unwrap().iter().map(|p| {
+        let n = |k: &str| p[k].as_str().unwrap().parse::<i64>().unwrap();
+        (p["id"].as_str().unwrap().to_string(), Price { price: I64(n("price")), conf: U64(n("conf") as u64), expo: p["expo"].as_i64().unwrap() as i32, publish_time: p["publish_time"].as_i64().unwrap() })
+    }).collect();
+    (hex::decode(u["hex"].as_str().unwrap()).unwrap(), parsed)
+}
+
+fn pythnet() -> [u8; 32] {
+    hex::decode(pyth_data()["emitter"].as_str().unwrap()).unwrap().try_into().unwrap()
+}
+
+/// Byte offsets in an update: where the VAA starts and how long it is, where the first message's proof starts.
+fn vaa_at(u: &[u8]) -> (usize, usize) {
+    (10, u16::from_be_bytes([u[8], u[9]]) as usize)
+}
+
+fn first_proof_at(u: &[u8]) -> usize {
+    let (at, len) = vaa_at(u);
+    let m = at + len + 1; // count
+    let ml = u16::from_be_bytes([u[m], u[m + 1]]) as usize;
+    m + 2 + ml + 1
+}
+
+/// A PythCore board on Pyth's set `set` (as `index`), listing `feeds`, at unix time `t`.
+fn pyth_board(t: i64, index: u32, set: Vec<String>, emitter: &str, feeds: &[&str]) -> Board {
+    clock(t as u64);
+    Board::new(Some("owner.near".parse().unwrap()), Source::PythCore { guardian_set: index, guardians: set, emitter_chain: 26, emitter: emitter.into(),
+        feeds: feeds.iter().map(|f| f.to_string()).collect(), max_age_s: 60 })
+}
+
+#[test]
+fn real_pyth_core_updates_verify_against_pyths_own_signer_set() {
+    let set1 = addrs(&pyth_set(1));
+    assert_eq!((set1.len(), pythcore::quorum(5)), (5, 3), "5 signers, 3 needed (Wormhole's 2/3 + 1 would ask for 4)");
+    for name in ["eth", "eth_sol_usdc", "eth_sol_usdc_later"] {
+        let (u, parsed) = pyth_update(name);
+        let v = pythcore::verify(&u, 1, &set1, 26, &pythnet()).unwrap();
+        // Every price is the one Hermes reported, proven under the signed root.
+        let got: Vec<(String, Price)> = v.prices.iter().map(|m| (hex::encode(m.id), Price { price: I64(m.price), conf: U64(m.conf), expo: m.expo, publish_time: m.publish_time })).collect();
+        assert_eq!(got, parsed, "{name}");
+        // Exactly a quorum signed (routers 1, 2 and 4); two of them is not enough.
+        let (at, len) = vaa_at(&u);
+        let vaa = wormhole::parse_vaa(&u[at..at + len]).unwrap();
+        assert_eq!((vaa.guardian_set, vaa.sigs.iter().map(|s| s.0).collect::<Vec<_>>(), vaa.emitter_chain), (1, vec![1, 2, 4], 26), "{name}");
+        assert_eq!(wormhole::verify_sigs(&vaa.digest, &vaa.sigs[1..], &set1, pythcore::quorum), Err("no quorum"));
+        // Wormhole's guardians, or Pyth's set before the upgrade (routers 3 and 4 changed): not these signers.
+        assert_eq!(pythcore::verify(&u, 1, &set("guardian_set_7.txt"), 26, &pythnet()).err(), Some("no quorum"));
+        assert_eq!(pythcore::verify(&u, 1, &addrs(&pyth_set(0)), 26, &pythnet()).err(), Some("bad guardian signature"));
+    }
+}
+
+#[test]
+fn a_tampered_pyth_update_is_refused() {
+    let (u, _) = pyth_update("eth_sol_usdc");
+    let set1 = addrs(&pyth_set(1));
+    let check = |b: &[u8]| pythcore::verify(b, 1, &set1, 26, &pythnet()).err();
+    let (at, len) = vaa_at(&u);
+    // A signature byte; the root (last byte of the VAA); a byte of a proof node; a byte of a price.
+    let mut sig = u.clone();
+    sig[at + 6 + 1 + 10] ^= 1;
+    assert_eq!(check(&sig), Some("bad guardian signature"));
+    let mut root = u.clone();
+    root[at + len - 1] ^= 1;
+    assert_eq!(check(&root), Some("bad guardian signature"));
+    let mut proof = u.clone();
+    proof[first_proof_at(&u) + 3] ^= 1;
+    assert_eq!(check(&proof), Some("bad Merkle proof"));
+    let mut price = u.clone();
+    price[at + len + 1 + 2 + 40] ^= 1; // the first message's price field
+    assert_eq!(check(&price), Some("bad Merkle proof"));
+    // One signature dropped (and the count fixed): no quorum. Truncated, or not a PNAU: no parse.
+    let vaa = &u[at..at + len];
+    let two = [&u[..8], &((len - 66) as u16).to_be_bytes(), &vaa[..5], &[2], &vaa[6 + 66..], &u[at + len..]].concat();
+    assert_eq!(check(&two), Some("no quorum"));
+    assert_eq!(check(&u[..u.len() - 1]), Some("truncated"));
+    assert!(check(&[b"PNAX", &u[4..]].concat()).unwrap().contains("PNAU"));
+    // The right bytes, but a board that wants another emitter (Pyth's pre-upgrade one), or another set index.
+    assert_eq!(pythcore::verify(&u, 1, &set1, 26, &hex::decode(OLD_EMITTER).unwrap().try_into().unwrap()).err(), Some("not from Pyth's emitter"));
+    assert_eq!(pythcore::verify(&u, 1, &set1, 1, &pythnet()).err(), Some("not from Pyth's emitter"));
+    assert_eq!(pythcore::verify(&u, 2, &set1, 26, &pythnet()).err(), Some("VAA not signed by the board's guardian set"));
+}
+
+#[test]
+fn a_pyth_core_board_keeps_the_newest_signed_price_of_each_listed_feed() {
+    let (u, parsed) = pyth_update("eth_sol_usdc");
+    let t = parsed[0].1.publish_time;
+    let all = [ETH_ID, SOL_ID, USDC_ID];
+    let mut b = pyth_board(t + 5, 1, pyth_set(1), pyth_data()["emitter"].as_str().unwrap(), &all);
+    let post = |b: &mut Board, u: &[u8]| refusal(|| { b.post_update(hex::encode(u)); }).unwrap_or_default();
+    // ETH $2100.78680519 +-$2.63, SOL, USDC: Pyth's own numbers, Pyth's conf.
+    let out = b.post_update(hex::encode(&u));
+    assert_eq!(out.len(), 3);
+    for (id, p) in &parsed {
+        assert_eq!(b.get_price_no_older_than(id.clone(), 60).as_ref(), Some(p));
+    }
+    assert_eq!(b.get_price_unsafe(ETH_ID.into()).unwrap(), Price { price: I64(210_078_680_519), conf: U64(262_819_472), expo: -8, publish_time: 1_794_219_586 });
+    // The same update again, or an older one (ETH alone, a second before): nothing newer.
+    assert!(post(&mut b, &u).contains("not newer than the board's prices"));
+    assert!(post(&mut b, &pyth_update("eth").0).contains("not newer"));
+    // 348 s later: newer prices replace them.
+    let (later, lp) = pyth_update("eth_sol_usdc_later");
+    clock(lp[0].1.publish_time as u64 + 2);
+    assert_eq!(b.post_update(hex::encode(&later)).len(), 3);
+    assert_eq!(b.get_price_unsafe(USDC_ID.into()), Some(lp[2].1.clone()));
+    // ... and the older one can't roll them back (by now it's stale, too).
+    assert!(post(&mut b, &u).contains("price 350 s old, at most 60"));
+    assert_eq!(b.get_price_unsafe(USDC_ID.into()), Some(lp[2].1.clone()));
+
+    // Stale when posted (61 s, limit 60), or from the future (31 s ahead): refused.
+    let mut fresh = pyth_board(t + 61, 1, pyth_set(1), pyth_data()["emitter"].as_str().unwrap(), &all);
+    assert!(post(&mut fresh, &u).contains("price 61 s old, at most 60"));
+    clock((t - 31) as u64);
+    assert!(post(&mut fresh, &u).contains("price from the future"));
+    // A feed the owner didn't list: refused (nobody grows the board's storage for free).
+    let mut eth_only = pyth_board(t, 1, pyth_set(1), pyth_data()["emitter"].as_str().unwrap(), &[ETH_ID]);
+    assert!(post(&mut eth_only, &u).contains(&format!("{SOL_ID} is not a listed feed")));
+    assert_eq!(eth_only.post_update(hex::encode(pyth_update("eth").0))[0].price, I64(210_075_986_426));
+    // A board that wants the pre-upgrade emitter (what Pyth's NEAR receiver still wants): refused.
+    let mut old = pyth_board(t, 1, pyth_set(1), OLD_EMITTER, &all);
+    assert!(post(&mut old, &u).contains("not from Pyth's emitter"));
+    // Other boards don't take Pyth updates; a Pyth board takes nothing else.
+    assert!(refusal(|| { evm_board(t as u64, 86_400).post_update(hex::encode(&u)); }).unwrap().contains("doesn't take Pyth Core updates"));
+    assert!(refusal(|| { b.push_evm("00".into(), vec![]); }).unwrap().contains("doesn't take Chainlink"));
+    assert!(refusal(|| { b.push(ETH_ID.into(), vec![]); }).unwrap().contains("not attestations"));
+}
+
+#[test]
+fn a_pyth_core_board_follows_pyths_signer_rotation_and_nothing_else() {
+    // Deployed on set 0 (before the routers changed), it refuses today's updates ...
+    let (u, parsed) = pyth_update("eth_sol_usdc");
+    let t = parsed[0].1.publish_time;
+    let emitter = pyth_data()["emitter"].as_str().unwrap().to_string();
+    let mut b = pyth_board(t, 0, pyth_set(0), &emitter, &[ETH_ID, SOL_ID, USDC_ID]);
+    assert!(refusal(|| { b.post_update(hex::encode(&u)); }).unwrap().contains("VAA not signed by the board's guardian set"));
+    // ... until anyone posts the VAA in which set 0 named set 1 (4 of 5 signed it).
+    let vaa = hex::decode(pyth_data()["set_0_to_1_vaa"].as_str().unwrap()).unwrap();
+    let mut bad = vaa.clone();
+    *bad.last_mut().unwrap() ^= 1;
+    assert!(refusal(|| { b.upgrade_guardians(hex::encode(&bad)); }).unwrap().contains("bad guardian signature"));
+    assert_eq!(b.upgrade_guardians(hex::encode(&vaa)), 1);
+    assert!(matches!(b.get_source(), Source::PythCore { guardian_set: 1, guardians, .. } if guardians == pyth_set(1)), "the set Arbitrum's and Base's receivers report");
+    assert_eq!(b.post_update(hex::encode(&u)).len(), 3);
+    // The same VAA twice: it names set 1, the board is past it.
+    assert!(refusal(|| { b.upgrade_guardians(hex::encode(&vaa)); }).unwrap().contains("not signed by the current guardian set"));
+    // Wormhole's own upgrades (signed by Wormhole's guardians) can't move a Pyth board.
+    let wvaa: Vec<Vec<u8>> = data("guardian_set_vaas.csv").lines().map(|l| hex::decode(l.split(',').nth(1).unwrap()).unwrap()).collect();
+    let mut b0 = pyth_board(t, 4, pyth_set(1), &emitter, &[ETH_ID]);
+    assert!(refusal(|| { b0.upgrade_guardians(hex::encode(&wvaa[0])); }).unwrap().contains("refused"));
+}
+
+#[test]
+fn only_the_owner_lists_pyth_feeds_and_bad_boards_are_refused() {
+    let emitter = pyth_data()["emitter"].as_str().unwrap().to_string();
+    let mut b = pyth_board(1_794_219_590, 1, pyth_set(1), &emitter, &[ETH_ID]);
+    assert!(refusal(|| b.set_pyth_feeds(vec![SOL_ID.into()])).unwrap().contains("owner only"));
+    clock_as(1_794_219_590, "owner.near");
+    assert!(refusal(|| b.set_pyth_feeds(vec![SOL_ID.into(), SOL_ID.into()])).unwrap().contains("listed twice"));
+    assert!(refusal(|| b.set_pyth_feeds(vec![SOL_ID.to_uppercase()])).unwrap().contains("lowercase"));
+    b.set_pyth_feeds(vec![ETH_ID.into(), SOL_ID.into()]);
+    assert!(matches!(b.get_source(), Source::PythCore { feeds, .. } if feeds.len() == 2));
+    let new = |emitter: &str, max_age_s: u64| refusal(|| { Board::new(None, Source::PythCore { guardian_set: 1, guardians: pyth_set(1), emitter_chain: 26, emitter: emitter.into(), feeds: vec![], max_age_s }); });
+    assert!(new(&emitter.to_uppercase(), 60).unwrap().contains("emitter"));
+    assert!(new(&emitter, 0).unwrap().contains("max_age_s"));
+    assert!(new(&emitter, 60).is_none());
+}

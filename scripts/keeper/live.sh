@@ -20,7 +20,13 @@ TICK="${TICK:-30}"
 export NEAR_NETWORK="${NEAR_NETWORK:-testnet}"
 export KEEPER_ACCOUNT_ID="${KEEPER_ACCOUNT_ID:-nf-keeper-$SUFFIX.testnet}"
 export FACTORY_ID="${FACTORY_ID:-nf-relay-$SUFFIX.testnet}"
-BOARD="${BOARD:-nf-board-$SUFFIX.testnet}"
+# The deployment's boards: nf-pyth (pyth_core: Pyth's signed updates, checked on chain) if it
+# has one, and nf-board (attested: the Chainlink backups, NEAR, NVDA; ETH/USDC/SOL too without nf-pyth).
+PYTH_BOARD="${PYTH_BOARD:-nf-pyth-$SUFFIX.testnet}"
+RPC="${NEAR_RPC:-https://test.rpc.fastnear.com}"
+has_pyth=$(curl -s "$RPC" -H 'content-type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"query\",\"params\":{\"request_type\":\"view_account\",\"finality\":\"final\",\"account_id\":\"$PYTH_BOARD\"}}" | grep -c '"code_hash"')
+BOARD="${BOARD:-$([ "$has_pyth" = 1 ] && echo "$PYTH_BOARD,")nf-board-$SUFFIX.testnet}"
 
 echo "live keeper: board $BOARD, factory $FACTORY_ID, keeper $KEEPER_ACCOUNT_ID, every ${TICK}s, prices on demand"
 exec npm run -s flows -- --send --board "$BOARD" --tick "$TICK" 2>&1 | grep --line-buffered -v -E "punycode|trace-deprecation|bigint: Failed"

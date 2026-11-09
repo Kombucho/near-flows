@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { KeyPair } from "near-api-js";
 import { createPublicKey, verify } from "node:crypto";
-import { attestation, curveQuery, feedId, toUnits, unsignable } from "./prices.ts";
+import { attestation, curveQuery, feedId, pythBoardIds, toUnits, unsignable } from "./prices.ts";
 
 test("a Hermes price is relayed only if positive and no less certain than the limit", () => {
   assert.equal(unsignable({ price: "300000000000", conf: "150000000" }, 100), null); // 0.05%
@@ -48,4 +48,16 @@ test("a Wormhole sol_pda query for a pump.fun curve", () => {
     "0100000007010001050000007c0000000966696e616c697a6564" + "00".repeat(24) + "01" +
     "0156e0f693665acf44db1568bf175baa5189cb97f5d2ff3b655d2bb6fd6d18b0" + "02" +
     "0000000d626f6e64696e672d6375727665" + "00000020" + MEME_HEX);
+});
+
+test("pyth posts a vault's board feeds and backups: listed ones on a pyth_core board, known Pyth ids on an attested one", () => {
+  const [eth, usdc, ethArb, other] = ["ff61", "eaa0", "0017aa", "beef"].map((p) => p.padEnd(64, "0"));
+  const feeds = [
+    { contract: "pyth.board", price_id: eth, backup: { contract: "att.board", price_id: ethArb } },
+    { contract: "pyth.board", price_id: usdc.toUpperCase(), backup: { contract: "pyth.board", price_id: other } },
+    { contract: "att.board", price_id: eth },
+  ];
+  assert.deepEqual(pythBoardIds(feeds, "pyth.board", { kind: "pyth_core", feeds: [eth, usdc] }, []), [eth, usdc], "an unlisted id isn't posted");
+  assert.deepEqual(pythBoardIds(feeds, "att.board", { kind: "attested" }, [eth, usdc]), [eth], "the Chainlink backup is chainlink-price's");
+  assert.deepEqual(pythBoardIds(feeds, "pyth.board", null, []), [eth, usdc], "Pyth's own contract: the feeds read there");
 });

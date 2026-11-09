@@ -1,25 +1,29 @@
 // Fresh Pyth prices for NEAR, so vaults' market floors have something to read.
 //
-//   npm run pyth -- --board <board> eth sol usdc   ATTEST them to our price board (the way that works today)
+//   npm run pyth -- --board <board> eth sol usdc   post them to our price board (pyth_core: Pyth's signed update; attested: we sign)
 //   npm run pyth -- eth usdc                       push them to Pyth's own contract on NEAR
 //   npm run pyth -- ... --vault <vault>            every feed that (relay) vault reads from there (its oracle config)
 //   ... --dry                                      fetch and print, send nothing
-//   ... --max-conf-bps 100                         board mode: don't sign a price Pyth itself is this unsure of (default 1%)
+//   ... --max-conf-bps 100                         attested board: don't sign a price Pyth itself is this unsure of (default 1%)
 //
-// Pyth is a pull oracle: prices are signed by Pyth's publishers, carried by
-// Wormhole guardians, and anyone may submit them; the Pyth contract on NEAR
-// checks the signatures. Submitting can't fake a price, only make it fresher.
+// Pyth is a pull oracle: prices are signed by Pyth (since Aug 2026 by its own 5
+// routers, 3 of 5 needed), and anyone may submit them; the contract that takes
+// them checks the signatures. Submitting can't fake a price, only make it fresher.
 // Since Aug 2026 Pyth's Hermes service needs an API key: PYTH_API_KEY.
 //
-// WHY the board mode: on 2026-11-06 pyth-oracle.testnet refused every Hermes update
+// WHY a board: on 2026-11-06 pyth-oracle.testnet refused every Hermes update
 // ("Source for attestation is not allowed"): Pyth's Aug 2026 Core upgrade moved the
-// data source and NEAR's receiver wasn't updated. Until it is, the keeper relays
-// Hermes's prices to an ATTESTED board under Pyth's own price ids. That TRUSTS THE
-// KEEPER (k of the board's attesters) to relay them faithfully. Anyone can audit a
-// price: the log gives the feed id and publish_time; Hermes serves the signed update
-// for that exact time at /v2/updates/price/<publish_time>?ids[]=<id>. The board keeps
-// the median of its attesters, so Pyth's own confidence isn't carried over: we refuse
-// to sign a price whose confidence is wider than --max-conf-bps instead.
+// data source and NEAR's receiver wasn't updated. Two kinds of board take Pyth prices:
+// - PYTH_CORE board (trustless): we post Hermes's update bytes as they are, and the
+//   board checks Pyth's signers, the emitter and each price's Merkle proof itself
+//   (contracts/priceboard/src/pythcore.rs). Nothing to trust about the keeper:
+//   the worst it can do is not post. Pyth's own confidence is kept.
+// - ATTESTED board (the old way): we relay Hermes's price and sign it. That TRUSTS
+//   THE KEEPER (k of the board's attesters). Anyone can audit a price: the log gives
+//   the feed id and publish_time; Hermes serves the signed update for that time at
+//   /v2/updates/price/<publish_time>?ids[]=<id>. That board keeps the median of its
+//   attesters, so Pyth's confidence isn't carried over: we refuse to sign a price
+//   whose confidence is wider than --max-conf-bps instead.
 //
 // Environment: PYTH_API_KEY, KEEPER_ACCOUNT_ID, ATTESTER_PRIVATE_KEY (board mode; default: the keeper's
 // key), NEAR_NETWORK (default testnet), NEAR_RPC, PYTH_CONTRACT (default pyth-oracle.<network>),
@@ -28,7 +32,7 @@
 import { parseArgs } from "node:util";
 import { KeyPair, type KeyPairString } from "near-api-js";
 import { Chain, loadKey } from "./chain.ts";
-import { attestation, unsignable } from "./prices.ts";
+import { attestation, pythBoardIds, unsignable } from "./prices.ts";
 
 const TGAS = 10n ** 12n;
 // Pyth feed ids (hex, no 0x) for names used in the node library.
@@ -57,12 +61,20 @@ const keeperId = process.env.KEEPER_ACCOUNT_ID ?? "";
 if (!apiKey) throw new Error("set PYTH_API_KEY (Hermes needs one since Aug 2026: https://docs.pyth.network/pro/pyth-core-upgrade)");
 const chain = new Chain(rpc, target, keeperId, o.dry ? undefined : loadKey(network, keeperId));
 
+type Source = { kind: string; attesters?: string[]; k?: number; feeds?: string[] };
+const source = o.board ? await chain.view<Source>(o.board, "get_source") : null;
+if (source && source.kind !== "attested" && source.kind !== "pyth_core") {
+  // An Evm or pump.fun board: nothing of Pyth's to post there (flows --board asks every board).
+  if (o.vault) throw new Error(`which feeds? ${o.board} is a ${source.kind} board, none of Pyth's`);
+  throw new Error(`${o.board} is a ${source.kind} board: Pyth prices go to a pyth_core (or attested) one`);
+}
+
 let ids: string[];
 if (o.vault) {
-  const cfg = await chain.brainView<{ feeds: { name: string; contract: string; price_id: string }[] } | null>(await chain.brainOf(o.vault), o.vault, "get_oracle");
+  type Feed = { name: string; contract: string; price_id: string; backup?: { contract?: string; price_id?: string } };
+  const cfg = await chain.brainView<{ feeds: Feed[] } | null>(await chain.brainOf(o.vault), o.vault, "get_oracle");
   if (!cfg) throw new Error(`${o.vault} has no oracle set up`);
-  // On a board, only Pyth's ids are ours to relay (Chainlink feeds there are chainlink-price's).
-  ids = cfg.feeds.filter((f) => f.contract === target).map((f) => f.price_id).filter((id) => !o.board || Object.values(FEEDS).includes(id));
+  ids = pythBoardIds(cfg.feeds, target, source, Object.values(FEEDS));
 } else {
   ids = positionals.map((n) => FEEDS[n] ?? n);
 }
@@ -77,9 +89,24 @@ for (const p of body.parsed) {
   console.log(`${p.id.slice(0, 8)} $${usd.toFixed(4)} ±${((Number(p.price.conf) / Number(p.price.price)) * 100).toFixed(3)}%  published ${p.price.publish_time} (${Math.round(Date.now() / 1000 - p.price.publish_time)} s ago)`);
 }
 
-if (o.board) {
-  const source = await chain.view<{ kind: string; attesters?: string[]; k?: number }>(o.board, "get_source");
-  if (source.kind !== "attested") throw new Error(`${o.board} is a ${source.kind} board: Pyth prices go to an attested one`);
+if (o.board && source?.kind === "pyth_core") {
+  // Hermes's update as it is: the board checks Pyth's signers and each price's proof itself.
+  const data = body.binary.data[0];
+  const unlisted = ids.filter((id) => !source.feeds!.includes(id));
+  if (unlisted.length) throw new Error(`${o.board} doesn't list ${unlisted.join(", ")} (its owner adds feeds with set_pyth_feeds)`);
+  if (o.dry) {
+    console.log(`would post a Pyth Core update (${data.length / 2} bytes, ${body.parsed.length} price(s)) to ${o.board}: post_update, checked on chain`);
+    process.exit(0);
+  }
+  await chain.call(o.board, "post_update", { data }, 30n * TGAS);
+  for (const id of ids) {
+    const p = await chain.view<{ price: string; conf: string; expo: number; publish_time: number } | null>(o.board, "get_price_unsafe", { price_id: id });
+    console.log(`${id.slice(0, 8)} on ${o.board}: ${p ? `${p.price} x 1e${p.expo} ±${p.conf}, published ${p.publish_time} (Pyth-signed, checked by the board)` : "none"}`);
+  }
+  process.exit(0);
+}
+
+if (o.board && source) {
   if (source.k! > 1) throw new Error(`${o.board} needs ${source.k} attesters per price: this relays one (combine reports by hand, as jupiter-price --with does)`);
   const signer = o.dry ? null : KeyPair.fromString((process.env.ATTESTER_PRIVATE_KEY ?? loadKey(network, keeperId)) as KeyPairString);
   const me = signer?.getPublicKey().toString();

@@ -229,12 +229,17 @@ pub fn quorum(n: usize) -> usize {
 
 /// Signatures as (guardian index, r||s||v). Guardian indices must strictly
 /// increase (so nobody counts twice), every one must recover to that guardian,
-/// and there must be a quorum of them.
+/// and there must be a quorum of them: Wormhole's, more than two thirds.
 pub fn verify_quorum(digest: &[u8; 32], sigs: &[(u8, [u8; 65])], guardians: &[[u8; 20]]) -> Result<(), &'static str> {
+    verify_sigs(digest, sigs, guardians, quorum)
+}
+
+/// As verify_quorum, with the set's own quorum rule: `need(set size)` signatures.
+pub fn verify_sigs(digest: &[u8; 32], sigs: &[(u8, [u8; 65])], guardians: &[[u8; 20]], need: fn(usize) -> usize) -> Result<(), &'static str> {
     if guardians.is_empty() {
         return Err("no guardian set");
     }
-    if sigs.len() < quorum(guardians.len()) {
+    if sigs.len() < need(guardians.len()) {
         return Err("no quorum");
     }
     let mut last: Option<u8> = None;
@@ -268,37 +273,67 @@ pub struct Upgrade {
     pub guardians: Vec<[u8; 20]>,
 }
 
-/// Parse and verify a governance VAA that names the next guardian set
-/// ("Core" module, action 2, every chain), signed by a quorum of `current`.
-pub fn guardian_upgrade(vaa: &[u8], current_index: u32, current: &[[u8; 20]]) -> Result<Upgrade, &'static str> {
+/// A VAA, split: who signed it, and the fields of the body they signed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Vaa<'a> {
+    pub guardian_set: u32,
+    /// (guardian index, r||s||v), as in verify_quorum.
+    pub sigs: Vec<(u8, [u8; 65])>,
+    /// What was signed: keccak256(keccak256(body)).
+    pub digest: [u8; 32],
+    pub timestamp: u32,
+    pub emitter_chain: u16,
+    pub emitter: [u8; 32],
+    pub sequence: u64,
+    pub payload: &'a [u8],
+}
+
+/// Version 1, the guardian set index, the signatures (each: guardian index,
+/// then r||s||v), then the body: timestamp, nonce, emitter chain and address,
+/// sequence, consistency level, payload. Signatures are not checked here.
+pub fn parse_vaa(vaa: &[u8]) -> Result<Vaa<'_>, &'static str> {
     let mut r = Reader::new(vaa);
     if r.u8()? != 1 {
         return Err("VAA version");
     }
-    let signed_by = r.u32()?;
-    if signed_by != current_index {
-        return Err("VAA not signed by the current guardian set");
-    }
+    let guardian_set = r.u32()?;
     let n = r.u8()?;
     let mut sigs = Vec::with_capacity(n as usize);
     for _ in 0..n {
-        // VAA signatures: index first, then r||s||v.
         let i = r.u8()?;
         sigs.push((i, r.bytes(65)?.try_into().unwrap()));
     }
     let body = &vaa[r.at..];
-    // VAAs are signed over keccak256(keccak256(body)).
     let digest = env::keccak256_array(&env::keccak256_array(body));
-    verify_quorum(&digest, &sigs, current)?;
-
     let mut b = Reader::new(body);
-    b.bytes(4 + 4)?; // timestamp, nonce
+    let timestamp = b.u32()?;
+    b.u32()?; // nonce
+    let (emitter_chain, emitter, sequence) = (b.u16()?, b.b32()?, b.u64()?);
+    b.u8()?; // consistency level
+    Ok(Vaa { guardian_set, sigs, digest, timestamp, emitter_chain, emitter, sequence, payload: &body[b.at..] })
+}
+
+/// Parse and verify a governance VAA that names the next guardian set
+/// ("Core" module, action 2, every chain), signed by a quorum of `current`.
+pub fn guardian_upgrade(vaa: &[u8], current_index: u32, current: &[[u8; 20]]) -> Result<Upgrade, &'static str> {
+    guardian_upgrade_with(vaa, current_index, current, quorum)
+}
+
+/// As guardian_upgrade, with the set's own quorum rule. Pyth's signer set
+/// rotates with this same message, from the same governance address.
+pub fn guardian_upgrade_with(vaa: &[u8], current_index: u32, current: &[[u8; 20]], need: fn(usize) -> usize) -> Result<Upgrade, &'static str> {
+    let v = parse_vaa(vaa)?;
+    let signed_by = v.guardian_set;
+    if signed_by != current_index {
+        return Err("VAA not signed by the current guardian set");
+    }
+    verify_sigs(&v.digest, &v.sigs, current, need)?;
     let mut governance = [0u8; 32];
     governance[31] = 4;
-    if b.u16()? != SOLANA || b.b32()? != governance {
+    if v.emitter_chain != SOLANA || v.emitter != governance {
         return Err("not from Wormhole governance");
     }
-    b.bytes(8 + 1)?; // sequence, consistency
+    let mut b = Reader::new(v.payload);
     let mut core = [0u8; 32];
     core[28..].copy_from_slice(b"Core");
     if b.b32()? != core || b.u8()? != 2 || b.u16()? != 0 {

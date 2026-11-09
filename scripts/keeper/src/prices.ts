@@ -60,3 +60,15 @@ export function unsignable(p: { price: string; conf: string }, maxConfBps: numbe
   if (BigInt(p.conf) * 10_000n > price * BigInt(maxConfBps)) return `confidence ${p.conf} is wider than ${maxConfBps} bps of ${p.price}`;
   return null;
 }
+
+type OracleFeed = { contract: string; price_id: string; backup?: { contract?: string; price_id?: string } };
+
+/** Which of a vault's Pyth feeds `npm run pyth` posts to `target`: every feed (or backup)
+ *  the vault reads there. On a pyth_core board, those the board lists (a signed update
+ *  can carry any Pyth id); on an attested one, the Pyth ids we know (`known`): its Chainlink
+ *  feeds are chainlink-price's. No board (Pyth's own contract): the vault's feeds there. */
+export function pythBoardIds(feeds: OracleFeed[], target: string, source: { kind: string; feeds?: string[] } | null, known: string[]): string[] {
+  const read = feeds.flatMap((f) => [f.contract === target ? f.price_id : "", source && f.backup?.contract === target ? f.backup.price_id ?? "" : ""]).filter(Boolean);
+  const keep = !source ? () => true : source.kind === "pyth_core" ? (id: string) => (source.feeds ?? []).includes(id) : (id: string) => known.includes(id);
+  return [...new Set(read.map((id) => id.toLowerCase()))].filter(keep);
+}

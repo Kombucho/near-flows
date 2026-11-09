@@ -32,8 +32,9 @@
 // price is skipped (the brain would refuse it): its owner can top up, or run
 // their own keeper for free (AGENTS.md).
 //
-// Prices (--board <board>): ON DEMAND only. Just before a step goes, the keeper
-// posts fresh prices for the feeds that vault reads from the board, each feed's
+// Prices (--board <board>[,<board>...]): ON DEMAND only. Just before a step goes, the keeper
+// posts fresh prices for the feeds that vault reads from those boards (a pyth_core board
+// gets Pyth's signed update as is, which it checks itself), each feed's
 // price AND its backup (a different publisher: Chainlink for a Pyth price, Chainlink
 // on another chain for Chainlink), so its market floor reads prices seconds old that
 // the vault checks against each other. Chainlink feeds always, Pyth's if
@@ -59,7 +60,7 @@ const { values: opt } = parseArgs({
     tick: { type: "string", default: "30" }, // seconds between rounds
     send: { type: "boolean", default: false },
     once: { type: "boolean", default: false },
-    board: { type: "string" }, // post this board's prices on demand
+    board: { type: "string" }, // post these boards' prices on demand (comma list: e.g. the pyth_core board and the attested one)
     remote: { type: "boolean", default: false }, // with --send: also run remote nodes (other chains, hops)
   },
 });
@@ -72,6 +73,7 @@ if (!factory || !keeperId) throw new Error("set FACTORY_ID and KEEPER_ACCOUNT_ID
 const chain = new Chain(rpc, factory, keeperId, opt.send ? loadKey(network, keeperId) : undefined);
 const brain = await chain.view<string>(factory, "get_brain");
 const log = (s: string) => console.log(`${new Date().toISOString().slice(11, 19)} ${s}`);
+const boards = (opt.board ?? "").split(",").map((b) => b.trim()).filter(Boolean);
 // Remote nodes leave NEAR only with both flags: --send (sign) and --remote (other chains).
 const runner = opt.send && opt.remote ? new RemoteRunner(chain, brain, optsFromEnv(statePath(keeperId), log)) : null;
 if (runner?.inflight.length) log(`resuming ${runner.inflight.length} remote step(s) in flight (${statePath(keeperId)})`);
@@ -91,16 +93,21 @@ const run = promisify(execFile);
  *  a vault with no board feeds, or a source that's down, just gets no post (the
  *  vault then refuses a stale price itself). */
 async function freshen(vault: string) {
-  if (!opt.board || !opt.send || fresh.has(vault)) return;
+  if (!boards.length || !opt.send || fresh.has(vault)) return;
   fresh.add(vault);
   const scripts = ["chainlink-price", ...(process.env.PYTH_API_KEY ? ["pyth"] : [])];
-  for (const s of scripts) {
-    try {
-      const { stdout } = await run("npm", ["run", "-s", s, "--", "--board", opt.board, "--vault", vault], { timeout: 60_000 });
-      for (const l of stdout.split("\n")) if (l.includes(` on ${opt.board}: `)) log(`  ${s}: ${l.trim()}`);
-    } catch (e) {
-      const m = (e as { stderr?: string }).stderr ?? (e as Error).message;
-      if (!/which feeds\?|has no oracle/.test(m)) log(`  ${s} for ${vault} failed: ${m.split("\n").find((l) => /Error/.test(l))?.trim() ?? m.slice(0, 160)}`);
+  // Every board x every script: each script posts only what it can to that kind of board
+  // (and says "which feeds?" when there's nothing, which is fine).
+  for (const board of boards) {
+    for (const s of scripts) {
+      try {
+        const { stdout } = await run("npm", ["run", "-s", s, "--", "--board", board, "--vault", vault], { timeout: 60_000 });
+        for (const l of stdout.split("\n")) if (l.includes(` on ${board}: `)) log(`  ${s}: ${l.trim()}`);
+      } catch (e) {
+        const m = (e as { stderr?: string }).stderr ?? (e as Error).message;
+        // "not newer": another vault's post this second already put the same price there.
+        if (!/which feeds\?|has no oracle|not newer than the board/.test(m)) log(`  ${s} for ${vault} on ${board} failed: ${m.split("\n").find((l) => /Error/.test(l))?.trim() ?? m.slice(0, 160)}`);
+      }
     }
   }
 }
@@ -182,7 +189,7 @@ async function round() {
       }
       if (d.price) {
         const s = d.price.source;
-        if (s.contract === opt.board) await freshen(vault);
+        if (boards.includes(s.contract)) await freshen(vault);
         const raw = await chain.view<string>(s.contract, s.method, JSON.parse(s.args)).catch(() => null);
         if (raw === null || !fired(d, priceOf(raw, s.per))) continue;
       }

@@ -9,8 +9,8 @@
 //! here too. Ours start with the faucet's 10 NEAR, which checks the funding
 //! table. Outside contracts get stand-ins at their real names: mock_ft for
 //! the tokens, and Rhea's REAL code read from testnet (views only; skipped
-//! offline with a stand-in that only accepts the calls). No Pyth: every feed
-//! is read from the script's own price board (the keeper attests them).
+//! offline with a stand-in that only accepts the calls). No Pyth contract: every feed
+//! is read from the script's own price boards (pyth_core for ETH/USDC/SOL, attested for the rest).
 //! Build the wasm first: make build
 
 mod common;
@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 const SUFFIX: &str = "sbx";
-const STEPS: &str = "accounts,brain,factory,publish,priceboard,vault,oracle,flow";
+const STEPS: &str = "accounts,brain,factory,publish,priceboard,pythboard,vault,oracle,flow";
 /// Chainlink NEAR/USD on Arbitrum (Wormhole chain 23) and RHNVDA/USD on Robinhood Chain (72), as board ids.
 const NEAR_ID: &str = "001700000000000000000000bf5c3fb2633e924598a46b9d07a174a9dbcf57c0";
 const NVDA_ID: &str = "004800000000000000000000379ec4f7c378f34a1b47e4f3cbebcbac3e8e9f15";
@@ -134,7 +134,7 @@ async fn the_testnet_deploy_script_runs_as_written() -> anyhow::Result<()> {
     let top = Account::from_secret_key("testnet".parse()?, sk, &w);
 
     // Our accounts' keys first: the price board's attester is the keeper's key.
-    let keys: HashMap<String, SecretKey> = ["brain", "relay", "board", "owner", "keeper"]
+    let keys: HashMap<String, SecretKey> = ["brain", "relay", "board", "pyth", "owner", "keeper"]
         .iter()
         .map(|n| (format!("nf-{n}-{SUFFIX}.testnet"), SecretKey::from_random(KeyType::ED25519)))
         .collect();
@@ -228,9 +228,12 @@ async fn the_testnet_deploy_script_runs_as_written() -> anyhow::Result<()> {
     let oracle = view(id("brain"), "get_oracle", json!({"vault": vault})).await?;
     let feeds: Vec<&str> = oracle["feeds"].as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap()).collect();
     assert_eq!(feeds, ["near", "usdc", "eth", "sol", "nvda"]);
-    for f in oracle["feeds"].as_array().unwrap() {
-        assert_eq!(f["contract"], json!(id("board")), "every feed reads the board: {f}");
-    }
+    // Pyth's usdc, eth, sol from the pyth_core board (checks Pyth's signers); near, nvda from the attested board.
+    let boards: Vec<&str> = oracle["feeds"].as_array().unwrap().iter().map(|f| f["contract"].as_str().unwrap()).collect();
+    assert_eq!(boards, [id("board"), id("pyth"), id("pyth"), id("pyth"), id("board")].iter().map(|a| a.as_str()).collect::<Vec<_>>());
+    let ps = view(id("pyth"), "get_source", json!({})).await?;
+    assert_eq!((ps["kind"].as_str(), ps["guardian_set"].as_u64(), ps["guardians"].as_array().map(|g| g.len()), ps["emitter_chain"].as_u64()), (Some("pyth_core"), Some(1), Some(5), Some(26)), "{ps}");
+    assert_eq!(ps["feeds"].as_array().unwrap().len(), 3);
     assert_eq!((oracle["feeds"][0]["price_id"].as_str(), oracle["feeds"][4]["price_id"].as_str()), (Some(NEAR_ID), Some(NVDA_ID)));
     // Every feed is confirmed by a different publisher on the board; NVDA has none and says so.
     let backups: Vec<Value> = oracle["feeds"].as_array().unwrap().iter().map(|f| f["backup"].clone()).collect();
@@ -238,7 +241,9 @@ async fn the_testnet_deploy_script_runs_as_written() -> anyhow::Result<()> {
     assert_eq!(backups, [other(NEAR_OP_ID), other(USDC_ARB_ID), other(ETH_ARB_ID), other(SOL_ARB_ID), json!({"kind": "single_source"})]);
 
     // The keeper's key, as the keeper scripts use it, gets a Chainlink price (NEAR, chainlink-price),
-    // a Pyth one (ETH, pyth --board) and ETH's backup (Chainlink on Arbitrum) onto the deployed board.
+    // a Pyth one (ETH, as pyth --board does with PYTH_SOURCE=attested) and ETH's backup (Chainlink
+    // on Arbitrum) onto the attested board. (The pyth_core board only takes Pyth-signed updates:
+    // tests/pyth_board.rs posts a real one.)
     let seed: [u8; 32] = bs58::decode(keys[&keeper_id].to_string().trim_start_matches("ed25519:")).into_vec()?[..32].try_into()?;
     let attester = ed25519_dalek::SigningKey::from_bytes(&seed);
     let t = (w.view_block().await?.timestamp() / 1_000_000_000) as i64;

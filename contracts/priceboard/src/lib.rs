@@ -25,6 +25,15 @@
 //!   data, the block's age and the feed's own staleness. Trusts Wormhole's
 //!   guardians and Chainlink's feed (its node operators, and the multisig that
 //!   can repoint its proxy), not any keeper.
+//! - PythCore: anyone posts a Pyth Core update exactly as Hermes serves it (an
+//!   accumulator update: a signed Merkle root plus each price's proof). The
+//!   board checks the signatures (a majority of Pyth's own signer set, pinned
+//!   at deploy and rotated only by that set's own upgrade VAAs), the emitter
+//!   (Pythnet), each price's Merkle proof, that the feed is listed, and the
+//!   price's age. Trusts Pyth's signers (its 5 routers since Aug 2026), as
+//!   Pyth's own receivers do, not any keeper. WHY here and not Pyth's NEAR
+//!   receiver: that one still wants the pre-upgrade emitter and refuses every
+//!   update since (pythcore.rs).
 //!
 //! Whatever the source, the board keeps one thing per feed: its latest price. It
 //! keeps no average of its own. WHY: prices are posted on demand (just before a
@@ -35,6 +44,7 @@
 
 pub mod chainlink;
 pub mod pump;
+pub mod pythcore;
 pub mod wormhole;
 
 use near_sdk::json_types::{I64, U64};
@@ -82,6 +92,12 @@ pub enum Source {
     /// Wormhole Queries (eth_call) of these Chainlink feeds. Guardians as for `Wormhole`.
     /// A response's block may be at most `max_block_age_s` old when posted.
     Evm { guardian_set: u32, guardians: Vec<String>, feeds: Vec<EvmFeed>, max_block_age_s: u64 },
+    /// Pyth Core updates (Hermes's accumulator updates). Guardians: Pyth's own signer set
+    /// `guardian_set` (20-byte addresses, hex), a majority of them needed; later sets
+    /// arrive as upgrade VAAs that set signed. Roots must come from `emitter_chain` /
+    /// `emitter` (32 bytes, hex). Only `feeds` (Pyth ids, hex) are kept, each no older
+    /// than `max_age_s` when posted.
+    PythCore { guardian_set: u32, guardians: Vec<String>, emitter_chain: u16, emitter: String, feeds: Vec<String>, max_age_s: u64 },
 }
 
 /// A Chainlink feed the board takes prices from (its price id: chainlink::price_id).
@@ -350,16 +366,63 @@ impl Board {
         hex::encode(chainlink::price_id(chain, &addr(&address)))
     }
 
-    /// Anyone: follow Wormhole's guardian rotation with the upgrade VAA the
-    /// current set signed (hex). No owner involved.
+    // ---------- PythCore ----------
+
+    /// Anyone: post a Pyth Core update (hex, exactly as Hermes serves it with
+    /// encoding=hex). The board checks a majority of its Pyth signer set signed
+    /// the root, the emitter, and each price's Merkle proof under that root;
+    /// each price must be a listed feed, positive, and at most `max_age_s` old.
+    /// Stores what's newer than the board's price; refused if nothing is.
+    pub fn post_update(&mut self, data: String) -> Vec<Price> {
+        let Source::PythCore { guardian_set, guardians, emitter_chain, emitter, feeds, max_age_s } = &self.source else {
+            env::panic_str("this board doesn't take Pyth Core updates")
+        };
+        let refuse = |e: &str| -> ! { env::panic_str(&format!("refused: {e}")) };
+        let bytes = hex::decode(data.trim_start_matches("0x")).unwrap_or_else(|_| env::panic_str("data: hex"));
+        let set: Vec<[u8; 20]> = guardians.iter().map(|g| addr(g)).collect();
+        let v = pythcore::verify(&bytes, *guardian_set, &set, *emitter_chain, &feed_id(emitter)).unwrap_or_else(|e| refuse(e));
+        let mut read = Vec::with_capacity(v.prices.len());
+        for m in &v.prices {
+            let id = hex::encode(m.id);
+            require!(feeds.contains(&id), format!("refused: {id} is not a listed feed"));
+            require!(m.price > 0, format!("refused: {id}: a price must be positive"));
+            require!(m.publish_time <= now() + SKEW_S, format!("refused: {id}: price from the future"));
+            let age = now() - m.publish_time;
+            require!(age <= *max_age_s as i64, format!("refused: {id}: price {age} s old, at most {max_age_s}"));
+            read.push((id, Price { price: I64(m.price), conf: U64(m.conf), expo: m.expo, publish_time: m.publish_time }));
+        }
+        let mut out = Vec::new();
+        for (feed, price) in read {
+            if self.store(&feed, price.clone()) {
+                env::log_str(&format!(r#"EVENT_JSON:{{"standard":"priceboard","version":"1","event":"price","data":{{"feed":"{feed}","price":"{}","conf":"{}","expo":{},"publish_time":{},"pythnet_slot":{},"sequence":{}}}}}"#,
+                    price.price.0, price.conf.0, price.expo, price.publish_time, v.slot, v.sequence));
+                out.push(price);
+            }
+        }
+        require!(!out.is_empty(), "refused: not newer than the board's prices");
+        out
+    }
+
+    /// Owner: the Pyth feeds this board keeps (Pyth ids, hex).
+    pub fn set_pyth_feeds(&mut self, feeds: Vec<String>) {
+        self.assert_owner();
+        let Source::PythCore { feeds: f, .. } = &mut self.source else { env::panic_str("not a PythCore board") };
+        *f = feeds;
+        check_source(&self.source);
+    }
+
+    /// Anyone: follow the signer set's rotation with the upgrade VAA the
+    /// current set signed (hex): Wormhole's guardians on a Wormhole or Evm
+    /// board, Pyth's signers on a PythCore one. No owner involved.
     pub fn upgrade_guardians(&mut self, vaa: String) -> u32 {
-        let (guardian_set, guardians) = match &mut self.source {
-            Source::Wormhole { guardian_set, guardians, .. } | Source::Evm { guardian_set, guardians, .. } => (guardian_set, guardians),
+        let (guardian_set, guardians, need): (_, _, fn(usize) -> usize) = match &mut self.source {
+            Source::Wormhole { guardian_set, guardians, .. } | Source::Evm { guardian_set, guardians, .. } => (guardian_set, guardians, wormhole::quorum),
+            Source::PythCore { guardian_set, guardians, .. } => (guardian_set, guardians, pythcore::quorum),
             Source::Attested { .. } => env::panic_str("not a Wormhole board"),
         };
         let bytes = hex::decode(&vaa).unwrap_or_else(|_| env::panic_str("vaa: hex"));
         let set: Vec<[u8; 20]> = guardians.iter().map(|g| addr(g)).collect();
-        let up = wormhole::guardian_upgrade(&bytes, *guardian_set, &set).unwrap_or_else(|e| env::panic_str(&format!("refused: {e}")));
+        let up = wormhole::guardian_upgrade_with(&bytes, *guardian_set, &set, need).unwrap_or_else(|e| env::panic_str(&format!("refused: {e}")));
         *guardian_set = up.index;
         *guardians = up.guardians.iter().map(hex::encode).collect();
         up.index
@@ -447,6 +510,16 @@ fn check_source(s: &Source) {
             for q in quotes {
                 feed_id(&q.mint);
                 require!(q.pyth_id.len() == 64 && hex::decode(&q.pyth_id).is_ok() && q.mint == q.mint.to_lowercase(), "quote: lowercase hex mint, 32-byte Pyth id");
+            }
+        }
+        Source::PythCore { guardians, emitter, feeds, max_age_s, .. } => {
+            check_guardians(guardians);
+            require!(emitter.len() == 64 && *emitter == emitter.to_lowercase() && hex::decode(emitter).is_ok(), "emitter: 32 bytes, lowercase hex");
+            require!(*max_age_s >= 1 && *max_age_s <= 3_600, "max_age_s: 1 s to 1 h");
+            require!(feeds.len() <= 32, "at most 32 feeds");
+            for (i, f) in feeds.iter().enumerate() {
+                require!(f.len() == 64 && *f == f.to_lowercase() && hex::decode(f).is_ok(), "feed: a Pyth id, 32 bytes, lowercase hex");
+                require!(!feeds[..i].contains(f), "feed listed twice");
             }
         }
     }
