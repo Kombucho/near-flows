@@ -104,7 +104,7 @@ fn discriminators_match_anchor() {
 #[test]
 fn jupiter_v2_and_exact_out_instructions_are_refused() {
     // Discriminators from Jupiter's on-chain IDL (2026-11-05). v2 puts the amounts first, so the
-    // 19-byte tail would read the wrong numbers: refuse rather than misread.
+    // route decoder would read the wrong numbers: refuse rather than misread.
     let (v, usdc, sol) = (key(VAULT), key(USDC), key(SOL));
     for (name, disc) in [("route_v2", "bb64facc31c4af14"), ("shared_accounts_route_v2", "d19853937cfed8e9"),
                          ("exact_out_route", "d033ef977b2bed5c"), ("shared_accounts_exact_out_route", "b0d169a89a7d453e")] {
@@ -115,6 +115,87 @@ fn jupiter_v2_and_exact_out_instructions_are_refused() {
     }
     assert_eq!(hex_of(&discriminator("route")), "e517cb977ae3ad2a");
     assert_eq!(hex_of(&discriminator("shared_accounts_route")), "c1209b3341d69c81");
+}
+
+#[test]
+fn a_decoy_tail_after_the_real_amounts_is_refused() {
+    // Anchor reads the arguments front to back and ignores what follows. REAL (the whole balance
+    // for 1 unit out, no slippage) is what Jupiter runs; DECOY (within every limit) sits in the
+    // last 19 bytes. The guard must read REAL, so refuse.
+    let (v, usdc, sol) = (key(VAULT), key(USDC), key(SOL));
+    let jup = |data: Vec<u8>| Tx::new(v).ix(pubkey(JUPITER_V6), shared_accounts(v, ata_of(&v, &usdc), ata_of(&v, &sol), usdc, sol, pubkey(JUPITER_V6)), data).bytes();
+    let real = jup_data("shared_accounts_route", 90_000_000_000, 1, 0, 0);
+    let decoy = jup_data("shared_accounts_route", 1_000_000, 5_000_000, 50, 0)[real.len() - 19..].to_vec();
+    let r = check_swap(&jup([real, decoy].concat()), &policy());
+    assert!(matches!(r, Err(Refusal::Swap(_))), "the decoy tail passed: {r:?}");
+    // Any trailing byte at all, or a plan cut short, is refused too.
+    let honest = jup_data("shared_accounts_route", 1_000_000, 5_000_000, 50, 0);
+    assert!(check_swap(&jup(honest.clone()), &policy()).is_ok());
+    assert!(matches!(check_swap(&jup([honest.clone(), vec![0]].concat()), &policy()), Err(Refusal::Swap(_))), "one trailing byte");
+    let mut short = honest.clone();
+    short[9] = 2; // two steps announced, one given
+    assert!(matches!(check_swap(&jup(short), &policy()), Err(Refusal::Swap(_))), "a plan cut short");
+}
+
+#[test]
+fn route_plans_are_decoded_step_by_step() {
+    let (v, usdc, sol) = (key(VAULT), key(USDC), key(SOL));
+    let jup = |data: Vec<u8>| Tx::new(v).ix(pubkey(JUPITER_V6), shared_accounts(v, ata_of(&v, &usdc), ata_of(&v, &sol), usdc, sol, pubkey(JUPITER_V6)), data).bytes();
+    let tail = |d: &mut Vec<u8>| {
+        d.extend(1_000_000u64.to_le_bytes());
+        d.extend(5_000_000u64.to_le_bytes());
+        d.extend(50u16.to_le_bytes());
+        d.push(0);
+    };
+    // Two steps: Whirlpool (a_to_b) then WhirlpoolSwapV2 (a_to_b, Some(2 slices)).
+    let mut d = discriminator("shared_accounts_route").to_vec();
+    d.extend([0, 2, 0, 0, 0]);
+    d.extend([17, 1, 100, 0, 1]);
+    d.extend([47, 1, 1, 2, 0, 0, 0, 0, 3, 6, 2, 100, 1, 2]);
+    tail(&mut d);
+    let ok = check_swap(&jup(d), &policy()).unwrap();
+    assert_eq!((ok.in_amount, ok.quoted_out, ok.slippage_bps), (1_000_000, 5_000_000, 50));
+    // `route` has no id byte.
+    let mut d = discriminator("route").to_vec();
+    d.extend([1, 0, 0, 0, 26, 100, 0, 1]);
+    tail(&mut d);
+    let route = Tx::new(v).ix(pubkey(JUPITER_V6),
+        vec![pubkey(TOKEN_PROGRAM), v, ata_of(&v, &usdc), ata_of(&v, &sol), pubkey(JUPITER_V6), sol, pubkey(JUPITER_V6), key(43), pubkey(JUPITER_V6)], d).bytes();
+    assert_eq!(check_swap(&route, &policy()).unwrap().in_amount, 1_000_000);
+    // A variant Jupiter added after our table, or a Dynamic route we don't decode: refused.
+    for variant in [204u8, 255, 111, 146] {
+        let mut d = discriminator("shared_accounts_route").to_vec();
+        d.extend([0, 1, 0, 0, 0, variant, 100, 0, 1]);
+        tail(&mut d);
+        let r = check_swap(&jup(d), &policy());
+        assert!(matches!(r, Err(Refusal::Swap(ref s)) if s.contains("variant")), "{variant}: {r:?}");
+    }
+}
+
+#[test]
+fn without_a_unit_limit_the_runtime_default_counts() {
+    // No SetComputeUnitLimit: the runtime gives 200k units PER instruction (up to 1.4M), so the
+    // priority fee is price x that, not x 200k.
+    let (v, usdc, sol) = (key(VAULT), key(USDC), key(SOL));
+    let create = || (pubkey(ATA_PROGRAM), vec![v, ata_of(&v, &sol), v, sol, pubkey(SYSTEM_PROGRAM), pubkey(TOKEN_PROGRAM)], vec![1u8]);
+    let mut tx = Tx::new(v).ix(pubkey(COMPUTE_BUDGET), vec![], [vec![3], 100_000u64.to_le_bytes().to_vec()].concat());
+    for _ in 0..6 {
+        let (p, a, d) = create();
+        tx = tx.ix(p, a, d);
+    }
+    let tx = tx.ix(pubkey(JUPITER_V6), shared_accounts(v, ata_of(&v, &usdc), ata_of(&v, &sol), usdc, sol, pubkey(JUPITER_V6)),
+        jup_data("shared_accounts_route", 1_000_000, 5_000_000, 50, 0)).bytes();
+    let mut p = policy();
+    p.max_cu_limit = 600_000;
+    let r = check_swap(&tx, &p);
+    assert!(matches!(r, Err(Refusal::ComputeBudget(_))), "7 instructions x 200k = 1.4M units, over 600k: {r:?}");
+    // Under the cap, the fee bound uses the default: 2 instructions (+3k for the price one).
+    let honest = Tx::new(v)
+        .ix(pubkey(COMPUTE_BUDGET), vec![], [vec![3], 50_000u64.to_le_bytes().to_vec()].concat())
+        .ix(pubkey(ATA_PROGRAM), vec![v, ata_of(&v, &sol), v, sol, pubkey(SYSTEM_PROGRAM), pubkey(TOKEN_PROGRAM)], vec![1])
+        .ix(pubkey(JUPITER_V6), shared_accounts(v, ata_of(&v, &usdc), ata_of(&v, &sol), usdc, sol, pubkey(JUPITER_V6)),
+            jup_data("shared_accounts_route", 10_000_000, 50_000_000, 50, 0)).bytes();
+    assert_eq!(check_swap(&honest, &p).unwrap().max_priority_fee_lamports, 50_000 * 403_000 / 1_000_000);
 }
 
 fn hex_of(b: &[u8]) -> String {

@@ -1,8 +1,16 @@
-//! Market prices, as vault/src/oracle.rs: a swap's minimum follows the market,
+//! Market prices: a swap's minimum follows the market,
 //!     max(keeper's quote, owner's hard floor, oracle price x (1 - slippage)).
-//! Every feed must be fresh, tight (confidence) and confirmed by its backup
-//! (Pyth's EMA, or another Pyth-compatible contract such as a priceboard).
-//! No price, no trade.
+//! Every feed must be fresh and tight (confidence), and a market floor's feeds
+//! must each be confirmed by a backup from a DIFFERENT publisher (Chainlink for a
+//! Pyth price, Chainlink on another chain for a Chainlink price), read in the
+//! same round and within `tolerance_bps`. No price, no trade.
+//!
+//! A feed with no independent second source (NVDA's only feed is Chainlink on
+//! Robinhood Chain; a pump.fun curve coin has no trusted price at all) is named
+//! `single_source`, plainly, never given a made-up backup. It may fire price
+//! triggers, but no market floor reads it: a trade in it is bounded by the
+//! owner's fixed floor, slippage and size caps, and the vault refuses a market
+//! floor on it saying so.
 //!
 //! What changed in the split: the reads are views, so the BRAIN issues them
 //! (`feed_views`, then `on_read`), never the vault. Same contracts, same
@@ -21,9 +29,15 @@ const BPS: u128 = 10_000;
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Backup {
-    Ema,
+    /// The same asset from a different publisher: another contract, or another
+    /// price id on the same board (its Chainlink id behind a relayed Pyth price).
     Other { contract: AccountId, price_id: String },
+    /// No independent second source exists: no market floor reads this feed.
+    SingleSource,
 }
+
+/// What a market floor on a single-source feed is refused with.
+pub const SINGLE_SOURCE: &str = "single-source feed: fixed floor + size caps apply (no market floor)";
 
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
@@ -31,7 +45,8 @@ pub struct Feed {
     pub name: String,
     pub contract: AccountId,
     pub price_id: String,
-    pub backup: Option<Backup>,
+    /// Required: a second publisher, or `single_source` said out loud.
+    pub backup: Backup,
 }
 
 #[near(serializers = [borsh, json])]
@@ -75,11 +90,25 @@ impl Talk {
         for f in &config.feeds {
             require!(!f.name.is_empty() && f.name.len() <= 16, "feed name: 1 to 16 characters");
             check_id(&f.price_id);
-            if let Some(Backup::Other { price_id, .. }) = &f.backup {
-                check_id(price_id);
+            match &f.backup {
+                Backup::Other { contract, price_id } => {
+                    check_id(price_id);
+                    require!(!(*contract == f.contract && price_id.eq_ignore_ascii_case(&f.price_id)),
+                        format!("feed {}: a feed can't be its own backup (name another publisher, or single_source)", f.name));
+                }
+                Backup::SingleSource => self.emit("single_source_feed", &format!(r#""feed":"{}","note":"{SINGLE_SOURCE}""#, f.name)),
             }
         }
         self.vs.oracle = Some(config);
+    }
+
+    /// Refuse a market floor on any of `names` that has no second publisher.
+    pub(crate) fn require_confirmed(&self, names: &[String]) {
+        for name in names {
+            if self.feed(name).backup == Backup::SingleSource {
+                env::panic_str(&format!("refused: {name}: {SINGLE_SOURCE}"));
+            }
+        }
     }
 
     fn feed(&self, name: &str) -> Feed {
@@ -96,10 +125,8 @@ impl Talk {
         for name in names {
             let f = self.feed(name);
             out.push(read(&f.contract, "get_price_no_older_than", &f.price_id));
-            match &f.backup {
-                Some(Backup::Ema) => out.push(read(&f.contract, "get_ema_price_no_older_than", &f.price_id)),
-                Some(Backup::Other { contract, price_id }) => out.push(read(contract, "get_price_no_older_than", price_id)),
-                None => {}
+            if let Backup::Other { contract, price_id } = &f.backup {
+                out.push(read(contract, "get_price_no_older_than", price_id));
             }
         }
         out
@@ -124,8 +151,9 @@ impl Talk {
                 let p = next(name);
                 let usd = usd_e18(&p).unwrap_or_else(|| env::panic_str(&format!("refused: {name}: bad price")));
                 require!((p.conf.0 as u128) * BPS <= (p.price.0 as u128) * cfg.max_conf_bps as u128, format!("refused: {name}: price too uncertain"));
-                if f.backup.is_some() {
-                    let b = usd_e18(&next(name)).unwrap_or_else(|| env::panic_str(&format!("refused: {name}: bad backup price")));
+                if matches!(f.backup, Backup::Other { .. }) {
+                    // Named apart, so a refusal says which publisher had no fresh price.
+                    let b = usd_e18(&next(&format!("{name} backup"))).unwrap_or_else(|| env::panic_str(&format!("refused: {name}: bad backup price")));
                     let diff = usd.abs_diff(b);
                     require!(diff * BPS <= usd.min(b) * cfg.tolerance_bps as u128, format!("refused: {name}: price and backup disagree"));
                 }
@@ -187,9 +215,9 @@ mod tests {
         PythPrice { price: I64(price), conf: U64(0), expo, publish_time: 0 }
     }
 
-    /// The vault's own vectors (vault/src/oracle.rs), exact digits from Python fractions.
+    /// The full vault's vectors (exact digits from Python fractions), now the brain's own.
     #[test]
-    fn floors_match_the_vaults_to_the_last_digit() {
+    fn floors_from_prices_keep_every_digit() {
         let eth = usd_e18(&p(222_450_000_000, -8)).unwrap();
         let usdc = usd_e18(&p(100_010_000, -8)).unwrap();
         let m = Market { sell: "eth".into(), buy: "usdc".into(), dec_in: 18, dec_out: 6, slippage_bps: 50 };
@@ -201,5 +229,36 @@ mod tests {
         let buy = Market { sell: "near".into(), buy: "meme".into(), dec_in: 24, dec_out: 6, slippage_bps: 100 };
         assert_eq!(market_min(&buy, 10u128.pow(24), near, meme), 38_668_853_995_781);
         assert!(usd_e18(&p(-1, -8)).is_none() && usd_e18(&p(i64::MAX, 30)).is_none());
+    }
+
+    const E18: u128 = 1_000_000_000_000_000_000;
+
+    /// The rest of the full vault's oracle vectors (vault/src/oracle.rs, removed
+    /// with the vault): kept here so the brain alone proves every digit.
+    #[test]
+    fn floors_per_input_limits_and_memecoin_sells_keep_every_digit() {
+        let eth = usd_e18(&p(222_450_000_000, -8)).unwrap();
+        let usdc = usd_e18(&p(100_010_000, -8)).unwrap();
+        assert_eq!(eth, 2_224_500_000_000_000_000_000);
+        let m = Market { sell: "eth".into(), buy: "usdc".into(), dec_in: 18, dec_out: 6, slippage_bps: 50 };
+        // The same floor per unit of input, scaled 1e24, gives the same minimum.
+        let per_in = market_per_in(&m, eth, usdc, 1_000_000_000_000_000_000_000_000);
+        assert_eq!(crate::mul_div(100_000_000_000_000_000, per_in, 1_000_000_000_000_000_000_000_000) / 10_000, 22_131);
+        // 1,000 USDC -> at least 1000 / 2224.5 x 0.995 = 0.4473 WETH.
+        let back = Market { sell: "usdc".into(), buy: "eth".into(), dec_in: 6, dec_out: 18, slippage_bps: 50 };
+        assert_eq!(market_min(&back, 1_000_000_000, usdc, eth) / 100_000_000_000_000, 4_473);
+        // Limits: zero amount -> zero; full slippage -> zero; a zero price is no price.
+        assert_eq!(market_min(&m, 0, eth, usdc), 0);
+        assert_eq!(market_min(&Market { slippage_bps: 10_000, ..m.clone() }, 1, eth, usdc), 0);
+        assert!(usd_e18(&p(0, -8)).is_none());
+        // Positive exponents work (huge ones are refused, test above).
+        assert_eq!(usd_e18(&p(5, 2)).unwrap(), 500 * E18);
+        // A pump.fun coin at $5.1204e-8 keeps its digits; selling 1e9 coins at NEAR $2.00,
+        // 1% slippage = 25.345980 NEAR exactly (Python fractions).
+        let meme = usd_e18(&p(51_204, -12)).unwrap();
+        assert_eq!(meme, 51_204_000_000);
+        let near = usd_e18(&p(200_000_000, -8)).unwrap();
+        let sell = Market { sell: "meme".into(), buy: "near".into(), dec_in: 6, dec_out: 24, slippage_bps: 100 };
+        assert_eq!(market_min(&sell, 10u128.pow(15), meme, near), 25_345_980_000_000_000_000_000_000);
     }
 }

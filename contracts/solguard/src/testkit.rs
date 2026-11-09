@@ -118,7 +118,10 @@ impl Tx {
 
 pub fn jup_data(name: &str, in_amount: u64, quoted_out: u64, slippage: u16, fee_bps: u8) -> Vec<u8> {
     let mut d = discriminator(name).to_vec();
-    d.extend([0u8, 1, 0, 0, 0, 7, 100, 0, 1]); // id + a route plan (opaque here)
+    if name.starts_with("shared_") {
+        d.push(0); // id
+    }
+    d.extend([1u8, 0, 0, 0, 7, 100, 0, 1]); // a route plan: one step, Raydium (no fields), 100%, 0 -> 1
     d.extend(in_amount.to_le_bytes());
     d.extend(quoted_out.to_le_bytes());
     d.extend(slippage.to_le_bytes());

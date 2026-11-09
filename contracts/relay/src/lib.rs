@@ -1,6 +1,6 @@
 //! The vault BODY: one per user, published once as a global contract.
 //!
-//! WHY it exists: the full vault is ~600 KB, and publishing code costs 0.1 NEAR
+//! WHY it exists: the old full vault (removed) was ~600 KB, and publishing code costs 0.1 NEAR
 //! per KB (59 NEAR per version). This body is a few KB. It holds the user's
 //! money and positions and is the predecessor for Chain Signatures (so every
 //! user keeps their own addresses on other chains), but it decides NOTHING.
@@ -11,14 +11,15 @@
 //!   attached, the raw args) to `brain.handle`, then executes the brain's answer.
 //! - `cb`: executes a brain answer. Only ever runs as the vault's own callback
 //!   on its own call to the brain (checked below).
-//! - `new`: once, by whoever creates the account (the factory): fixes the brain.
+//! - `new`: once, by whoever creates the account (the factory): fixes the brain
+//!   and returns the brain's init round, so the factory learns if it failed.
 //! - Named doors, `exec`, `nft_on_transfer`, `mt_on_transfer`: the same as `x`,
 //!   with the args wrapped as `{"<method>": <args>}`, so callers that only know
 //!   the method name (the stealth keeper's `exec`, token contracts calling a
 //!   receiver hook) reach the brain unchanged. A hook's return value is the
 //!   brain's (e.g. mt_on_transfer: "refund nothing", one "0" per token).
 //! - `ft_on_transfer`: accepts any token sent to it (it becomes free balance,
-//!   exactly like the full vault). No brain round trip: nothing to decide.
+//!   as the old full vault did). No brain round trip: nothing to decide.
 //! - `brain_id`: view, which brain this vault obeys.
 //!
 //! Why named doors and not "forward any unknown method": NEAR has no fallback
@@ -60,6 +61,9 @@
 //!   runs after it and no other action of ours races it. Like every action it
 //!   comes only from a brain answer; the brain sends it only after checking the
 //!   vault holds nothing but NEAR (brain `close`), with the owner as beneficiary.
+//! - The one other delete: when the brain refuses `new`'s init (no record, so the
+//!   vault could never run), `cb` deletes the vault to the payer `new` was given
+//!   by its creator. Only `new` passes `cb` args, and `new` runs once.
 //! - The brain is trusted completely for this vault's money: it is one
 //!   immutable contract (no keys), and its rules are the vault's rules.
 //!
@@ -308,10 +312,11 @@ mod contract {
 
     /// brain.<method>(OUT[..len]) with `gas`, then this vault's `cb`, after `after` (if any).
     fn ask_brain(after: Option<u64>, method: &[u8], len: usize, gas: u64) -> u64 {
-        ask_brain_cb(after, method, len, gas, GAS_CB)
+        ask_brain_cb(after, method, len, gas, GAS_CB, &[])
     }
 
-    fn ask_brain_cb(after: Option<u64>, method: &[u8], len: usize, gas: u64, cb_gas: u64) -> u64 {
+    /// `cb_args`: empty, except on `new`'s round (who gets the NEAR back if the brain refuses).
+    fn ask_brain_cb(after: Option<u64>, method: &[u8], len: usize, gas: u64, cb_gas: u64, cb_args: &[u8]) -> u64 {
         let b = brain();
         let zero = 0u128.to_le_bytes();
         unsafe {
@@ -323,7 +328,7 @@ mod contract {
             promise_batch_action_function_call_weight(p, method.len() as u64, method.as_ptr() as u64, len as u64, out.as_ptr() as u64, zero.as_ptr() as u64, gas, 0);
             let m = me();
             let c = promise_batch_then(p, m.len() as u64, m.as_ptr() as u64);
-            promise_batch_action_function_call_weight(c, 2, b"cb".as_ptr() as u64, 0, 0, zero.as_ptr() as u64, cb_gas, 1);
+            promise_batch_action_function_call_weight(c, 2, b"cb".as_ptr() as u64, cb_args.len() as u64, cb_args.as_ptr() as u64, zero.as_ptr() as u64, cb_gas, 1);
             c
         }
     }
@@ -360,7 +365,7 @@ mod contract {
                 at += n;
             }
             out[at] = b'}';
-            let c = ask_brain_cb(None, b"handle", at + 1, gas, cb_gas);
+            let c = ask_brain_cb(None, b"handle", at + 1, gas, cb_gas, &[]);
             promise_return(c);
         }
     }
@@ -383,8 +388,11 @@ mod contract {
         forward_named(b"mt_on_transfer", GAS_HOOK, GAS_HOOK / 2);
     }
 
-    /// Once, by whoever creates the account. Input: u8 len + brain account, then
-    /// the init request forwarded to the brain (which checks it came from the factory).
+    /// Once, by whoever creates the account. Input: u8 len + brain account, u8 len
+    /// + who paid for the vault, then the init request forwarded to the brain
+    /// (which checks it came from the factory). Returns the brain's round: if the
+    /// brain refuses the vault a record, nothing could ever run here, so `cb`
+    /// deletes the vault, its NEAR back to the payer, and returns `false`.
     #[no_mangle]
     pub extern "C" fn new() {
         unsafe {
@@ -396,20 +404,20 @@ mod contract {
             let n = reg_into(ans);
             let mut r = Reader::new(&ans[..n]);
             let b = r.short().unwrap_or_else(|| fail("bad init"));
-            if b.is_empty() || b.len() > 64 {
-                fail("bad brain");
+            let payer = r.short().unwrap_or_else(|| fail("bad init"));
+            if b.is_empty() || b.len() > 64 || payer.is_empty() || payer.len() > 64 {
+                fail("bad init");
             }
             storage_write(KEY_BRAIN.len() as u64, KEY_BRAIN.as_ptr() as u64, b.len() as u64, b.as_ptr() as u64, 0);
-            let rest = &ans[1 + b.len()..n];
+            let rest = &ans[2 + b.len() + payer.len()..n];
             let h = header(true);
             let out = &mut *addr_of_mut!(OUT);
             if h + rest.len() > out.len() {
                 fail("too big");
             }
             out[h..h + rest.len()].copy_from_slice(rest);
-            // Not returned: the account exists either way, and its creator's
-            // callback must only learn whether the account was made.
-            ask_brain(None, b"handle", h + rest.len(), GAS_HANDLE);
+            let c = ask_brain_cb(None, b"handle", h + rest.len(), GAS_HANDLE, GAS_CB, payer);
+            promise_return(c);
         }
     }
 
@@ -434,7 +442,19 @@ mod contract {
                 fail("not a brain answer");
             }
             if promise_result(0, 0) != 1 {
-                fail("the brain refused");
+                // `new`'s round (its args name the payer): the brain refused this vault
+                // a record, so nothing could ever run here. It deletes itself, its NEAR
+                // back to whoever paid; the factory learns `false`.
+                input(1);
+                let pn = register_len(1) as usize;
+                if pn == 0 || pn > 64 {
+                    fail("the brain refused");
+                }
+                read_register(1, pre.as_mut_ptr() as u64);
+                let p = promise_batch_create(m.len() as u64, m.as_ptr() as u64);
+                promise_batch_action_delete_account(p, pn as u64, pre.as_ptr() as u64);
+                value_return(5, b"false".as_ptr() as u64);
+                return;
             }
             let ans = &mut *addr_of_mut!(ANS);
             let n = reg_into(ans);

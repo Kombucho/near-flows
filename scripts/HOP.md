@@ -10,10 +10,16 @@ them: no hop can pay anyone else.
   `intents.near ft_withdraw {token, receiver_id: token, amount, memo: "WITHDRAW_TO:<the vault's own address>"}`.
   The keeper never names a destination. Capped per hop (`intents_hop`), counted on the
   `intents:<token>` spending limit, and as a flow node its output is reported by the keeper
-  between `amount - max_fee` and `amount`.
+  between `amount - max_fee` and `amount`. The keeper runs it only as a flow node
+  (`step_remote`); the one-off `intents_hop_out` is the owner's, like every direct signing door.
+  A sent hop is called failed only by the owner (`remote_report` with no output): burned tokens
+  come back only through the bridge, and a keeper's word would spend the input twice.
 - **In** (another chain to Intents): node `intents_deposit`, templates `intents_deposit_*` in
   `nodes/sol-templates.json` and `nodes/evm-templates.json` (`intents_deposits`). The owner pins
-  the vault's Intents deposit address once; the keeper only fills the amount.
+  the vault's Intents deposit address once; the keeper only fills the amount. One-off
+  (`sol_sign_tx`, `evm_call`): owner only. As a remote flow node after a hop node: the keeper's,
+  spending exactly what the hop landed (Solana `amount_field: 0`, EVM `amount_leaf: 0`, at the
+  vault's next EVM nonce and the owner's fee cap).
 - **Keeper side**: `scripts/keeper/src/hop.ts` and `npm run hop` (read-only lookups, dry-run
   quotes, withdrawal status). It never signs or sends anything.
 
@@ -73,15 +79,17 @@ deploy one, or the owner self-hosts it (path (b) of AGENTS.md, pointed at mainne
    max: "50000000", max_fee: "100000"}}` (at most 0.05 SOL per hop, fee bound 0.0001 SOL) and
    `set_limit {token: "intents:sol.omft.near", ...}`. Then either a flow node
    `{input: "intents:sol.omft.near", action: {calls: [], out: null, remote: {call: {chain: "hop"}, out: "sol:SOL"}}}`
-   run with `step_remote {args: {chain: "hop"}}`, or a one-off `intents_hop_out {token, amount}`.
+   run with `step_remote {args: {chain: "hop"}}`, or (owner) a one-off `intents_hop_out {token, amount}`.
    Follow it: `npm run hop -- status <near tx hash> sol.omft.near --wait`, then (flow node)
    `remote_report {out: <amount - 14000>}`.
 5. **Use it on Solana.** The SOL is at the vault's own Solana address: pump.fun, Meteora, Hylo,
    Jupiter nodes, as on the forks.
 6. **Hop back in.** `npm run hop -- deposit-address <vault> sol:mainnet`; the owner pins it:
    `sol_template` `intents_deposit_sol {deposit_address, max_lamports}`. The keeper builds a
-   System transfer (`SOLANA_RPC=<mainnet rpc> npx tsx src/fork-sol.ts pay-sol <vault sol> <deposit> <lamports>`),
-   `sol_sign_tx`, broadcasts (`fork-sol.ts send`), and checks `npm run hop -- deposits <vault> sol:mainnet`.
+   System transfer (`SOLANA_RPC=<mainnet rpc> npx tsx src/fork-sol.ts pay-sol <vault sol> <deposit> <lamports>`)
+   and runs it as the flow node after the hop (`step_remote {args: {chain: "sol", message}}`; one-off,
+   the owner's `sol_sign_tx`), broadcasts (`fork-sol.ts send`), reports `remote_report {out: "0"}`, and
+   checks `npm run hop -- deposits <vault> sol:mainnet`.
    USDC needs the deposit address's USDC account to exist first (a fresh deposit address has none;
    anyone can create it, ~0.002 SOL rent, not from the vault: its templates can't pay others' rent).
 7. **Out of Intents.** Swap back to wNEAR (step 3 reversed) and `intents_withdraw` (always to the vault).
@@ -107,6 +115,10 @@ once (the relay publish) and ~10 NEAR staked and refundable.
 
 - `contracts/sandbox/tests/hop.rs`: the outbound hop against the real intents.near verifier and
   both mainnet token codes (fetch them with `scripts/fetch-protocols.sh`).
-- `contracts/sandbox/tests/hop_fork.rs`: deposits into the pinned address, executed on a Base fork
-  (anvil, port 9900) and a Solana fork (surfpool, ports 9902/9903), and every other recipient refused.
+- `contracts/sandbox/tests/hop_fork.rs`: the round trip as one keeper-run flow, executed on a Base
+  fork (anvil, port 9900, `ANVIL_PORT`) and a Solana fork (surfpool, 9902/9903, `SURFPOOL_PORT`):
+  hop out of the real verifier to the vault's own address (the test plays the bridge's payout, less
+  its fee), report, then a template step there sending exactly what landed to the pinned deposit
+  address. Plus the owner's one-off deposits and every other recipient refused. Shared Intents
+  setup: `contracts/sandbox/tests/hopw/mod.rs`.
 - `scripts/keeper/src/hop.test.ts`: the keeper's pure parts (`npm test`).

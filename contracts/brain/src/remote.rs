@@ -1,13 +1,15 @@
-//! Remote nodes, as vault/src/remote.rs: a flow node whose action is a
+//! Remote nodes: a flow node whose action is a
 //! transaction on another chain (an EVM template, a Solana template).
 //!
 //! The brain decides everything the vault decided: the trigger (block clock,
 //! or oracle prices the brain reads itself), the amount (the node's own input,
 //! put into the template's amount leaf / checked in the message), the minimum
-//! (the template's floor or market rule, enforced by the signed transaction)
-//! and an EVM deadline (now + 5 min). It can't see balances on other chains,
-//! so a remote node's output is KEEPER-REPORTED (`remote_report`), accepted only
-//! between the signed minimum and the node's cap. Same bounds, same events.
+//! (the template's floor or market rule, enforced by the signed transaction),
+//! an EVM deadline (now + 5 min) and the vault's next EVM nonce. It can't see
+//! balances on other chains, so a remote node's output is KEEPER-REPORTED
+//! (`remote_report`), accepted only between the signed minimum and the node's
+//! cap; only the owner may report a signed transaction failed (that frees its
+//! input). Same bounds, same events.
 //!
 //! What changed in the split: the pending steps live in the vault's record
 //! (`VaultState.remote`), and the signer's answer comes back through the vault
@@ -215,7 +217,6 @@ impl Talk {
         require!(by_owner || Some(sender) == self.vs.keeper.as_ref(), "owner or keeper only");
         let p = self.pending(flow_id, node).unwrap_or_else(|| env::panic_str("no remote step pending"));
         let n = p.revealed.clone().unwrap_or_else(|| self.flow(flow_id).nodes[node as usize].clone());
-        let now = env::block_timestamp();
         let result = match out {
             Some(o) => {
                 require!(p.signed || by_owner, "not signed yet");
@@ -223,8 +224,11 @@ impl Talk {
                 require!(o.0 <= p.max_out.0, format!("refused: over the node's cap {}", p.max_out.0));
                 Ok(o.0)
             }
+            // "It failed" gives the input back to be spent again. Nothing here can see the other
+            // chain: had the transaction landed (before its deadline, too), a keeper's word
+            // would spend the same input twice. Only the owner, who can look, says so.
             None => {
-                require!(by_owner || p.expires_ns.map_or(false, |e| now >= e), "refused: the signed transaction may still land; the owner can settle it, or wait for its deadline");
+                require!(by_owner, "refused: only the owner may say a signed transaction failed (it may have landed: its input would be spent twice)");
                 Err(p.amount.0)
             }
         };
@@ -235,8 +239,10 @@ impl Talk {
             Err(l) => ("step_failed", "returned", l),
         };
         self.emit(ev, &format!(r#""flow":{flow_id},"node":{node},"amount":"{}","{k}":"{v}","remote":true,"reported_by":"{}""#, p.amount.0, if by_owner { "owner" } else { "keeper" }));
-        // The keeper ran it and it worked: its price.
-        if result.is_ok() && !by_owner { self.pay_keeper(Answer::default()) } else { Answer::default() }
+        // The keeper ran it and it worked: its price, if it spent input or brought something
+        // back (a collector that found nothing did no work worth paying for).
+        let produced = p.amount.0 > 0 || matches!(result, Ok(o) if o > 0);
+        if result.is_ok() && produced && !by_owner { self.pay_keeper(Answer::default()) } else { Answer::default() }
     }
 
     pub(crate) fn pending(&self, flow_id: u32, node: u16) -> Option<Pending> {
@@ -260,9 +266,16 @@ impl Talk {
             out.push(p.feed.clone());
             out.extend(p.quote.clone());
         }
-        if let RemoteCall::Evm { template, .. } = &r.call {
-            out.extend(crate::evm::market_feeds(&crate::evm::leaves(&self.evm_template_named(template))));
-        }
+        let market = match &r.call {
+            RemoteCall::Evm { template, .. } => crate::evm::market_feeds(&crate::evm::leaves(&self.evm_template_named(template))),
+            // The node's template; a template riding along with a market field finds no price and is refused.
+            RemoteCall::Sol { template, .. } => self.sol_feeds(&[template.as_str()]),
+            // A hop has no market: what lands is the amount less the bridge's fee.
+            RemoteCall::Hop {} => Vec::new(),
+        };
+        // A trigger may read a single-source feed; a market floor may not.
+        self.require_confirmed(&market);
+        out.extend(market);
         let mut seen = Vec::new();
         out.retain(|f| if seen.contains(f) { false } else { seen.push(f.clone()); true });
         out
@@ -294,14 +307,14 @@ impl Talk {
                 } else {
                     require!(amount_leaf.is_none() && amount == 0, "amount_leaf: no such leaf");
                 }
-                let mut expires = None;
+                let deadline = crate::evm::deadline_s();
+                let mut expires = rules.iter().any(|r| matches!(r, Arg::Deadline)).then_some((deadline + 1) * 1_000_000_000);
                 if let Some(d) = at(deadline_leaf) {
-                    require!(matches!(rules[d], Arg::AtMost { .. }), "deadline_leaf: an at_most leaf");
-                    let deadline = now / 1_000_000_000 + EVM_TTL_S;
+                    require!(matches!(rules[d], Arg::AtMost { .. } | Arg::Deadline), "deadline_leaf: an at_most or deadline leaf");
                     values[d] = U128(deadline as u128);
                     expires = Some((deadline + 1) * 1_000_000_000);
                 }
-                let (tx, nums) = self.evm_prepare(&cfg, &t, values, nonce, max_fee, max_tip, gas, prices);
+                let (tx, nums) = self.evm_prepare(&cfg, &t, values, nonce, max_fee, max_tip, gas, prices, !by_owner);
                 let min = match at(min_leaf) {
                     Some(m) => {
                         require!(matches!(rules[m], Arg::Floor { .. } | Arg::Market { .. }), "min_leaf: a floor or market leaf");
@@ -316,7 +329,7 @@ impl Talk {
                 self.charge_signature(ans).then("on_vault", near_sdk::borsh::to_vec(&next).unwrap(), GAS_SIGNED_CB).into()
             }
             (RemoteCall::Sol { template, amount_field, min_field }, RemoteArgs::Sol { message }) => {
-                let (bytes, values) = self.sol_check_node(&message, template, &n.input);
+                let (bytes, values) = self.sol_check_node(&message, template, &n.input, prices);
                 if let Some(f) = amount_field {
                     require!(values.get(*f as usize) == Some(&amount), format!("refused: the message must spend exactly the node's {amount}"));
                 }
@@ -375,6 +388,9 @@ impl Talk {
 
     pub(crate) fn on_remote_evm_signed(&mut self, flow_id: u32, node: u16, tx: TxJson) -> Reply {
         let signed = self.evm_emit_signed(&tx);
+        if signed.is_none() {
+            self.evm_unreserve(&tx);
+        }
         self.remote_signed(flow_id, node, signed.is_some());
         Answer::default().ret(&signed.unwrap_or_else(|| "null".into())).into()
     }
@@ -401,10 +417,10 @@ impl Talk {
 
     /// A Solana message of the owner's templates with exactly one `template`
     /// instruction (the node's), any others spending nothing. Spending is counted.
-    fn sol_check_node(&mut self, message: &str, template: &str, input: &str) -> (Vec<u8>, Vec<u128>) {
+    fn sol_check_node(&mut self, message: &str, template: &str, input: &str, prices: &[(String, u128)]) -> (Vec<u8>, Vec<u128>) {
         let bytes = crate::sol::decode_message(message);
         let cfg = self.sol_cfg();
-        let matched = self.sol_matched(&bytes);
+        let matched = self.sol_matched(&bytes, Some(prices));
         let mut mine = None;
         for m in &matched {
             let t = cfg.templates.iter().find(|t| t.name == m.template).unwrap();
@@ -447,7 +463,7 @@ fn trigger_price(p: &FeedPrice, prices: &[(String, u128)]) -> u128 {
     }
 }
 
-// The vault's own tests (vault/src/remote.rs), unchanged.
+// The full vault's tests, carried over unchanged when it was removed.
 #[cfg(test)]
 mod tests {
     use super::*;

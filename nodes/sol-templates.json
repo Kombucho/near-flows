@@ -1,9 +1,12 @@
 {
-  "about": "Solana nodes as templates the vault enforces (solguard::template, contracts/vault/src/soltemplates.rs): every instruction is checked byte by byte before the vault signs. Accounts: 'vault' is the vault itself, 'vault_ata' its own token account for the mint at position mint_at (re-derived, so proceeds can't go anywhere else), 'new_signer' a fresh key (a new LP position), 'fixed' a pinned address, 'any' an account the program itself checks against the others (pool PDAs, bin arrays). Trailing extra accounts are never signers. needs_owner: the owner's own Solana wallet must co-sign (set with sol_owner_wallet). Values in {braces} are set per coin by the owner and filled in when the template is saved. vault_ata_of is the vault's own token account for a fixed mint the instruction doesn't name (wrapping SOL). Tested on a Solana mainnet fork (surfpool) on 2026-11-06: contracts/sandbox/tests/sol_fork.rs (pump.fun buy + sell), sol_fork_meteora.rs (DLMM open/add/claim/remove/close), sol_fork_pumpamm.rs (pump AMM buy + sell of a graduated coin, with wSOL wrap/unwrap), hop_fork.rs (deposits into the vault's own NEAR Intents deposit address: SOL and USDC, pinned by the owner).",
+  "about": "Solana nodes as templates the brain enforces for each relay vault (solguard::template, contracts/brain/src/sol.rs): every instruction is checked byte by byte before the vault signs. Accounts: 'vault' is the vault itself, 'vault_ata' its own token account for the mint at position mint_at (re-derived, so proceeds can't go anywhere else), 'new_signer' a fresh key (a new LP position), 'fixed' a pinned address, 'any' an account the program itself checks against the others (pool PDAs, bin arrays). Trailing extra accounts are never signers. needs_owner: the owner's own Solana wallet must co-sign (set with sol_owner_wallet). Values in {braces} are set per coin by the owner and filled in when the template is saved. vault_ata_of is the vault's own token account for a fixed mint the instruction doesn't name (wrapping SOL). Fields: 'at_least' is a fixed minimum per unit of an at_most amount; 'market' (of, num, den, market: {sell, buy, dec_in, dec_out, slippage_bps}) is at least the larger of that and the oracle's price for the amount less slippage: the brain reads the two feeds (oracle_setup) before it checks, and refuses without a fresh price. Only for coins with a feed (SOL, USDC...); a memecoin keeps its fixed at_least. Tested on a Solana mainnet fork (surfpool) on 2026-11-06: contracts/sandbox/tests/sol_fork.rs (pump.fun buy + sell), sol_fork_meteora.rs (DLMM open/add/claim/remove/close), sol_fork_pumpamm.rs (pump AMM buy + sell of a graduated coin, with wSOL wrap/unwrap), sol_fork_hylo.rs (Hylo through a relay vault: xSOL mint + redeem, hyUSD redeem, Earn pool deposit + withdraw; hyUSD mint signed but refused by Hylo while it has minting off). Hylo templates (hylo_*) are its router route_v2, one per pair, built by Hylo's Rust SDK 2.7.2 (scripts/hylo). hop_fork.rs: deposits into the vault's own NEAR Intents deposit address (SOL and USDC, pinned by the owner).",
   "programs": {
     "meteora_dlmm": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
     "meteora_dlmm_event_authority": "D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6",
     "pump": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+    "hylo_router": "hyRouTRDAgn65xyyJ3L5c4k5SFmSdr3NxDV8Euzjy3f",
+    "hylo_exchange": "HYEXCHtHkBagdStcJCp3xbbb9B7sdMdWXFNj6mdsG4hn",
+    "hylo_earn_pool": "HysTabVUfmQBFcmzu1ctRd1Y1fxd66RBpboy1bmtDSQQ",
     "token": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
     "token_2022": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
     "memo": "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
@@ -11,7 +14,11 @@
   },
   "tokens": {
     "SOL": "So11111111111111111111111111111111111111112",
-    "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "jitoSOL": "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",
+    "xSOL": "4sWNB8zGWHkh6UnmwiEtzNxL4XrN7uK9tosbESbJFfVs",
+    "hyUSD": "5YMkXAYccHSGnHn9nob9xEvv6Pvka9DZWH7nTbotTu9E",
+    "sHYUSD": "HnnGv3HrSqjRpgdFmx7vQGjntNEoex1SU4e9Lxcxuihz"
   },
   "pools": {
     "dlmm_sol_usdc": {
@@ -310,6 +317,221 @@
         {"acc": "vault"},
         {"acc": "vault"}
       ]
+    },
+    {
+      "name": "hylo_mint_xsol",
+      "about": "Mint xSOL (Hylo's leveraged SOL) from jitoSOL, through Hylo's router (route_v2, as Hylo's SDK builds it): at most {max_in} jitoSOL units (9 decimals) from the vault's own token account, the xSOL lands in the vault's own token account. The slippage config must be there: expected out >= amount x {floor_num} / {floor_den}, tolerance <= {max_slippage_bps} bps, so Hylo refuses to pay less than amount x floor x (1 - tolerance). Every other account is pinned.",
+      "program": "hyRouTRDAgn65xyyJ3L5c4k5SFmSdr3NxDV8Euzjy3f",
+      "prefix": "bb64facc31c4af14",
+      "fields": [
+        {"ty": "bytes32", "rule": "fixed", "hex": "fcd141e9832caf10ad917495ca0f271b5b293cd47027ea737007ed40eb39a0bd"},
+        {"ty": "bytes32", "rule": "fixed", "hex": "39834def9dd083f68c3fda4ceda4002b6f3258acd74a93e22a2c4169ed9d1022"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_in}"},
+        {"ty": "u8", "rule": "fixed", "hex": "01"},
+        {"ty": "u64", "rule": "at_least", "of": 2, "num": "{floor_num}", "den": "{floor_den}"},
+        {"ty": "u8", "rule": "fixed", "hex": "fa"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_slippage_bps}"},
+        {"ty": "u8", "rule": "fixed", "hex": "fc"}
+      ],
+      "accounts": [
+        {"acc": "fixed", "key": "F7BfTbic9AyaNKT7e4eoSbgZC7yxJvutA6S4VzosASg9"},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "9cd2sAfbBvKs4SX9YKo4dcjwP3TgTVQ8dT5koshGcDND"},
+        {"acc": "fixed", "key": "FpLaqELxKRm6S3bjfNSknwZu43TL89VYkwuMDwsRMj59"},
+        {"acc": "fixed", "key": "82MNhUCha26wY4kohTUEC965b4ypEe7RPa4itp9UMrKK"},
+        {"acc": "fixed", "key": "J8rGkrzsvqinX9kfwD8SkP3mRzXAk3uiDRUaiZKXM4as"},
+        {"acc": "fixed", "key": "3JENUTyYnMMtZUSg5ErSHEvowjQteYD7wr7RDNw12bei"},
+        {"acc": "fixed", "key": "2Y3TLkdGoJwbdizxqrZmQwNLYJyGKTgzC4tbetbkvQ43"},
+        {"acc": "fixed", "key": "8Ri52tZXZehgAHKbx1MQiXhWXXkVsvAL9op6C5HytDKF"},
+        {"acc": "vault_ata", "mint_at": 11, "program_at": 14},
+        {"acc": "vault_ata", "mint_at": 12, "program_at": 14},
+        {"acc": "fixed", "key": "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn"},
+        {"acc": "fixed", "key": "4sWNB8zGWHkh6UnmwiEtzNxL4XrN7uK9tosbESbJFfVs"},
+        {"acc": "fixed", "key": "7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "4VzpNE51Be5vD5Yg8MC3z6TVHq5gGbLJptjv18QbD6WP"},
+        {"acc": "fixed", "key": "HYEXCHtHkBagdStcJCp3xbbb9B7sdMdWXFNj6mdsG4hn"}
+      ],
+      "extra_accounts": 0,
+      "spends": [{"field": 2, "key": "sol:J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn"}]
+    },
+    {
+      "name": "hylo_redeem_xsol",
+      "about": "Redeem xSOL back to jitoSOL, through Hylo's router (route_v2, as Hylo's SDK builds it): at most {max_in} xSOL units (6 decimals) from the vault's own token account, the jitoSOL lands in the vault's own token account. The slippage config must be there: expected out >= amount x {floor_num} / {floor_den}, tolerance <= {max_slippage_bps} bps, so Hylo refuses to pay less than amount x floor x (1 - tolerance). Every other account is pinned.",
+      "program": "hyRouTRDAgn65xyyJ3L5c4k5SFmSdr3NxDV8Euzjy3f",
+      "prefix": "bb64facc31c4af14",
+      "fields": [
+        {"ty": "bytes32", "rule": "fixed", "hex": "39834def9dd083f68c3fda4ceda4002b6f3258acd74a93e22a2c4169ed9d1022"},
+        {"ty": "bytes32", "rule": "fixed", "hex": "fcd141e9832caf10ad917495ca0f271b5b293cd47027ea737007ed40eb39a0bd"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_in}"},
+        {"ty": "u8", "rule": "fixed", "hex": "01"},
+        {"ty": "u64", "rule": "at_least", "of": 2, "num": "{floor_num}", "den": "{floor_den}"},
+        {"ty": "u8", "rule": "fixed", "hex": "f7"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_slippage_bps}"},
+        {"ty": "u8", "rule": "fixed", "hex": "fc"}
+      ],
+      "accounts": [
+        {"acc": "fixed", "key": "F7BfTbic9AyaNKT7e4eoSbgZC7yxJvutA6S4VzosASg9"},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "9cd2sAfbBvKs4SX9YKo4dcjwP3TgTVQ8dT5koshGcDND"},
+        {"acc": "fixed", "key": "FpLaqELxKRm6S3bjfNSknwZu43TL89VYkwuMDwsRMj59"},
+        {"acc": "fixed", "key": "82MNhUCha26wY4kohTUEC965b4ypEe7RPa4itp9UMrKK"},
+        {"acc": "fixed", "key": "3JENUTyYnMMtZUSg5ErSHEvowjQteYD7wr7RDNw12bei"},
+        {"acc": "fixed", "key": "2Y3TLkdGoJwbdizxqrZmQwNLYJyGKTgzC4tbetbkvQ43"},
+        {"acc": "fixed", "key": "8Ri52tZXZehgAHKbx1MQiXhWXXkVsvAL9op6C5HytDKF"},
+        {"acc": "vault_ata", "mint_at": 10, "program_at": 13},
+        {"acc": "vault_ata", "mint_at": 11, "program_at": 13},
+        {"acc": "fixed", "key": "4sWNB8zGWHkh6UnmwiEtzNxL4XrN7uK9tosbESbJFfVs"},
+        {"acc": "fixed", "key": "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn"},
+        {"acc": "fixed", "key": "7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "4VzpNE51Be5vD5Yg8MC3z6TVHq5gGbLJptjv18QbD6WP"},
+        {"acc": "fixed", "key": "HYEXCHtHkBagdStcJCp3xbbb9B7sdMdWXFNj6mdsG4hn"}
+      ],
+      "extra_accounts": 0,
+      "spends": [{"field": 2, "key": "sol:4sWNB8zGWHkh6UnmwiEtzNxL4XrN7uK9tosbESbJFfVs"}]
+    },
+    {
+      "name": "hylo_mint_hyusd",
+      "about": "Mint hyUSD (Hylo's stablecoin) from jitoSOL, through Hylo's router (route_v2, as Hylo's SDK builds it): at most {max_in} jitoSOL units (9 decimals) from the vault's own token account, the hyUSD lands in the vault's own token account. The slippage config must be there: expected out >= amount x {floor_num} / {floor_den}, tolerance <= {max_slippage_bps} bps, so Hylo refuses to pay less than amount x floor x (1 - tolerance). Every other account is pinned.",
+      "program": "hyRouTRDAgn65xyyJ3L5c4k5SFmSdr3NxDV8Euzjy3f",
+      "prefix": "bb64facc31c4af14",
+      "fields": [
+        {"ty": "bytes32", "rule": "fixed", "hex": "fcd141e9832caf10ad917495ca0f271b5b293cd47027ea737007ed40eb39a0bd"},
+        {"ty": "bytes32", "rule": "fixed", "hex": "4377371c74f86ea18bf17fb160338452aa63fadcacd5a31fb3acf54ba52e88ad"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_in}"},
+        {"ty": "u8", "rule": "fixed", "hex": "01"},
+        {"ty": "u64", "rule": "at_least", "of": 2, "num": "{floor_num}", "den": "{floor_den}"},
+        {"ty": "u8", "rule": "fixed", "hex": "fa"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_slippage_bps}"},
+        {"ty": "u8", "rule": "fixed", "hex": "fc"}
+      ],
+      "accounts": [
+        {"acc": "fixed", "key": "F7BfTbic9AyaNKT7e4eoSbgZC7yxJvutA6S4VzosASg9"},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "9cd2sAfbBvKs4SX9YKo4dcjwP3TgTVQ8dT5koshGcDND"},
+        {"acc": "fixed", "key": "FpLaqELxKRm6S3bjfNSknwZu43TL89VYkwuMDwsRMj59"},
+        {"acc": "fixed", "key": "82MNhUCha26wY4kohTUEC965b4ypEe7RPa4itp9UMrKK"},
+        {"acc": "fixed", "key": "CfuSViqf6wvUKEprLhtuCsSanvfAsMbDmkAW92FP95qe"},
+        {"acc": "fixed", "key": "3JENUTyYnMMtZUSg5ErSHEvowjQteYD7wr7RDNw12bei"},
+        {"acc": "fixed", "key": "2Y3TLkdGoJwbdizxqrZmQwNLYJyGKTgzC4tbetbkvQ43"},
+        {"acc": "fixed", "key": "8Ri52tZXZehgAHKbx1MQiXhWXXkVsvAL9op6C5HytDKF"},
+        {"acc": "vault_ata", "mint_at": 11, "program_at": 14},
+        {"acc": "vault_ata", "mint_at": 12, "program_at": 14},
+        {"acc": "fixed", "key": "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn"},
+        {"acc": "fixed", "key": "5YMkXAYccHSGnHn9nob9xEvv6Pvka9DZWH7nTbotTu9E"},
+        {"acc": "fixed", "key": "7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "4VzpNE51Be5vD5Yg8MC3z6TVHq5gGbLJptjv18QbD6WP"},
+        {"acc": "fixed", "key": "HYEXCHtHkBagdStcJCp3xbbb9B7sdMdWXFNj6mdsG4hn"}
+      ],
+      "extra_accounts": 0,
+      "spends": [{"field": 2, "key": "sol:J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn"}]
+    },
+    {
+      "name": "hylo_redeem_hyusd",
+      "about": "Redeem hyUSD back to jitoSOL, through Hylo's router (route_v2, as Hylo's SDK builds it): at most {max_in} hyUSD units (6 decimals) from the vault's own token account, the jitoSOL lands in the vault's own token account. The slippage config must be there: expected out >= amount x {floor_num} / {floor_den}, tolerance <= {max_slippage_bps} bps, so Hylo refuses to pay less than amount x floor x (1 - tolerance). Every other account is pinned.",
+      "program": "hyRouTRDAgn65xyyJ3L5c4k5SFmSdr3NxDV8Euzjy3f",
+      "prefix": "bb64facc31c4af14",
+      "fields": [
+        {"ty": "bytes32", "rule": "fixed", "hex": "4377371c74f86ea18bf17fb160338452aa63fadcacd5a31fb3acf54ba52e88ad"},
+        {"ty": "bytes32", "rule": "fixed", "hex": "fcd141e9832caf10ad917495ca0f271b5b293cd47027ea737007ed40eb39a0bd"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_in}"},
+        {"ty": "u8", "rule": "fixed", "hex": "01"},
+        {"ty": "u64", "rule": "at_least", "of": 2, "num": "{floor_num}", "den": "{floor_den}"},
+        {"ty": "u8", "rule": "fixed", "hex": "f7"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_slippage_bps}"},
+        {"ty": "u8", "rule": "fixed", "hex": "fc"}
+      ],
+      "accounts": [
+        {"acc": "fixed", "key": "F7BfTbic9AyaNKT7e4eoSbgZC7yxJvutA6S4VzosASg9"},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "9cd2sAfbBvKs4SX9YKo4dcjwP3TgTVQ8dT5koshGcDND"},
+        {"acc": "fixed", "key": "FpLaqELxKRm6S3bjfNSknwZu43TL89VYkwuMDwsRMj59"},
+        {"acc": "fixed", "key": "82MNhUCha26wY4kohTUEC965b4ypEe7RPa4itp9UMrKK"},
+        {"acc": "fixed", "key": "3JENUTyYnMMtZUSg5ErSHEvowjQteYD7wr7RDNw12bei"},
+        {"acc": "fixed", "key": "2Y3TLkdGoJwbdizxqrZmQwNLYJyGKTgzC4tbetbkvQ43"},
+        {"acc": "fixed", "key": "8Ri52tZXZehgAHKbx1MQiXhWXXkVsvAL9op6C5HytDKF"},
+        {"acc": "vault_ata", "mint_at": 10, "program_at": 13},
+        {"acc": "vault_ata", "mint_at": 11, "program_at": 13},
+        {"acc": "fixed", "key": "5YMkXAYccHSGnHn9nob9xEvv6Pvka9DZWH7nTbotTu9E"},
+        {"acc": "fixed", "key": "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn"},
+        {"acc": "fixed", "key": "7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "4VzpNE51Be5vD5Yg8MC3z6TVHq5gGbLJptjv18QbD6WP"},
+        {"acc": "fixed", "key": "HYEXCHtHkBagdStcJCp3xbbb9B7sdMdWXFNj6mdsG4hn"}
+      ],
+      "extra_accounts": 0,
+      "spends": [{"field": 2, "key": "sol:5YMkXAYccHSGnHn9nob9xEvv6Pvka9DZWH7nTbotTu9E"}]
+    },
+    {
+      "name": "hylo_earn_deposit",
+      "about": "Deposit hyUSD into Hylo's Earn (stability) pool for sHYUSD, through Hylo's router (route_v2, as Hylo's SDK builds it): at most {max_in} hyUSD units (6 decimals) from the vault's own token account, the sHYUSD lands in the vault's own token account. The slippage config must be there: expected out >= amount x {floor_num} / {floor_den}, tolerance <= {max_slippage_bps} bps, so Hylo refuses to pay less than amount x floor x (1 - tolerance). Every other account is pinned.",
+      "program": "hyRouTRDAgn65xyyJ3L5c4k5SFmSdr3NxDV8Euzjy3f",
+      "prefix": "bb64facc31c4af14",
+      "fields": [
+        {"ty": "bytes32", "rule": "fixed", "hex": "4377371c74f86ea18bf17fb160338452aa63fadcacd5a31fb3acf54ba52e88ad"},
+        {"ty": "bytes32", "rule": "fixed", "hex": "f97551b35d7746e8c27862d58af22a8923068a4c796bb99568fcd9f36500f4bd"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_in}"},
+        {"ty": "u8", "rule": "fixed", "hex": "01"},
+        {"ty": "u64", "rule": "at_least", "of": 2, "num": "{floor_num}", "den": "{floor_den}"},
+        {"ty": "u8", "rule": "fixed", "hex": "fa"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_slippage_bps}"},
+        {"ty": "u8", "rule": "fixed", "hex": "fc"}
+      ],
+      "accounts": [
+        {"acc": "fixed", "key": "F7BfTbic9AyaNKT7e4eoSbgZC7yxJvutA6S4VzosASg9"},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "2jk7miWrsTbt5hUSaCXPkEQPvuUMgbFLpgMzMQw3Z6ar"},
+        {"acc": "fixed", "key": "9cd2sAfbBvKs4SX9YKo4dcjwP3TgTVQ8dT5koshGcDND"},
+        {"acc": "fixed", "key": "5YMkXAYccHSGnHn9nob9xEvv6Pvka9DZWH7nTbotTu9E"},
+        {"acc": "vault_ata", "mint_at": 4, "program_at": 11},
+        {"acc": "vault_ata", "mint_at": 10, "program_at": 11},
+        {"acc": "fixed", "key": "5YrRAQag9BbJkauDtJkd1vsTquXT6N46oU8rJ66GDxHd"},
+        {"acc": "fixed", "key": "EqozKyMj7FVnLHc2cJj3VC25aBr4AhVh1cGM2WDajGe9"},
+        {"acc": "fixed", "key": "5YWerkcqAXTSCzKC1X52BXtfv2aoNCB6wzv7wEXuGWpq"},
+        {"acc": "fixed", "key": "HnnGv3HrSqjRpgdFmx7vQGjntNEoex1SU4e9Lxcxuihz"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "8fjUWoZTb8ox8JFRJTb7WznL1V8oJT9o21kQKHJzbTS8"},
+        {"acc": "fixed", "key": "HysTabVUfmQBFcmzu1ctRd1Y1fxd66RBpboy1bmtDSQQ"}
+      ],
+      "extra_accounts": 0,
+      "spends": [{"field": 2, "key": "sol:5YMkXAYccHSGnHn9nob9xEvv6Pvka9DZWH7nTbotTu9E"}]
+    },
+    {
+      "name": "hylo_earn_withdraw",
+      "about": "Withdraw hyUSD from Hylo's Earn pool (burn sHYUSD), through Hylo's router (route_v2, as Hylo's SDK builds it): at most {max_in} sHYUSD units (6 decimals) from the vault's own token account, the hyUSD lands in the vault's own token account. The slippage config must be there: expected out >= amount x {floor_num} / {floor_den}, tolerance <= {max_slippage_bps} bps, so Hylo refuses to pay less than amount x floor x (1 - tolerance). Every other account is pinned.",
+      "program": "hyRouTRDAgn65xyyJ3L5c4k5SFmSdr3NxDV8Euzjy3f",
+      "prefix": "bb64facc31c4af14",
+      "fields": [
+        {"ty": "bytes32", "rule": "fixed", "hex": "f97551b35d7746e8c27862d58af22a8923068a4c796bb99568fcd9f36500f4bd"},
+        {"ty": "bytes32", "rule": "fixed", "hex": "4377371c74f86ea18bf17fb160338452aa63fadcacd5a31fb3acf54ba52e88ad"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_in}"},
+        {"ty": "u8", "rule": "fixed", "hex": "01"},
+        {"ty": "u64", "rule": "at_least", "of": 2, "num": "{floor_num}", "den": "{floor_den}"},
+        {"ty": "u8", "rule": "fixed", "hex": "fa"},
+        {"ty": "u64", "rule": "at_most", "max": "{max_slippage_bps}"},
+        {"ty": "u8", "rule": "fixed", "hex": "fc"}
+      ],
+      "accounts": [
+        {"acc": "fixed", "key": "F7BfTbic9AyaNKT7e4eoSbgZC7yxJvutA6S4VzosASg9"},
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "2jk7miWrsTbt5hUSaCXPkEQPvuUMgbFLpgMzMQw3Z6ar"},
+        {"acc": "fixed", "key": "9cd2sAfbBvKs4SX9YKo4dcjwP3TgTVQ8dT5koshGcDND"},
+        {"acc": "fixed", "key": "5YMkXAYccHSGnHn9nob9xEvv6Pvka9DZWH7nTbotTu9E"},
+        {"acc": "vault_ata", "mint_at": 4, "program_at": 12},
+        {"acc": "fixed", "key": "3HT6dD6APJh89XJs9rkn3BmsvkXE9jPG9dWJmUjWu6TS"},
+        {"acc": "fixed", "key": "Hh8N3Fdauxgq1jjcKdzGBR3D8cdkpLZrFEVumL1tYQLp"},
+        {"acc": "vault_ata", "mint_at": 11, "program_at": 12},
+        {"acc": "fixed", "key": "5YrRAQag9BbJkauDtJkd1vsTquXT6N46oU8rJ66GDxHd"},
+        {"acc": "fixed", "key": "EqozKyMj7FVnLHc2cJj3VC25aBr4AhVh1cGM2WDajGe9"},
+        {"acc": "fixed", "key": "HnnGv3HrSqjRpgdFmx7vQGjntNEoex1SU4e9Lxcxuihz"},
+        {"acc": "fixed", "key": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "8fjUWoZTb8ox8JFRJTb7WznL1V8oJT9o21kQKHJzbTS8"},
+        {"acc": "fixed", "key": "HysTabVUfmQBFcmzu1ctRd1Y1fxd66RBpboy1bmtDSQQ"}
+      ],
+      "extra_accounts": 0,
+      "spends": [{"field": 2, "key": "sol:HnnGv3HrSqjRpgdFmx7vQGjntNEoex1SU4e9Lxcxuihz"}]
     },
     {
       "name": "intents_deposit_sol",

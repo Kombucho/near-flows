@@ -1,5 +1,5 @@
 {
-  "about": "EVM nodes as templates the vault enforces (contracts/vault/src/evm.rs). The vault builds each call: fixed arguments are fixed here, 'vault' is the vault's own address, the keeper only fills at_most amounts (capped) and floor minimums (never below amount x num / den). Floors below were set on 2026-11-06 (Base: 1 WETH ~ 2,224 USDC; Smart LP sdAMZN-FR: 50 USDG ~ 49.68 shares): owners set their own. Tested on a Base mainnet fork: contracts/sandbox/tests/evm_fork.rs. Floors for the Robinhood v4 and pair token nodes: 0.01 ETH ~ 0.1186 NVDA, 0.05 NVDA ~ 0.0041 ETH, 0.01 ETH ~ 0.01707 ETHNVDA shares (fork, 2026-11-06), owner floor ~90% of that.",
+  "about": "EVM nodes as templates the brain enforces for each relay vault (contracts/brain/src/evm.rs; set with x {\"evm_template\": {\"template\": ...}}). The brain builds each call, the vault signs it: fixed arguments are fixed here, 'vault' is the vault's own address, the keeper only fills at_most amounts (capped) and floor minimums (never below amount x num / den); a 'market' minimum is also never below the oracle's price for the amount less slippage_bps (the brain reads the two feeds, named as in the vault's oracle_setup: eth, usdc; no fresh price, no signature), and a 'deadline' is block time + 5 minutes, whatever the keeper sends. Every swap whose two feeds each have an independent backup has a market minimum (the fixed floor alone, ~90% of the market, is room to sandwich): the Base WETH -> USDC swap. NVDA has a single source (a market floor on it is refused), so the Robinhood v4 swaps keep their fixed floors, like the Smart LP and pair-token zaps (no share-price feed); there the fixed floor and the node's size caps bound the trade. Floors below were set on 2026-11-06 (Base: 1 WETH ~ 2,224 USDC; Smart LP sdAMZN-FR: 50 USDG ~ 49.68 shares): owners set their own. Tested on a Base mainnet fork: contracts/sandbox/tests/evm_fork.rs. Floors for the Robinhood v4 and pair token nodes: 0.01 ETH ~ 0.1186 NVDA, 0.05 NVDA ~ 0.0041 ETH, 0.01 ETH ~ 0.01707 ETHNVDA shares (fork, 2026-11-06), owner floor ~90% of that.",
   "chains": {
     "base": {
       "chain_id": 8453,
@@ -54,10 +54,17 @@
                   "max": "200000000000000000"
                 },
                 {
-                  "rule": "floor",
+                  "rule": "market",
                   "of": 4,
                   "num": "2000",
-                  "den": "1000000000000"
+                  "den": "1000000000000",
+                  "market": {
+                    "sell": "eth",
+                    "buy": "usdc",
+                    "dec_in": 18,
+                    "dec_out": 6,
+                    "slippage_bps": 100
+                  }
                 },
                 {
                   "rule": "fixed",
@@ -363,8 +370,7 @@
               ]
             },
             {
-              "rule": "at_most",
-              "max": "18446744073709551615"
+              "rule": "deadline"
             }
           ],
           "value": {
@@ -525,8 +531,7 @@
               ]
             },
             {
-              "rule": "at_most",
-              "max": "18446744073709551615"
+              "rule": "deadline"
             }
           ],
           "spends": {
@@ -598,7 +603,7 @@
       },
       "basket": "StonkBrokers has no basket or fund contract to deposit into: its 'Investment accounts' (stonkbrokers.io/integration/invest: StonkBroker Accounts NFT 0x0ef148BC47B18E5C93314Da76931860175d4bC2E, open() / openFor(to)) are per-user ERC-6551 wallets, whose trades go through executeCall(to, value, data) with arbitrary calldata (not templatable without letting a caller pick the call). The flows' basket is therefore the ETHNVDA pair token (pairtoken_ethnvda_zap_eth: ETH + NVDA in one Uniswap v4 position) or Smart LP (sdAMZN-FR, USDG in). Checked 2026-11-06.",
       "ladder_flow": {
-        "about": "The take-profit ladder as remote flow nodes (contracts/vault/src/remote.rs), as run in contracts/sandbox/tests/ladder_fork_robinhood.rs: node 0 buys NVDA with ETH and splits it 3,333 bps to each rung; rungs 1-3 sell at NVDA >= $270 / $360 / $540 (1.5x / 2x / 3x of $180, Pyth feed a470c4ac46f44b547b2cba52338f311fb642b79375ce5f0cfd5cb5b99227b852 via oracle_setup name 'nvda'); each sale's ETH goes to node 4, which zaps it into ETHNVDA. Needs approve_nvda_permit2 and permit2_nvda_universal_router once.",
+        "about": "The take-profit ladder as remote flow nodes (contracts/brain/src/remote.rs), as run in contracts/sandbox/tests/ladder_fork_robinhood.rs: node 0 buys NVDA with ETH and splits it 3,333 bps to each rung; rungs 1-3 sell at NVDA >= $270 / $360 / $540 (1.5x / 2x / 3x of $180, Pyth feed a470c4ac46f44b547b2cba52338f311fb642b79375ce5f0cfd5cb5b99227b852 via oracle_setup name 'nvda'); each sale's ETH goes to node 4, which zaps it into ETHNVDA. Needs approve_nvda_permit2 and permit2_nvda_universal_router once.",
         "nodes": [
           {
             "input": "evm:4663:eth",

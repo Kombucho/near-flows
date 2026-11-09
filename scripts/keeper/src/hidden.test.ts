@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fingerprint, newSalt, unlock, type Node } from "./hidden.ts";
 
-const node: Node = JSON.parse(readFileSync(new URL("../../../contracts/vault/tests-data/fingerprint-node.json", import.meta.url), "utf8"));
+const node: Node = JSON.parse(readFileSync(new URL("../../../contracts/brain/tests-data/fingerprint-node.json", import.meta.url), "utf8"));
 const salt = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
-test("the keeper's fingerprint matches the vault's, byte for byte", () => {
-  // Same value pinned in contracts/vault/src/tests.rs, computed there by the vault's own code.
+test("the keeper's fingerprint matches the brain's, byte for byte", () => {
+  // Same value pinned in contracts/brain/src/hidden.rs, computed there by the brain's own code.
   assert.equal(fingerprint(node, salt), "ad13adedfaed79107498ceb3bb79901e8dff115529609033291981e71bd0d36b");
   // A remote node (an EVM ladder rung), every remote field set.
-  const remote: Node = JSON.parse(readFileSync(new URL("../../../contracts/vault/tests-data/fingerprint-remote-node.json", import.meta.url), "utf8"));
+  const remote: Node = JSON.parse(readFileSync(new URL("../../../contracts/brain/tests-data/fingerprint-remote-node.json", import.meta.url), "utf8"));
   assert.equal(fingerprint(remote, salt), "cfb851d722d274c36161359966c9a849ee9b7a5a947156f6acd0f7aa2acfe35c");
 });
 

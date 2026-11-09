@@ -1,5 +1,9 @@
 // Attest Jupiter's price for memecoins and post it to an ATTESTED price board
-// (contracts/priceboard), so vaults' market floors can follow coins Pyth doesn't list.
+// (contracts/priceboard), for price triggers on coins Pyth doesn't list. NOT for a
+// market floor: a memecoin has no trusted price (anyone can move a thin pool or a
+// pump.fun curve for a slot), so a vault names such a feed single_source and refuses
+// a market floor on it; its trades are bounded by the owner's fixed floor, slippage
+// and size caps.
 //
 //   npm run jupiter-price -- --board <board> <mint>...       sign and post (needs k = 1, or --with)
 //   ... --out mine.json                  only sign: write this attester's reports, for someone to combine
@@ -10,9 +14,9 @@
 // TRUSTS THE ATTESTERS. Jupiter's price API is off-chain and unsigned: no
 // contract can check it, so the board believes whatever k of its n attesters
 // sign. Several attesters on separate machines (and the board's median) limit
-// one bad or hacked key; nothing limits k colluding ones. For a check that
-// trusts Wormhole's guardians instead, see wormhole-price.ts, and set one board
-// as the other's backup in the vault's oracle config.
+// one bad or hacked key; nothing limits k colluding ones. For a reading that
+// trusts Wormhole's guardians instead, see wormhole-price.ts (still a spot price:
+// neither one vouches for the other).
 // A thin coin's price is cheap to move: below --min-liquidity we don't sign at all.
 //
 // Environment: JUPITER_API_KEY (required; portal.jup.ag), ATTESTER_PRIVATE_KEY (ed25519:..., the

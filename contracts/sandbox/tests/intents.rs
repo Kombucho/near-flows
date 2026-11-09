@@ -2,8 +2,16 @@
 //! (v0.4.5; fetched from the Tidepool testnet sandbox, same code hash as mainnet).
 //! The vault signs only intents it built itself, via Chain Signatures (here a
 //! stand-in signer that really signs Ed25519); a solver matches; the real
-//! verifier checks both signatures and settles.
+//! verifier checks both signatures and settles. Run on a relay vault: the brain
+//! builds and checks each intent, the vault gets it signed with its own path.
+//! (relay_ports.rs has a shorter twin; this one also proves the exact amounts
+//! given, the replay refusal, the empty Intents balance after a withdrawal and
+//! mt_withdraw staying out of recipes.)
 
+mod common;
+mod relayw;
+
+use relayw::{fails_with, view, x};
 use ed25519_dalek::{Signer, SigningKey};
 use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
@@ -52,37 +60,33 @@ async fn execute(who: &Account, verifier: &Contract, signed: Vec<Value>) -> anyh
 
 #[tokio::test]
 async fn a_keyless_vault_swaps_on_real_intents_with_intents_it_signed_itself() -> anyhow::Result<()> {
-    let worker = near_workspaces::sandbox().await?;
+    let relayw::RelayWorld { worker, brain, alice, keeper, signer, vault, .. } = relayw::relay_world().await?;
     let root = worker.dev_create_account().await?;
-    let (alice, keeper, solver) = (worker.dev_create_account().await?, worker.dev_create_account().await?, worker.dev_create_account().await?);
+    let solver = worker.dev_create_account().await?;
     let (a, b) = (token(&worker, &root, "AAA").await?, token(&worker, &root, "BBB").await?);
     let verifier = worker.dev_deploy(&intents_wasm()).await?;
     verifier.call("new").args_json(json!({"config": {"wnear_id": a.id(), "fees": {"fee": 1, "fee_collector": root.id()}, "roles": {}}})).max_gas().transact().await?.into_result()?;
-    let signer = worker.dev_deploy(&ours("mock_signer")).await?;
-    let vault = worker.dev_deploy(&ours("vault")).await?;
-    vault.call("new").args_json(json!({"owner": alice.id(), "keeper": keeper.id()})).transact().await?.into_result()?;
     for t in [&a, &b] {
-        for who in [verifier.id(), vault.id(), solver.id()] {
+        for who in [verifier.id(), &vault, solver.id()] {
             root.call(t.id(), "storage_deposit").args_json(json!({"account_id": who})).deposit(NearToken::from_millinear(10)).transact().await?.into_result()?;
         }
     }
-    root.call(a.id(), "ft_transfer").args_json(json!({"receiver_id": vault.id(), "amount": (1_000 * ONE).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
+    root.call(a.id(), "ft_transfer").args_json(json!({"receiver_id": vault, "amount": (1_000 * ONE).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
     root.call(b.id(), "ft_transfer").args_json(json!({"receiver_id": solver.id(), "amount": (1_000 * ONE).to_string()})).deposit(NearToken::from_yoctonear(1)).transact().await?.into_result()?;
 
     // 1. The vault registers its MPC key on its own Intents account (no private key anywhere).
-    alice.call(vault.id(), "intents_setup").args_json(json!({"verifier": verifier.id(), "signer": signer.id()})).max_gas().transact().await?.into_result()?;
-    let key = vault.view("get_intents").await?.json::<Value>()?["key"].as_str().unwrap().to_string();
-    let keys: Vec<String> = verifier.view("public_keys_of").args_json(json!({"account_id": vault.id()})).await?.json()?;
+    x(&alice, &vault, "intents_setup", json!({"verifier": verifier.id(), "signer": signer.id()})).await?.into_result()?;
+    let key = view(&brain, &vault, "get_intents", Value::Null).await?["key"].as_str().unwrap().to_string();
+    let keys: Vec<String> = verifier.view("public_keys_of").args_json(json!({"account_id": vault})).await?.json()?;
     assert_eq!(keys, vec![format!("ed25519:{key}")], "the verifier knows the vault's key");
 
     // 2. Deposit 300 A into Intents with a flow node (a plain recipe: ft_transfer_call, msg "").
-    alice.call(vault.id(), "trust").args_json(json!({"add": [{"contract": a.id()}, {"contract": b.id()}, {"contract": verifier.id()}], "remove": []})).transact().await?.into_result()?;
-    let f: u32 = alice.call(vault.id(), "save_flow").args_json(json!({"name": "to intents", "nodes": [{"input": a.id(), "when": {"when": "now"},
-        "action": {"label": "Deposit to Intents", "calls": [{"call": "ft", "receiver": verifier.id(), "msg": "", "tgas": 50}], "out": null, "min_out_per_in": null, "price": null}}]}))
-        .max_gas().transact().await?.into_result()?.json()?;
-    alice.call(vault.id(), "fund").args_json(json!({"flow_id": f, "node": 0, "amount": (300 * ONE).to_string()})).max_gas().transact().await?.into_result()?;
-    keeper.call(vault.id(), "step").args_json(json!({"flow_id": f, "node": 0})).max_gas().transact().await?.into_result()?;
-    assert_eq!(mt(&verifier, vault.id(), &a).await?, 300 * ONE);
+    x(&alice, &vault, "trust", json!({"add": [{"contract": a.id()}, {"contract": b.id()}, {"contract": verifier.id()}], "remove": []})).await?.into_result()?;
+    let f: u32 = x(&alice, &vault, "save_flow", json!({"name": "to intents", "nodes": [{"input": a.id(), "when": {"when": "now"},
+        "action": {"label": "Deposit to Intents", "calls": [{"call": "ft", "receiver": verifier.id(), "msg": "", "tgas": 50}], "out": null, "min_out_per_in": null, "price": null}}]})).await?.into_result()?.json()?;
+    x(&alice, &vault, "fund", json!({"flow_id": f, "node": 0, "amount": (300 * ONE).to_string()})).await?.into_result()?;
+    x(&keeper, &vault, "step", json!({"flow_id": f, "node": 0})).await?.into_result()?;
+    assert_eq!(mt(&verifier, &vault, &a).await?, 300 * ONE);
 
     // The solver: its own key on Intents, 1,000 B deposited.
     let skey = SigningKey::from_bytes(&[42; 32]);
@@ -92,11 +96,9 @@ async fn a_keyless_vault_swaps_on_real_intents_with_intents_it_signed_itself() -
         .deposit(NearToken::from_yoctonear(1)).max_gas().transact().await?.into_result()?;
 
     // 3. The owner allows A -> B with a floor of 0.95 B per A; at most 200 A per intent.
-    alice.call(vault.id(), "intents_allow").args_json(json!({"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": (200 * ONE).to_string(), "floor_out": "95", "floor_per_in": "100"}}))
-        .transact().await?.into_result()?;
-    // The keeper asks for 100 A -> "at least 1 wei" of B: the vault signs for at least 95 B (the floor).
-    let r = keeper.call(vault.id(), "intents_sign_swap").args_json(json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600}))
-        .max_gas().transact().await?;
+    x(&alice, &vault, "intents_allow", json!({"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": (200 * ONE).to_string(), "floor_out": "95", "floor_per_in": "100"}})).await?.into_result()?;
+    // Alice (the direct door is the owner's) asks for 100 A -> "at least 1 wei" of B: the vault signs for at least 95 B (the floor).
+    let r = x(&alice, &vault, "intents_sign_swap", json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600})).await?;
     println!("GAS sign an intent: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
     let ev = r.logs().iter().find(|l| l.contains("intents_signed")).cloned().unwrap_or_else(|| panic!("{:?} {:?}", r.logs(), r.failures()));
     let vault_signed = serde_json::from_str::<Value>(ev.trim_start_matches("EVENT_JSON:"))?["data"][0]["signed"].clone();
@@ -120,53 +122,54 @@ async fn a_keyless_vault_swaps_on_real_intents_with_intents_it_signed_itself() -
     let r = execute(&keeper, &verifier, vec![vault_signed.clone(), fair.clone()]).await?;
     println!("GAS execute_intents (vault + solver): {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
     assert!(r.is_success(), "{:?}", r.failures());
-    assert_eq!(mt(&verifier, vault.id(), &a).await?, 200 * ONE, "gave exactly 100 A");
-    assert_eq!(mt(&verifier, vault.id(), &b).await?, 95 * ONE, "got 95 B");
+    assert_eq!(mt(&verifier, &vault, &a).await?, 200 * ONE, "gave exactly 100 A");
+    assert_eq!(mt(&verifier, &vault, &b).await?, 95 * ONE, "got 95 B");
     // 4c. The same signed intent can't be used twice (nonce spent).
     let again = signed_by_solver(&skey, solver.id(), verifier.id(), salt, (b.id(), 95 * ONE + fee_b), (a.id(), 100 * ONE - (100 * ONE).div_ceil(1_000_000)), 3);
     assert!(execute(&keeper, &verifier, vec![vault_signed, again]).await?.is_failure(), "replay refused");
 
     // 5. Withdraw the 95 B: it can only go back to the vault.
-    keeper.call(vault.id(), "intents_withdraw").args_json(json!({"token": b.id(), "amount": (95 * ONE).to_string()})).max_gas().transact().await?.into_result()?;
-    assert_eq!(ft(&b, vault.id()).await?, 95 * ONE);
-    assert_eq!(mt(&verifier, vault.id(), &b).await?, 0);
+    x(&keeper, &vault, "intents_withdraw", json!({"token": b.id(), "amount": (95 * ONE).to_string()})).await?.into_result()?;
+    assert_eq!(ft(&b, &vault).await?, 95 * ONE);
+    assert_eq!(mt(&verifier, &vault, &b).await?, 0);
 
-    // 6. Refusals: over the per-intent limit, a pair nobody allowed, a stranger.
+    // 6. Refusals: over the per-intent limit, a pair nobody allowed, a stranger, the keeper (the door is the owner's).
     for (who, args) in [
-        (&keeper, json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (201 * ONE).to_string(), "min_out": "1", "valid_secs": 600})),
-        (&keeper, json!({"token_in": b.id(), "token_out": a.id(), "amount_in": "1", "min_out": "1", "valid_secs": 600})),
+        (&alice, json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (201 * ONE).to_string(), "min_out": "1", "valid_secs": 600})),
+        (&alice, json!({"token_in": b.id(), "token_out": a.id(), "amount_in": "1", "min_out": "1", "valid_secs": 600})),
         (&solver, json!({"token_in": a.id(), "token_out": b.id(), "amount_in": "1", "min_out": "1", "valid_secs": 600})),
     ] {
-        let r = who.call(vault.id(), "intents_sign_swap").args_json(args).max_gas().transact().await?;
+        let r = x(who, &vault, "intents_sign_swap", args).await?;
         assert!(r.is_failure() && !r.logs().iter().any(|l| l.contains("intents_signed")));
     }
-    // 7. A market floor: A and B both at $1 per the oracle, 1% slippage. The keeper asks for 1 wei;
+    let r = x(&keeper, &vault, "intents_sign_swap", json!({"token_in": a.id(), "token_out": b.id(), "amount_in": "1", "min_out": "1", "valid_secs": 600})).await?;
+    assert!(fails_with(&r, "owner only"), "the keeper: {:?}", r.failures());
+    // 7. A market floor: A and B both at $1 per the oracle, 1% slippage. The owner asks for 1 wei;
     //    the hard floor says 95; the market says 99: the vault signs for 99.
     let pyth = worker.dev_deploy(&ours("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
-    let ids = ["1111111111111111111111111111111111111111111111111111111111111111", "2222222222222222222222222222222222222222222222222222222222222222"];
+    let ids = ["111111111111111111111111111111111111111111111111111111111111111a", "222222222222222222222222222222222222222222222222222222222222222b"]; // not palindromes: the backup is the id reversed
     for id in ids {
-        alice.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": "100000000", "conf": "0", "expo": -8, "ema": "100000000", "age_s": 0}))
+        alice.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": "100000000", "conf": "0", "expo": -8, "backup": "100000000", "age_s": 0}))
             .transact().await?.into_result()?;
     }
-    alice.call(vault.id(), "oracle_setup").args_json(json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "a", "contract": pyth.id(), "price_id": ids[0], "backup": {"kind": "ema"}},
-        {"name": "b", "contract": pyth.id(), "price_id": ids[1], "backup": {"kind": "ema"}}]}})).transact().await?.into_result()?;
-    alice.call(vault.id(), "intents_allow").args_json(json!({"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": (200 * ONE).to_string(), "floor_out": "95", "floor_per_in": "100",
-        "market": {"sell": "a", "buy": "b", "dec_in": 18, "dec_out": 18, "slippage_bps": 100}}})).transact().await?.into_result()?;
-    let r = keeper.call(vault.id(), "intents_sign_swap").args_json(json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600}))
-        .max_gas().transact().await?;
+    x(&alice, &vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
+        {"name": "a", "contract": pyth.id(), "price_id": ids[0], "backup": common::backup(pyth.id(), ids[0])},
+        {"name": "b", "contract": pyth.id(), "price_id": ids[1], "backup": common::backup(pyth.id(), ids[1])}]}})).await?.into_result()?;
+    x(&alice, &vault, "intents_allow", json!({"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": (200 * ONE).to_string(), "floor_out": "95", "floor_per_in": "100",
+        "market": {"sell": "a", "buy": "b", "dec_in": 18, "dec_out": 18, "slippage_bps": 100}}})).await?.into_result()?;
+    let r = x(&alice, &vault, "intents_sign_swap", json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600})).await?;
     let ev = r.logs().iter().find(|l| l.contains("intents_signed")).cloned().unwrap_or_else(|| panic!("{:?} {:?}", r.logs(), r.failures()));
     assert!(ev.contains(&format!(r#"\"nep141:{}\":\"{}\""#, b.id(), 99 * ONE)), "signed for the market floor: {ev}");
 
     // Recipes can never move Intents balances directly (mt_transfer / ft_withdraw are fund-moving).
-    let r = alice.call(vault.id(), "trust").args_json(json!({"add": [{"contract": verifier.id(), "methods": ["ft_withdraw"]}], "remove": []})).transact().await?;
+    let r = x(&alice, &vault, "trust", json!({"add": [{"contract": verifier.id(), "methods": ["ft_withdraw"]}], "remove": []})).await?;
     assert!(r.is_failure(), "ft_withdraw can't be handed to recipes");
     // ...nor can the MPC signer's `sign` (it would skip every byte check), nor Intents keys.
     for (contract, method) in [(signer.id(), "sign"), (verifier.id(), "add_public_key"), (verifier.id(), "mt_withdraw")] {
-        let r = alice.call(vault.id(), "trust").args_json(json!({"add": [{"contract": contract, "methods": [method]}], "remove": []})).transact().await?;
+        let r = x(&alice, &vault, "trust", json!({"add": [{"contract": contract, "methods": [method]}], "remove": []})).await?;
         assert!(r.is_failure(), "{method} must never be callable by a recipe");
-        let r = alice.call(vault.id(), "act").args_json(json!({"target": contract, "method": method, "json_args": "{}", "one_yocto": true})).max_gas().transact().await?;
+        let r = x(&alice, &vault, "act", json!({"target": contract, "method": method, "json_args": "{}", "one_yocto": true})).await?;
         assert!(r.is_failure(), "{method} must never be callable by a one-off act either");
     }
     Ok(())

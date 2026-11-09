@@ -186,6 +186,16 @@ impl Ledger {
         Ok(back)
     }
 
+    /// `finish_node` for a step that worked but used only part of its input (a
+    /// partial fill): the unused `left` goes back to the node's inbox, not to the
+    /// vault's free balance.
+    pub fn finish_node_partial<A: Action>(&mut self, node: &Node<A>, i: u16, out: u128, left: u128) -> Result<Vec<(Token, u128)>, Error> {
+        let ran = self.nodes.get(i as usize).map_or(0, |s| s.running);
+        let back = self.finish_node(node, i, Ok(out))?;
+        self.state(i)?.inbox += left.min(ran);
+        Ok(back)
+    }
+
     /// Pause a node until its owner resumes it (e.g. it got less out than its minimum).
     pub fn pause(&mut self, i: u16) -> Result<(), Error> {
         self.state(i)?.failures = MAX_FAILURES;

@@ -1,8 +1,11 @@
-//! A price board: prices Pyth doesn't carry (fresh pump.fun memecoins), behind
-//! Pyth's own read interface (get_price_no_older_than / get_ema_price_no_older_than,
-//! same Price format), so a vault's oracle treats it as just another
-//! Pyth-compatible contract: a feed's `contract` (or its `Backup::Other`).
-//! The price id is the coin's Solana mint (32 bytes, hex).
+//! A price board: prices Pyth doesn't carry for us (fresh pump.fun memecoins;
+//! NEAR and NVDA, which our Pyth key isn't entitled to; Chainlink's ETH, SOL and
+//! USDC as the second publisher behind Pyth's), behind Pyth's own read interface
+//! (get_price_no_older_than, same Price format), so a vault's oracle treats it as
+//! just another Pyth-compatible contract: a feed's `contract` (or its backup's).
+//! The price id is 32 bytes, hex: a coin's Solana mint, Pyth's own id for a
+//! relayed Pyth price, or for a Chainlink feed its chain and proxy address
+//! (chainlink::price_id).
 //!
 //! One board, one source of truth, chosen when it's created:
 //! - Attested: prices signed (Ed25519) by k of n attesters, e.g. keepers that
@@ -15,10 +18,22 @@
 //!   the guardian signatures, reads the curve's reserves and prices the coin in
 //!   its quote token, then in USD with Pyth. Trusts Wormhole's guardians (as Pyth
 //!   already does) and the curve's spot state at that slot, not any keeper.
+//! - Evm: anyone posts a Wormhole Query response in which a quorum of guardians
+//!   ran latestRoundData() and decimals() on a Chainlink feed the owner
+//!   registered (chain + proxy address) and signed the answers with the block's
+//!   time. The board checks the signatures, the chain, the address, the call
+//!   data, the block's age and the feed's own staleness. Trusts Wormhole's
+//!   guardians and Chainlink's feed (its node operators, and the multisig that
+//!   can repoint its proxy), not any keeper.
 //!
-//! Either way the board keeps, per coin, the latest price and a time-weighted
-//! average (EMA over `ema_window_s`) for the vault's "price and backup agree" check.
+//! Whatever the source, the board keeps one thing per feed: its latest price. It
+//! keeps no average of its own. WHY: prices are posted on demand (just before a
+//! step), so an average of them is only as honest as the poster's timing, and a
+//! vault's "price and backup agree" check needs a second, independent publisher
+//! (Chainlink for a Pyth feed, Chainlink on another chain for Chainlink), read at
+//! the same moment, not the first publisher's own past.
 
+pub mod chainlink;
 pub mod pump;
 pub mod wormhole;
 
@@ -46,13 +61,6 @@ pub struct Price {
     pub publish_time: i64,
 }
 
-#[near(serializers = [borsh])]
-#[derive(Clone)]
-struct Entry {
-    spot: Price,
-    ema: Price,
-}
-
 /// A curve's quote token: its mint (hex; all zero = SOL), its Pyth USD feed and decimals.
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
@@ -71,6 +79,26 @@ pub enum Source {
     /// Wormhole Queries of pump.fun curves. Guardians: 20-byte addresses (hex) of set `guardian_set`;
     /// later sets arrive as signed upgrade VAAs. Quote prices from `pyth`, no older than `quote_age_s`.
     Wormhole { guardian_set: u32, guardians: Vec<String>, pyth: AccountId, quotes: Vec<Quote>, quote_age_s: u64 },
+    /// Wormhole Queries (eth_call) of these Chainlink feeds. Guardians as for `Wormhole`.
+    /// A response's block may be at most `max_block_age_s` old when posted.
+    Evm { guardian_set: u32, guardians: Vec<String>, feeds: Vec<EvmFeed>, max_block_age_s: u64 },
+}
+
+/// A Chainlink feed the board takes prices from (its price id: chainlink::price_id).
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvmFeed {
+    /// Wormhole chain id: 2 Ethereum, 23 Arbitrum, 24 Optimism, 72 Robinhood Chain...
+    pub chain: u16,
+    /// The feed's proxy (0x + 40 hex, lowercase): the address Chainlink's docs list.
+    pub address: String,
+    /// The feed's deviation threshold, e.g. 50 (0.5%). WHY it's the uncertainty
+    /// (conf): Chainlink only writes a new answer once the market moves this
+    /// far, so between updates the true price can be anywhere within it.
+    pub deviation_bps: u32,
+    /// The feed's heartbeat: an answer older than this at the block means the
+    /// feed stopped updating (or the market is closed), and is refused.
+    pub heartbeat_s: u64,
 }
 
 /// One attester's signed price.
@@ -101,32 +129,26 @@ pub struct Board {
     /// May change attesters or quotes; None = nobody, for good.
     owner: Option<AccountId>,
     source: Source,
-    ema_window_s: u64,
-    prices: LookupMap<String, Entry>,
+    prices: LookupMap<String, Price>,
 }
 
 #[near]
 impl Board {
     #[init]
-    pub fn new(owner: Option<AccountId>, source: Source, ema_window_s: u64) -> Self {
-        require!(ema_window_s >= 1, "ema_window_s >= 1");
+    pub fn new(owner: Option<AccountId>, source: Source) -> Self {
         check_source(&source);
-        Self { owner, source, ema_window_s, prices: LookupMap::new(b"p") }
+        Self { owner, source, prices: LookupMap::new(b"p") }
     }
 
     // ---------- Pyth's read interface ----------
 
     pub fn get_price_no_older_than(&self, price_id: String, age: u64) -> Option<Price> {
-        self.prices.get(&price_id.to_lowercase()).map(|e| e.spot.clone()).filter(|p| fresh(p, age))
-    }
-
-    pub fn get_ema_price_no_older_than(&self, price_id: String, age: u64) -> Option<Price> {
-        self.prices.get(&price_id.to_lowercase()).map(|e| e.ema.clone()).filter(|p| fresh(p, age))
+        self.prices.get(&price_id.to_lowercase()).cloned().filter(|p| fresh(p, age))
     }
 
     /// The latest price, however old (check `publish_time`).
     pub fn get_price_unsafe(&self, price_id: String) -> Option<Price> {
-        self.prices.get(&price_id.to_lowercase()).map(|e| e.spot.clone())
+        self.prices.get(&price_id.to_lowercase()).cloned()
     }
 
     pub fn get_source(&self) -> Source {
@@ -193,7 +215,7 @@ impl Board {
     /// commitment. Prices are written once the quote token's Pyth price is in.
     #[payable]
     pub fn push_query(&mut self, response: String, signatures: Vec<String>) -> Promise {
-        let Source::Wormhole { guardian_set: _, guardians, pyth, quotes, quote_age_s } = &self.source else { env::panic_str("this board takes attestations, not Wormhole queries") };
+        let Source::Wormhole { guardian_set: _, guardians, pyth, quotes, quote_age_s } = &self.source else { env::panic_str("this board doesn't take pump.fun curve queries") };
         let bytes = hex::decode(&response).unwrap_or_else(|_| env::panic_str("response: hex"));
         let sigs: Vec<_> = signatures.iter().map(|s| wormhole::proxy_sig(s).unwrap_or_else(|e| env::panic_str(e))).collect();
         let set: Vec<[u8; 20]> = guardians.iter().map(|g| addr(g)).collect();
@@ -257,10 +279,84 @@ impl Board {
         out
     }
 
+    // ---------- Evm (Chainlink via Wormhole Queries) ----------
+
+    /// Anyone: post a Wormhole Query response (hex, as the query proxy returns
+    /// it) with its guardian signatures. Every per-chain query must be an
+    /// eth_call that reads, for each feed, latestRoundData() then decimals()
+    /// on a registered feed's proxy. Each feed's price: answer x 10^-decimals,
+    /// published at the block's time, uncertain by the feed's deviation
+    /// threshold. Returns what was stored (at least one, or it's refused).
+    pub fn push_evm(&mut self, response: String, signatures: Vec<String>) -> Vec<Price> {
+        let Source::Evm { guardians, feeds, max_block_age_s, .. } = &self.source else { env::panic_str("this board doesn't take Chainlink (eth_call) queries") };
+        let bytes = hex::decode(&response).unwrap_or_else(|_| env::panic_str("response: hex"));
+        let sigs: Vec<_> = signatures.iter().map(|s| wormhole::proxy_sig(s).unwrap_or_else(|e| env::panic_str(e))).collect();
+        let set: Vec<[u8; 20]> = guardians.iter().map(|g| addr(g)).collect();
+        let refuse = |e: &str| -> ! { env::panic_str(&format!("refused: {e}")) };
+        wormhole::verify_quorum(&wormhole::response_digest(&bytes), &sigs, &set).unwrap_or_else(|e| refuse(e));
+
+        let mut read: Vec<(String, Price, String)> = Vec::new();
+        for pc in wormhole::parse_response(&bytes).unwrap_or_else(|e| refuse(e)) {
+            let q = wormhole::parse_eth_call(&pc).unwrap_or_else(|e| refuse(e));
+            let time = (q.block_time_us / 1_000_000) as i64;
+            require!(time <= now() + SKEW_S, "refused: block from the future");
+            // WHY a bound on the block's age: the requester picks the block, so
+            // without one an old block could be posted as if it were fresh.
+            require!(now() - time <= *max_block_age_s as i64, format!("refused: block {} s old, at most {max_block_age_s}", now() - time));
+            require!(!q.calls.is_empty() && q.calls.len() % 2 == 0, "refused: each feed is read with latestRoundData() then decimals()");
+            for pair in q.calls.chunks(2) {
+                let (round, dec) = (&pair[0], &pair[1]);
+                require!(round.data == chainlink::LATEST_ROUND_DATA && dec.data == chainlink::DECIMALS && dec.to == round.to,
+                    "refused: each feed is read with latestRoundData() then decimals()");
+                let a = format!("0x{}", hex::encode(round.to));
+                let f = feeds.iter().find(|f| f.chain == q.chain && f.address == a)
+                    .unwrap_or_else(|| env::panic_str(&format!("refused: {a} on chain {} is not a registered feed", q.chain)));
+                let r = chainlink::decode_round(&round.result).unwrap_or_else(|e| refuse(e));
+                let d = chainlink::decode_decimals(&dec.result).unwrap_or_else(|e| refuse(e));
+                let updated = r.updated_at as i64;
+                require!(updated <= time, "refused: answer updated after its block");
+                require!(time - updated <= f.heartbeat_s as i64,
+                    format!("refused: {a} on chain {}: answer {} s old at the block, heartbeat {} s (feed stale or market closed)", q.chain, time - updated, f.heartbeat_s));
+                let conf = (r.answer as u128 * f.deviation_bps as u128 / 10_000) as u64;
+                // Published at the block's time, not updatedAt: at that block the
+                // feed vouched that the price is within its deviation of the answer.
+                let price = Price { price: I64(r.answer), conf: U64(conf), expo: -(d as i32), publish_time: time };
+                let src = format!(r#""chain":{},"address":"{a}","block":{},"round_id":"{}","updated_at":{}"#, q.chain, q.block_num, r.round_id, r.updated_at);
+                read.push((hex::encode(chainlink::price_id(f.chain, &round.to)), price, src));
+            }
+        }
+        let mut out = Vec::new();
+        for (feed, price, src) in read {
+            if self.store(&feed, price.clone()) {
+                env::log_str(&format!(r#"EVENT_JSON:{{"standard":"priceboard","version":"1","event":"price","data":{{"feed":"{feed}","price":"{}","expo":{},"publish_time":{},{src}}}}}"#,
+                    price.price.0, price.expo, price.publish_time));
+                out.push(price);
+            }
+        }
+        require!(!out.is_empty(), "refused: not newer than the board's prices");
+        out
+    }
+
+    /// Owner: the Chainlink feeds this board takes.
+    pub fn set_evm_feeds(&mut self, feeds: Vec<EvmFeed>) {
+        self.assert_owner();
+        let Source::Evm { feeds: f, .. } = &mut self.source else { env::panic_str("not an Evm board") };
+        *f = feeds;
+        check_source(&self.source);
+    }
+
+    /// A Chainlink feed's price id (hex): Wormhole chain id, 10 zero bytes, proxy address.
+    pub fn evm_price_id(&self, chain: u16, address: String) -> String {
+        hex::encode(chainlink::price_id(chain, &addr(&address)))
+    }
+
     /// Anyone: follow Wormhole's guardian rotation with the upgrade VAA the
     /// current set signed (hex). No owner involved.
     pub fn upgrade_guardians(&mut self, vaa: String) -> u32 {
-        let Source::Wormhole { guardian_set, guardians, .. } = &mut self.source else { env::panic_str("not a Wormhole board") };
+        let (guardian_set, guardians) = match &mut self.source {
+            Source::Wormhole { guardian_set, guardians, .. } | Source::Evm { guardian_set, guardians, .. } => (guardian_set, guardians),
+            Source::Attested { .. } => env::panic_str("not a Wormhole board"),
+        };
         let bytes = hex::decode(&vaa).unwrap_or_else(|_| env::panic_str("vaa: hex"));
         let set: Vec<[u8; 20]> = guardians.iter().map(|g| addr(g)).collect();
         let up = wormhole::guardian_upgrade(&bytes, *guardian_set, &set).unwrap_or_else(|e| env::panic_str(&format!("refused: {e}")));
@@ -289,25 +385,12 @@ impl Board {
         require!(self.owner.as_ref() == Some(&env::predecessor_account_id()), "owner only");
     }
 
-    /// Keep `p` if it's newer than what the board has, and move the average
-    /// toward it by the time elapsed (a full window or more: all the way).
+    /// Keep `p` if it's newer than what the board has.
     fn store(&mut self, feed: &str, p: Price) -> bool {
-        let ema = match self.prices.get(feed) {
-            Some(e) if p.publish_time <= e.spot.publish_time => return false,
-            Some(e) if e.ema.expo == p.expo => {
-                let w = ((p.publish_time - e.ema.publish_time).max(0) as u64).min(self.ema_window_s) as i128;
-                let win = self.ema_window_s as i128;
-                let mv = |old: i128, new: i128| old + (new - old) * w / win;
-                Price {
-                    price: I64(mv(e.ema.price.0 as i128, p.price.0 as i128) as i64),
-                    conf: U64(mv(e.ema.conf.0 as i128, p.conf.0 as i128) as u64),
-                    expo: p.expo,
-                    publish_time: p.publish_time,
-                }
-            }
-            _ => p.clone(),
-        };
-        self.prices.insert(feed.to_string(), Entry { spot: p, ema });
+        if self.prices.get(feed).is_some_and(|e| p.publish_time <= e.publish_time) {
+            return false;
+        }
+        self.prices.insert(feed.to_string(), p);
         true
     }
 }
@@ -322,7 +405,7 @@ pub fn attestation_bytes(feed: &[u8; 32], price: i64, expo: i32, publish_time: i
 }
 
 fn feed_id(feed: &str) -> [u8; 32] {
-    hex::decode(feed).ok().and_then(|b| b.try_into().ok()).unwrap_or_else(|| env::panic_str("feed: 32 bytes, hex (a Solana mint)"))
+    hex::decode(feed).ok().and_then(|b| b.try_into().ok()).unwrap_or_else(|| env::panic_str("feed: 32 bytes, hex (a Solana mint, or chainlink::price_id)"))
 }
 
 fn addr(g: &str) -> [u8; 20] {
@@ -345,11 +428,21 @@ fn check_source(s: &Source) {
             require!(attesters.len() <= 16 && attesters.iter().all(|a| a.curve_type() == CurveType::ED25519), "at most 16 attesters, Ed25519 keys");
             require!(*max_skew_s <= 600, "max_skew_s <= 600");
         }
+        Source::Evm { guardians, feeds, max_block_age_s, .. } => {
+            check_guardians(guardians);
+            require!(*max_block_age_s >= 1 && *max_block_age_s <= 600, "max_block_age_s: 1 s to 10 min");
+            require!(feeds.len() <= 32, "at most 32 feeds");
+            for (i, f) in feeds.iter().enumerate() {
+                require!(f.chain != 0 && f.chain != wormhole::SOLANA, "feed chain: an EVM chain's Wormhole id");
+                require!(f.address.len() == 42 && f.address.starts_with("0x") && f.address == f.address.to_lowercase(), "feed address: 0x + 40 lowercase hex");
+                addr(&f.address);
+                require!(f.deviation_bps >= 1 && f.deviation_bps <= 1_000, "deviation_bps: 1 to 1000");
+                require!(f.heartbeat_s >= 1 && f.heartbeat_s <= 7 * 86_400, "heartbeat_s: 1 s to 7 days");
+                require!(!feeds[..i].iter().any(|g| g.chain == f.chain && g.address == f.address), "feed listed twice");
+            }
+        }
         Source::Wormhole { guardians, quotes, quote_age_s, .. } => {
-            require!(!guardians.is_empty() && guardians.len() <= 64, "1 to 64 guardians");
-            guardians.iter().for_each(|g| {
-                addr(g);
-            });
+            check_guardians(guardians);
             require!(*quote_age_s >= 1 && *quote_age_s <= 3_600, "quote_age_s: 1 s to 1 h");
             for q in quotes {
                 feed_id(&q.mint);
@@ -357,6 +450,13 @@ fn check_source(s: &Source) {
             }
         }
     }
+}
+
+fn check_guardians(guardians: &[String]) {
+    require!(!guardians.is_empty() && guardians.len() <= 64, "1 to 64 guardians");
+    guardians.iter().for_each(|g| {
+        addr(g);
+    });
 }
 
 #[cfg(test)]

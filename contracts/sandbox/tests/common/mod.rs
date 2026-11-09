@@ -8,6 +8,17 @@ use serde_json::Value;
 /// anvil's first test account (a well-known key, funded on every anvil chain).
 pub const ANVIL_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
+/// A feed's backup on mock_pyth: the same asset from its second publisher, which
+/// mock_pyth serves under the id reversed (its `set_price` sets both).
+pub fn backup(contract: impl std::fmt::Display, price_id: &str) -> Value {
+    serde_json::json!({"kind": "other", "contract": contract.to_string(), "price_id": price_id.chars().rev().collect::<String>()})
+}
+
+/// A feed with no independent second publisher (NVDA), said plainly.
+pub fn single_source() -> Value {
+    serde_json::json!({"kind": "single_source"})
+}
+
 pub fn wasm(name: &str) -> Vec<u8> {
     let path = format!("{}/../target/near/{name}/{name}.wasm", env!("CARGO_MANIFEST_DIR"));
     std::fs::read(&path).unwrap_or_else(|_| panic!("missing {path}: run `make build` first"))
@@ -63,8 +74,9 @@ impl Drop for Fork {
 }
 
 impl Fork {
-    /// Fork `url` on `port`. None (test skipped) when Foundry isn't installed.
+    /// Fork `url` on `port` (ANVIL_PORT overrides it). None (test skipped) when Foundry isn't installed.
     pub async fn start(url: &str, port: u16) -> Option<Fork> {
+        let port = std::env::var("ANVIL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(port);
         if Command::new(foundry("anvil")).arg("--version").output().is_err() {
             println!("SKIPPED: install Foundry (anvil) to run fork tests");
             return None;
@@ -143,8 +155,9 @@ impl Drop for SolFork {
 }
 
 impl SolFork {
-    /// None (test skipped) when surfpool isn't installed.
+    /// On `port` and `port` + 1 (SURFPOOL_PORT overrides it). None (test skipped) when surfpool isn't installed.
     pub async fn start(port: u16) -> Option<SolFork> {
+        let port = std::env::var("SURFPOOL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(port);
         let bin = format!("{}/.local/bin/surfpool", std::env::var("HOME").unwrap_or_default());
         let bin = if std::path::Path::new(&bin).exists() { bin } else { "surfpool".to_string() };
         if Command::new(&bin).arg("--version").output().is_err() {

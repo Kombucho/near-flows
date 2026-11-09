@@ -346,7 +346,7 @@ async fn a_relay_vault_swaps_on_real_intents_with_intents_the_brain_built() -> a
 
     // 3. Allow A -> B with a floor of 0.95; the keeper asks for 1 wei, the brain signs for 95.
     x(&w.alice, &w.vault, json!({"intents_allow": {"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": (200 * ONE).to_string(), "floor_out": "95", "floor_per_in": "100"}}})).await?.into_result()?;
-    let r = x(&w.keeper, &w.vault, json!({"intents_sign_swap": {"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600}})).await?;
+    let r = x(&w.alice, &w.vault, json!({"intents_sign_swap": {"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600}})).await?;
     println!("GAS sign an intent: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
     assert!(r.is_success(), "{:?}", r.failures());
     let signed: Value = r.json()?;
@@ -370,28 +370,28 @@ async fn a_relay_vault_swaps_on_real_intents_with_intents_the_brain_built() -> a
     assert_eq!(balance(b, &w.vault).await?, 95 * ONE);
     // 6. Refusals: over the pair's limit, a pair nobody allowed, a stranger, a market floor (not ported).
     for (who, args) in [
-        (&w.keeper, json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (201 * ONE).to_string(), "min_out": "1", "valid_secs": 600})),
-        (&w.keeper, json!({"token_in": b.id(), "token_out": a.id(), "amount_in": "1", "min_out": "1", "valid_secs": 600})),
+        (&w.alice, json!({"token_in": a.id(), "token_out": b.id(), "amount_in": (201 * ONE).to_string(), "min_out": "1", "valid_secs": 600})),
+        (&w.alice, json!({"token_in": b.id(), "token_out": a.id(), "amount_in": "1", "min_out": "1", "valid_secs": 600})),
         (&w.mallory, json!({"token_in": a.id(), "token_out": b.id(), "amount_in": "1", "min_out": "1", "valid_secs": 600})),
     ] {
         let r = x(who, &w.vault, json!({"intents_sign_swap": args})).await?;
         assert!(r.is_failure() && !r.logs().iter().any(|l| l.contains("intents_signed")));
     }
-    // 7. A market floor: A and B both at $1 per the oracle (read by the brain), 1% slippage. The keeper
+    // 7. A market floor: A and B both at $1 per the oracle (read by the brain), 1% slippage. The owner
     //    asks for 1 wei, the hard floor says 95, the market says 99: the brain signs for 99.
     let pyth = w.worker.dev_deploy(&wasm("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
-    let ids = ["1111111111111111111111111111111111111111111111111111111111111111", "2222222222222222222222222222222222222222222222222222222222222222"];
+    let ids = ["111111111111111111111111111111111111111111111111111111111111111a", "222222222222222222222222222222222222222222222222222222222222222b"]; // not palindromes: the backup is the id reversed
     for id in ids {
-        w.alice.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": "100000000", "conf": "0", "expo": -8, "ema": "100000000", "age_s": 0}))
+        w.alice.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": "100000000", "conf": "0", "expo": -8, "backup": "100000000", "age_s": 0}))
             .transact().await?.into_result()?;
     }
     x(&w.alice, &w.vault, json!({"oracle_setup": {"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "a", "contract": pyth.id(), "price_id": ids[0], "backup": {"kind": "ema"}},
-        {"name": "b", "contract": pyth.id(), "price_id": ids[1], "backup": {"kind": "ema"}}]}}})).await?.into_result()?;
+        {"name": "a", "contract": pyth.id(), "price_id": ids[0], "backup": {"kind": "other", "contract": pyth.id(), "price_id": ids[0].chars().rev().collect::<String>()}},
+        {"name": "b", "contract": pyth.id(), "price_id": ids[1], "backup": {"kind": "other", "contract": pyth.id(), "price_id": ids[1].chars().rev().collect::<String>()}}]}}})).await?.into_result()?;
     x(&w.alice, &w.vault, json!({"intents_allow": {"pair": {"token_in": a.id(), "token_out": b.id(), "max_in": (200 * ONE).to_string(), "floor_out": "95", "floor_per_in": "100",
         "market": {"sell": "a", "buy": "b", "dec_in": 18, "dec_out": 18, "slippage_bps": 100}}}})).await?.into_result()?;
-    let r = x(&w.keeper, &w.vault, json!({"intents_sign_swap": {"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600}})).await?;
+    let r = x(&w.alice, &w.vault, json!({"intents_sign_swap": {"token_in": a.id(), "token_out": b.id(), "amount_in": (100 * ONE).to_string(), "min_out": "1", "valid_secs": 600}})).await?;
     println!("GAS sign an intent with a market floor: {:.1} Tgas", r.total_gas_burnt.as_gas() as f64 / 1e12);
     let signed: Value = r.json()?;
     assert!(signed["payload"]["message"].as_str().unwrap().contains(&format!(r#""nep141:{}":"{}""#, b.id(), 99 * ONE)), "{signed}");
