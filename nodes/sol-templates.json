@@ -1,5 +1,5 @@
 {
-  "about": "Solana nodes as templates the brain enforces for each relay vault (solguard::template, contracts/brain/src/sol.rs): every instruction is checked byte by byte before the vault signs. Accounts: 'vault' is the vault itself, 'vault_ata' its own token account for the mint at position mint_at (re-derived, so proceeds can't go anywhere else), 'new_signer' a fresh key (a new LP position), 'fixed' a pinned address, 'any' an account the program itself checks against the others (pool PDAs, bin arrays). Trailing extra accounts are never signers. needs_owner: the owner's own Solana wallet must co-sign (set with sol_owner_wallet). Values in {braces} are set per coin by the owner and filled in when the template is saved. vault_ata_of is the vault's own token account for a fixed mint the instruction doesn't name (wrapping SOL). Fields: 'at_least' is a fixed minimum per unit of an at_most amount; 'market' (of, num, den, market: {sell, buy, dec_in, dec_out, slippage_bps}) is at least the larger of that and the oracle's price for the amount less slippage: the brain reads the two feeds (oracle_setup) before it checks, and refuses without a fresh price. Only for coins with a feed (SOL, USDC...); a memecoin keeps its fixed at_least. Tested on a Solana mainnet fork (surfpool) on 2026-11-06: contracts/sandbox/tests/sol_fork.rs (pump.fun buy + sell), sol_fork_meteora.rs (DLMM open/add/claim/remove/close), sol_fork_pumpamm.rs (pump AMM buy + sell of a graduated coin, with wSOL wrap/unwrap), sol_fork_hylo.rs (Hylo through a relay vault: xSOL mint + redeem, hyUSD redeem, Earn pool deposit + withdraw; hyUSD mint signed but refused by Hylo while it has minting off). Hylo templates (hylo_*) are its router route_v2, one per pair, built by Hylo's Rust SDK 2.7.2 (scripts/hylo).",
+  "about": "Solana nodes as templates the brain enforces for each relay vault (solguard::template, contracts/brain/src/sol.rs): every instruction is checked byte by byte before the vault signs. Accounts: 'vault' is the vault itself, 'vault_ata' its own token account for the mint at position mint_at (re-derived, so proceeds can't go anywhere else), 'new_signer' a fresh key (a new LP position), 'fixed' a pinned address, 'any' an account the program itself checks against the others (pool PDAs, bin arrays). Trailing extra accounts are never signers. needs_owner: the owner's own Solana wallet must co-sign (set with sol_owner_wallet). Values in {braces} are set per coin by the owner and filled in when the template is saved. vault_ata_of is the vault's own token account for a fixed mint the instruction doesn't name (wrapping SOL). Fields: 'at_least' is a fixed minimum per unit of an at_most amount; 'market' (of, num, den, market: {sell, buy, dec_in, dec_out, slippage_bps}) is at least the larger of that and the oracle's price for the amount less slippage: the brain reads the two feeds (oracle_setup) before it checks, and refuses without a fresh price. Only for coins with a feed (SOL, USDC...); a memecoin keeps its fixed at_least. Tested on a Solana mainnet fork (surfpool) on 2026-11-06: contracts/sandbox/tests/sol_fork.rs (pump.fun buy + sell), sol_fork_meteora.rs (DLMM open/add/claim/remove/close), sol_fork_pumpamm.rs (pump AMM buy + sell of a graduated coin, with wSOL wrap/unwrap), sol_fork_hylo.rs (Hylo through a relay vault: xSOL mint + redeem, hyUSD redeem, Earn pool deposit + withdraw; hyUSD mint signed but refused by Hylo while it has minting off). Hylo templates (hylo_*) are its router route_v2, one per pair, built by Hylo's Rust SDK 2.7.2 (scripts/hylo). hop_fork.rs: deposits into the vault's own NEAR Intents deposit address (SOL and USDC, pinned by the owner).",
   "programs": {
     "meteora_dlmm": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
     "meteora_dlmm_event_authority": "D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6",
@@ -532,6 +532,32 @@
       ],
       "extra_accounts": 0,
       "spends": [{"field": 2, "key": "sol:HnnGv3HrSqjRpgdFmx7vQGjntNEoex1SU4e9Lxcxuihz"}]
+    },
+    {
+      "name": "intents_deposit_sol",
+      "about": "SOL from the vault to its own NEAR Intents deposit address (System transfer). The owner pins {deposit_address} once: the bridge API's deposit_address for the vault's account on sol:mainnet. The keeper only fills the lamports, at most {max_lamports}.",
+      "program": "11111111111111111111111111111111",
+      "prefix": "02000000",
+      "fields": [{"ty": "u64", "rule": "at_most", "max": "{max_lamports}"}],
+      "accounts": [
+        {"acc": "vault"},
+        {"acc": "fixed", "key": "{deposit_address}"}
+      ],
+      "spends": [{"field": 0, "key": "sol:SOL"}]
+    },
+    {
+      "name": "intents_deposit_usdc",
+      "about": "USDC from the vault's own token account to its NEAR Intents deposit address's USDC account (SPL TransferChecked, 6 decimals). The owner pins {deposit_usdc_account}: the deposit address's associated USDC account, which must exist (anyone can create it, ~0.002 SOL rent). At most {max_units}.",
+      "program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "prefix": "0c",
+      "fields": [{"ty": "u64", "rule": "at_most", "max": "{max_units}"}, {"ty": "u8", "rule": "fixed", "hex": "06"}],
+      "accounts": [
+        {"acc": "vault_ata_of", "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+        {"acc": "fixed", "key": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"},
+        {"acc": "fixed", "key": "{deposit_usdc_account}"},
+        {"acc": "vault"}
+      ],
+      "spends": [{"field": 0, "key": "sol:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"}]
     }
   ]
 }

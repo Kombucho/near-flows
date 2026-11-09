@@ -41,6 +41,9 @@ pub struct IntentsConfig {
     pub signer: AccountId,
     pub key: Option<String>,
     pub pairs: Vec<IntentsPair>,
+    /// Tokens that may leave for the vault's own address on another chain (hop.rs).
+    #[serde(default)]
+    pub hops: Vec<crate::hop::Hop>,
 }
 
 /// A swap being signed, carried through the reads.
@@ -55,7 +58,7 @@ pub struct Pending {
 
 impl Talk {
     pub(crate) fn intents_setup(&mut self, verifier: AccountId, signer: AccountId) -> Reply {
-        self.vs.intents = Some(IntentsConfig { verifier, signer: signer.clone(), key: None, pairs: vec![] });
+        self.vs.intents = Some(IntentsConfig { verifier, signer: signer.clone(), key: None, pairs: vec![], hops: vec![] });
         let args = near_sdk::serde_json::json!({"path": INTENTS_PATH, "predecessor": self.vault, "domain_id": EDDSA_DOMAIN}).to_string();
         self.read(vec![(signer, "derived_public_key".into(), args)], Read::IntentsKey, GAS_READ)
     }

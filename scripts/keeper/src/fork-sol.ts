@@ -14,14 +14,16 @@
 //   tsx src/fork-sol.ts dlmm-position <pool> <position>
 //   tsx src/fork-sol.ts dlmm-claim <vault> <pool> <position> [unwrap]
 //   tsx src/fork-sol.ts dlmm-close <vault> <pool> <position>
+//   tsx src/fork-sol.ts pay-sol <vault> <to> <lamports>                  a System transfer (Intents deposits)
+//   tsx src/fork-sol.ts pay-spl <vault> <to-token-account> <mint> <units> <decimals>   an SPL TransferChecked
 //   tsx src/fork-sol.ts send <message-b64> <vault-sig-hex> [signer-secret-b58 ...]
 //   tsx src/fork-sol.ts swap-key <message-b64> <from> <to>   a tampered copy (refusal tests)
 //   tsx src/fork-sol.ts balance <owner> <mint> | ata <owner> <mint> [program] | keypair | sign <message-b64> <secret> | decode <message-b64>
 //
 // SOLANA_RPC: the fork (default http://127.0.0.1:8899).
 
-import { Connection, Keypair, Message, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
-import { createCloseAccountInstruction, getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { Connection, Keypair, Message, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
+import { createCloseAccountInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import BN from "bn.js";
 import bs58 from "bs58";
 import { createRequire } from "node:module";
@@ -231,6 +233,16 @@ if (cmd === "pump-info") {
     bps: new BN(10_000), shouldClaimAndClose: true, skipUnwrapSOL: true });
   const ixs = await trim(txs.flatMap((t) => t.instructions));
   out({ message: await message(user, ixs), txs: txs.length, ixs: describe(ixs) });
+} else if (cmd === "pay-sol") {
+  const [from, to, lamports] = args;
+  const ix = SystemProgram.transfer({ fromPubkey: new PublicKey(from), toPubkey: new PublicKey(to), lamports: BigInt(lamports) });
+  out({ message: await message(new PublicKey(from), [ix]) });
+} else if (cmd === "pay-spl") {
+  // From the vault's own associated token account to a given token account, mint and decimals checked.
+  const [from, to, mint, units, decimals] = args;
+  const owner = new PublicKey(from), m = new PublicKey(mint);
+  const ix = createTransferCheckedInstruction(getAssociatedTokenAddressSync(m, owner, true), m, new PublicKey(to), owner, BigInt(units), Number(decimals));
+  out({ message: await message(owner, [ix]) });
 } else if (cmd === "swap-key") {
   // A tampered copy of a message: every use of one account key replaced by another (refusal tests).
   const [msg, from, to] = args;

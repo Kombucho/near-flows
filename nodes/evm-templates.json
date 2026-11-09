@@ -139,6 +139,38 @@
           ],
           "spends": null
         }
+      ],
+      "intents_deposits": [
+        {
+          "name": "intents_deposit_eth",
+          "to": "{deposit_address}",
+          "function": "",
+          "args": [],
+          "value": {
+            "rule": "at_most",
+            "max": "{max_wei}"
+          },
+          "spends": null
+        },
+        {
+          "name": "intents_deposit_usdc",
+          "to": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "function": "transfer(address,uint256)",
+          "args": [
+            {
+              "rule": "fixed",
+              "value": "{deposit_address}"
+            },
+            {
+              "rule": "at_most",
+              "max": "{max_units}"
+            }
+          ],
+          "spends": {
+            "arg": 1,
+            "token": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+          }
+        }
       ]
     },
     "robinhood": {
@@ -647,7 +679,40 @@
             "when": "now"
           }
         ]
-      }
+      },
+      "intents_deposits": [
+        {
+          "name": "intents_deposit_eth",
+          "to": "{deposit_address}",
+          "function": "",
+          "args": [],
+          "value": {
+            "rule": "at_most",
+            "max": "{max_wei}"
+          },
+          "spends": null
+        },
+        {
+          "name": "intents_deposit_usdg",
+          "to": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+          "function": "transfer(address,uint256)",
+          "args": [
+            {
+              "rule": "fixed",
+              "value": "{deposit_address}"
+            },
+            {
+              "rule": "at_most",
+              "max": "{max_units}"
+            }
+          ],
+          "spends": {
+            "arg": 1,
+            "token": "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+          }
+        }
+      ]
     }
-  }
+  },
+  "about_intents_deposits": "intents_deposits: money INTO the vault's own NEAR Intents account from its EVM address (relay vaults / the brain only). {deposit_address} is the vault's Intents deposit address on that chain, which the OWNER looks up once from the bridge API (POST https://bridge.chaindefuser.com/rpc, method deposit_address, params [{account_id: <vault>, chain: 'eth:8453' or 'eth:4663'}]; the same address on every EVM chain) and pins here: the keeper only fills the amount, capped. A plain transfer has function '' (value only, no calldata). Tested on a Base fork: contracts/sandbox/tests/hop_fork.rs."
 }

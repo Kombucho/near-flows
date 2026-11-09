@@ -9,6 +9,7 @@
     "jupiter": "tsx src/jupiter.ts",
     "intents": "tsx src/intents-solver.ts",
     "hidden": "tsx src/hidden-main.ts",
+    "hop": "tsx src/hop-main.ts",
     "pyth": "tsx src/pyth.ts",
     "jupiter-price": "tsx src/jupiter-price.ts",
     "wormhole-price": "tsx src/wormhole-price.ts",
