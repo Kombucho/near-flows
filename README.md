@@ -14,19 +14,19 @@ Setting it up with an AI coding agent (Claude Code, Codex...)? Point it at **[AG
 
 ## Live on testnet
 
-Deployed 2026-11-06 with `SUFFIX=fl06 scripts/deploy-relay-testnet.sh` (testnet NEAR only, no real value):
+Deployed 2026-11-09 with `SUFFIX=fl08 scripts/deploy-relay-testnet.sh` (testnet NEAR only, no real value):
 
 | | Account |
 |---|---|
-| Brain (all rules, shared) | [`nf-brain-fl06.testnet`](https://testnet.nearblocks.io/address/nf-brain-fl06.testnet) |
-| Relay factory (`FACTORY_ID`) | [`nf-relay-fl06.testnet`](https://testnet.nearblocks.io/address/nf-relay-fl06.testnet) |
-| Relay code (global, by hash) | `CsgeCTj9dVdTnWnHtTJpDa3dMYuejdy7WsM42smmwov2` |
-| Price board | [`nf-board-fl06.testnet`](https://testnet.nearblocks.io/address/nf-board-fl06.testnet) |
-| Demo vault | [`demo.nf-relay-fl06.testnet`](https://testnet.nearblocks.io/address/demo.nf-relay-fl06.testnet) |
+| Brain (all rules, shared) | [`nf-brain-fl08.testnet`](https://testnet.nearblocks.io/address/nf-brain-fl08.testnet) |
+| Relay factory (`FACTORY_ID`) | [`nf-relay-fl08.testnet`](https://testnet.nearblocks.io/address/nf-relay-fl08.testnet) |
+| Relay code (global, by hash) | `7ePdZqrLYWp68y4hDYFofu43hnX19HkGPxGWi2MTn1N4` |
+| Price board | [`nf-board-fl08.testnet`](https://testnet.nearblocks.io/address/nf-board-fl08.testnet) |
+| Demo vault | [`demo.nf-relay-fl08.testnet`](https://testnet.nearblocks.io/address/demo.nf-relay-fl08.testnet) |
 
-The demo vault's flow ran on the real testnet contracts through the keeper: 1 NEAR staked with LiNEAR (0.4378 LiNEAR), 2 NEAR wrapped and split into two Rhea swaps (about 1.24 testnet USDT, and 157,967.84 of a meme.cooking coin), and 0.5 NEAR waiting to DCA into LiNEAR every 10 minutes. The 0.1% protocol fee was taken on each step.
+The demo vault's flow ran on the real testnet contracts through the keeper: 1 NEAR staked with LiNEAR (0.4378 LiNEAR), 2 NEAR wrapped and split into two Rhea swaps (about 1.24 testnet USDT, and 157,867.9 of a meme.cooking coin), and a DCA into LiNEAR every 10 minutes (0.1 NEAR per run, 0.4 NEAR left). The 0.1% protocol fee was taken on each step.
 
-Prices: Pyth's NEAR receiver currently rejects Pyth's post-2026-08-26 updates ("Source for attestation is not allowed"), so prices on testnet come from the price board, attested by the keeper from Pyth's Hermes and Chainlink, with every source logged (keeper-vouched until the board reads Chainlink through Wormhole Queries). They are posted on demand, just before a step, and each feed is checked against a second, independent publisher (Chainlink on another chain); NVDA has no second source and its vault says so (no market floor on it, fixed floor and size caps apply). The testnet board deployed above predates this and needs a redeploy.
+Prices: Pyth's NEAR receiver currently rejects Pyth's post-2026-08-26 updates ("Source for attestation is not allowed"), so prices on testnet come from the price board, attested by the keeper from Pyth's Hermes and Chainlink, with every source logged (keeper-vouched until the board reads Chainlink through Wormhole Queries). They are posted on demand, just before a step, and each feed is checked against a second, independent publisher (Chainlink on another chain); NVDA has no second source and its vault says so (no market floor on it, fixed floor and size caps apply).
 
 ## Build and test
 

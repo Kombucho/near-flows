@@ -8,7 +8,7 @@ SUFFIX=abcde STEP=costs ./scripts/deploy-relay-testnet.sh
 SUFFIX=abcde ./scripts/deploy-relay-testnet.sh         # the real run (owner approves first)
 ```
 
-Stages, in order: `build accounts brain factory publish priceboard vault oracle flow check`. `oracle` also re-points an existing vault's feeds to the board: `SUFFIX=fl06 STEP=oracle ./scripts/deploy-relay-testnet.sh` (one owner call through `x`, ~9 Tgas). You can run one at a time (`STEP=vault`) or a comma list. Before a stage spends anything, it reads the paying account's balance and stops if it's short. The message it prints includes the exact `send-near` command to top the account up.
+Stages, in order: `build accounts brain factory publish priceboard vault oracle flow check`. `oracle` also re-points an existing vault's feeds to the board: `SUFFIX=fl08 STEP=oracle ./scripts/deploy-relay-testnet.sh` (one owner call through `x`, ~9 Tgas). You can run one at a time (`STEP=vault`) or a comma list. Before a stage spends anything, it reads the paying account's balance and stops if it's short. The message it prints includes the exact `send-near` command to top the account up.
 
 ## What it costs
 
