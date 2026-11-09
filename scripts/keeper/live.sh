@@ -6,8 +6,8 @@
 # Chainlink on Arbitrum; NEAR from Chainlink on Arbitrum, backed by Optimism; NVDA from
 # Chainlink, backed by its USDG pool's 30-min TWAP). The board keeps no average: nothing due, nothing posted, no gas.
 #
-#   SUFFIX=fl08 ./live.sh                  # testnet deployment fl08
-#   SUFFIX=fl08 TICK=30 ./live.sh
+#   SUFFIX=fl09 ./live.sh                  # testnet deployment fl09
+#   SUFFIX=fl09 TICK=30 ./live.sh
 #
 # Secrets come from the environment (or ../../.env): PYTH_API_KEY; the keeper's
 # NEAR key from ~/.near-credentials (or KEEPER_PRIVATE_KEY). Nothing is printed.
@@ -15,7 +15,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 [ -f ../../.env ] && { set -a; . ../../.env; set +a; }
-: "${SUFFIX:?set SUFFIX (the deployment, e.g. fl08)}"
+: "${SUFFIX:?set SUFFIX (the deployment, e.g. fl09)}"
 TICK="${TICK:-30}"
 export NEAR_NETWORK="${NEAR_NETWORK:-testnet}"
 export KEEPER_ACCOUNT_ID="${KEEPER_ACCOUNT_ID:-nf-keeper-$SUFFIX.testnet}"

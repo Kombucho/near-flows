@@ -9,7 +9,7 @@ primary_region = "ams"
   dockerfile = "Dockerfile"
 
 [env]
-  SUFFIX = "fl08"
+  SUFFIX = "fl09"
   NEAR_NETWORK = "testnet"
   TICK = "30"
 

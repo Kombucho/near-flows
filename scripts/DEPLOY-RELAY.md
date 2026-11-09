@@ -8,7 +8,7 @@ SUFFIX=abcde STEP=costs ./scripts/deploy-relay-testnet.sh
 SUFFIX=abcde ./scripts/deploy-relay-testnet.sh         # the real run (owner approves first)
 ```
 
-Stages, in order: `build accounts brain factory publish priceboard pythboard vault oracle flow check`. `PYTH_SOURCE=core` (the default) deploys `nf-pyth-$SUFFIX`, a second board that checks Pyth's signed updates on chain, and points the vault's ETH/USDC/SOL at it; `PYTH_SOURCE=attested` skips it and puts them on the keeper-attested `nf-board` (the old way). `oracle` also re-points an existing vault's feeds to the board: `SUFFIX=fl08 STEP=oracle ./scripts/deploy-relay-testnet.sh` (one owner call through `x`, ~9 Tgas). You can run one at a time (`STEP=vault`) or a comma list. Before a stage spends anything, it reads the paying account's balance and stops if it's short. The message it prints includes the exact `send-near` command to top the account up.
+Stages, in order: `build accounts brain factory publish priceboard pythboard vault oracle flow check`. `PYTH_SOURCE=core` (the default) deploys `nf-pyth-$SUFFIX`, a second board that checks Pyth's signed updates on chain, and points the vault's ETH/USDC/SOL at it; `PYTH_SOURCE=attested` skips it and puts them on the keeper-attested `nf-board` (the old way). `oracle` also re-points an existing vault's feeds to the board: `SUFFIX=fl09 STEP=oracle ./scripts/deploy-relay-testnet.sh` (one owner call through `x`, ~9 Tgas). You can run one at a time (`STEP=vault`) or a comma list. Before a stage spends anything, it reads the paying account's balance and stops if it's short. The message it prints includes the exact `send-near` command to top the account up.
 
 ## What it costs
 

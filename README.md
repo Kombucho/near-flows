@@ -14,21 +14,22 @@ Setting it up with an AI coding agent (Claude Code, Codex...)? Point it at **[AG
 
 ## Live on testnet
 
-Deployed 2026-11-09 with `SUFFIX=fl08 scripts/deploy-relay-testnet.sh` (testnet NEAR only, no real value):
+Deployed 2026-11-09 with `SUFFIX=fl09 scripts/deploy-relay-testnet.sh` (testnet NEAR only, no real value):
 
 | | Account |
 |---|---|
-| Brain (all rules, shared) | [`nf-brain-fl08.testnet`](https://testnet.nearblocks.io/address/nf-brain-fl08.testnet) |
-| Relay factory (`FACTORY_ID`) | [`nf-relay-fl08.testnet`](https://testnet.nearblocks.io/address/nf-relay-fl08.testnet) |
+| Brain (all rules, shared) | [`nf-brain-fl09.testnet`](https://testnet.nearblocks.io/address/nf-brain-fl09.testnet) |
+| Relay factory (`FACTORY_ID`) | [`nf-relay-fl09.testnet`](https://testnet.nearblocks.io/address/nf-relay-fl09.testnet) |
 | Relay code (global, by hash) | `7ePdZqrLYWp68y4hDYFofu43hnX19HkGPxGWi2MTn1N4` |
-| Price board | [`nf-board-fl08.testnet`](https://testnet.nearblocks.io/address/nf-board-fl08.testnet) |
-| Demo vault | [`demo.nf-relay-fl08.testnet`](https://testnet.nearblocks.io/address/demo.nf-relay-fl08.testnet) |
+| Price board, Pyth-checked (ETH, USDC, SOL) | [`nf-pyth-fl09.testnet`](https://testnet.nearblocks.io/address/nf-pyth-fl09.testnet) |
+| Price board, keeper-attested (Chainlink, NEAR, NVDA, backups) | [`nf-board-fl09.testnet`](https://testnet.nearblocks.io/address/nf-board-fl09.testnet) |
+| Demo vault | [`demo.nf-relay-fl09.testnet`](https://testnet.nearblocks.io/address/demo.nf-relay-fl09.testnet) |
 
-The demo vault's flow ran on the real testnet contracts through the keeper: 1 NEAR staked with LiNEAR (0.4378 LiNEAR), 2 NEAR wrapped and split into two Rhea swaps (about 1.24 testnet USDT, and 157,867.9 of a meme.cooking coin), and a DCA into LiNEAR every 10 minutes (0.1 NEAR per run, 0.4 NEAR left). The 0.1% protocol fee was taken on each step.
+The demo vault's flow ran on the real testnet contracts through the keeper: 1 NEAR staked with LiNEAR (0.4378 LiNEAR), 2 NEAR wrapped and split into two Rhea swaps (about 1.24 testnet USDT, and 157,768.1 of a meme.cooking coin), and a DCA into LiNEAR every 10 minutes (0.1 NEAR per run, 0.4 NEAR left). The 0.1% protocol fee was taken on each step.
 
 Prices: Pyth's NEAR receiver currently rejects Pyth's post-2026-08-26 updates ("Source for attestation is not allowed"), so vaults read our own price boards instead. What is checked on chain and what isn't:
 
-- **ETH, USDC, SOL (Pyth): verified on chain.** A `pyth_core` board takes Hermes's signed update as it is and checks it itself: 3 of the 5 signers in Pyth's own signer set (pinned at deploy, rotated only by that set's own upgrade VAAs), the Pythnet emitter, and each price's Merkle proof. The keeper only carries the bytes; it can't change a price, only fail to post one. (Deployed by `scripts/deploy-relay-testnet.sh` as `nf-pyth-<suffix>`; fl08 above predates it and still has these on the attested board.)
+- **ETH, USDC, SOL (Pyth): verified on chain.** A `pyth_core` board takes Hermes's signed update as it is and checks it itself: 3 of the 5 signers in Pyth's own signer set (pinned at deploy, rotated only by that set's own upgrade VAAs), the Pythnet emitter, and each price's Merkle proof. The keeper only carries the bytes; it can't change a price, only fail to post one. (Deployed by `scripts/deploy-relay-testnet.sh` as `nf-pyth-<suffix>`; on fl09 the keeper's posts of real Hermes updates passed the board's check before every step.)
 - **Their Chainlink backups, NEAR and its backup, NVDA: keeper-vouched.** The keeper reads Chainlink on Arbitrum, Optimism and Robinhood Chain and signs what it read, with every source logged for audit. They become verified on chain when the board reads Chainlink through Wormhole Queries (the Evm board, built, waiting for a query API key).
 
 They are posted on demand, just before a step, and each feed is checked against a second, independent publisher (Chainlink on another chain; for NVDA, the 30-min TWAP of its USDG pool on Robinhood Chain). LP shares (Smart LP, the ETHNVDA pair token) are priced from their two tokens' feeds and a per-share constant the owner pins, so their zaps have market floors too. With a verified Pyth price and a keeper-vouched backup, a dishonest keeper can make a vault refuse a trade, but can't move the price an ETH, USDC or SOL floor is computed from.
