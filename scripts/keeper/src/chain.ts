@@ -124,6 +124,16 @@ export class Chain {
     return this.callRaw(vault, "x", wrap(method, args), tgas * TGAS);
   }
 
+  /** A vault request whose events we need (step_remote): every receipt's logs, and the NEAR
+   *  transaction hash. Throws if the request failed (its final status; an inner receipt failing,
+   *  like a signer's, is answered by the brain's own events). */
+  async vaultCallLogs(vault: string, method: string, args: Record<string, unknown>, tgas = MAX_TGAS): Promise<{ hash: string; logs: string[] }> {
+    const r: any = await this.signer().callFunctionRaw({ contractId: vault, methodName: "x", args: wrap(method, args), gas: tgas * TGAS, waitUntil: "FINAL" });
+    const outcomes = [r.transaction_outcome, ...(r.receipts_outcome ?? [])];
+    if (r.status?.Failure) throw new Error(JSON.stringify(r.status.Failure).slice(0, 600));
+    return { hash: r.transaction?.hash ?? r.transaction_outcome?.id, logs: outcomes.flatMap((o: any) => o?.outcome?.logs ?? []) };
+  }
+
   /** Any call, as the keeper. */
   call(contractId: string, methodName: string, args: Record<string, unknown>, gas: bigint, deposit = 0n) {
     return this.signer().callFunction({ contractId, methodName, args, gas, deposit });

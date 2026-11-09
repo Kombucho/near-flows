@@ -131,6 +131,30 @@ OWNER_ACCOUNT_ID=$ME npm run hidden -- save $VAULT nodes.json --name "my plan"
 
 The plan goes to `~/.flows/hidden/$VAULT.json` and only fingerprints go on chain. The keeper reads that same file, so run it on the same machine (or copy the file to the keeper's machine yourself, never through the repo). Flows the keeper has no plan for are skipped, not failed.
 
+**5. Remote nodes: other chains and hops (optional).** A node whose action is an EVM or Solana template, or a hop out of the vault's NEAR Intents account, runs only with both `--send` and `--remote`, and only on chains you give an RPC for. Without them the keeper lists the node as due and sends nothing.
+
+```
+EVM_RPC_4663=<Robinhood Chain RPC> SOLANA_RPC=<Solana RPC> npm run flows -- --send --remote --once
+```
+
+For each due remote node the keeper builds what the brain leaves open, calls `step_remote`, broadcasts the signed transaction to that chain, reads what landed at the vault's own address there, and calls `remote_report` with that amount (the brain accepts it only between the signed minimum and the node's cap). The brain pins the EVM nonce (its `next_nonce`), the fee cap (the owner's) and the deadline; the keeper picks only the tip (capped by the owner's) and a gas limit (under `gas_cap`). It won't step an EVM node when the chain's nonce for the vault doesn't match the brain's, when the base fee is over the owner's cap, or when the vault's address can't pay the gas. A hop is sent by NEAR itself: the keeper records the vault's balance where the token lands, then watches it until the hop arrives (on mainnet it also asks the bridge's `withdrawal_status`) and reports the difference.
+
+| what | how the keeper builds it |
+|---|---|
+| hop (`{"chain": "hop"}`) | nothing to build: `step_remote {chain: "hop"}`, then it watches the landing balance |
+| `v4_swap_eth_nvda`, `v4_swap_nvda_eth` (Robinhood Chain) | quotes the Uniswap v4 pool, signs for at least the quote less `REMOTE_SLIPPAGE_BPS` (default 100) |
+| `pairtoken_ethnvda_zap_eth`, `smartlp_amzn_deposit_usdg`, `uniswap_swap_weth_usdc`, `aave_supply_usdc`, `intents_deposit_eth/usdc/usdg` | no quote: the template's floor or oracle market minimum, enforced by the brain |
+| `pump_buy`, `pump_sell` (Solana) | pump.fun's SDK, exactly the node's amount, `SOL_SLIPPAGE_PCT` (default 5) under the quote; waits while that's under the owner's floor |
+| `intents_deposit_sol`, `intents_deposit_usdc` (Solana) | a System / SPL transfer to the owner-pinned deposit address |
+
+Any other template is skipped with `no builder for <template>: run it by hand`.
+
+In-flight steps live in `~/.flows/keeper/<keeper>.json` (outside the repo; `FLOWS_KEEPER_DIR` moves it). A restarted keeper reads it and picks up where it was: it broadcasts what was signed but not sent, keeps watching what was sent, and never steps a node again. When it can't report (a transaction reverted or was refused, a Solana message expired unsent, a hop that hasn't arrived after `HOP_WAIT_MIN` minutes, default 180, or a pending step it holds no record of), it logs `the owner must settle it` and reports nothing. Only the owner may report a remote step failed (`remote_report` with no `out`). Look on the other chain first: if it landed, report what landed instead.
+
+Check: the dry run (no `--send`) lists the node as `due on another chain (<chain> <template>)`. After a `--send --remote` round the keeper logs `reported <amount> landed`, the brain's `get_vault` shows the node's `runs` up by one, and its `remote` list is empty.
+
+Still manual: templates with no builder (Meteora DLMM, Hylo, the pump AMM, approvals), a remote node's price trigger (the keeper tries the step and the brain refuses it until the oracle fires, costing gas each round), every settlement of a failed step, and posting the vault's Intents deposit address into its deposit templates.
+
 ## (b) Full self-host
 
 `scripts/deploy-relay-testnet.sh` deploys a brain, a relay factory, the relay code (published as a global contract), a price board and a demo vault, on **testnet**. Read `scripts/DEPLOY-RELAY.md` first. Pick a fresh `SUFFIX` (account names must be free).
@@ -185,4 +209,7 @@ Check: the narrative ends without a failure, and `contracts/target/demo.log` has
 - **`no key for <account>`** from the keeper: set `KEEPER_PRIVATE_KEY`, or save the key with near-cli to `~/.near-credentials/testnet/<account>.json` (`save-to-legacy-keychain`).
 - **The keeper says `0 of N vault(s) name this keeper`**: `KEEPER_ACCOUNT_ID` isn't the vault's keeper. Check the brain's `get_vault` and fix it with `set_keeper`.
 - **`a step is running`**: a step is in flight, or one ran out of gas halfway. Wait for it to finish; the owner can clear a stuck one with `unstick`.
+- **A remote node is `due on another chain ... run with --send --remote`** or `set EVM_RPC_<id> / SOLANA_RPC`: the keeper runs remote nodes only with both flags and that chain's RPC.
+- **`the vault's next nonce is N on NEAR but M on chain`**: something else used the vault's EVM address, or a signed transaction was never broadcast. The owner lines them up (a signed one-off at the right nonce); the keeper won't step until they match.
+- **`the owner must settle it`**: a remote step the keeper can't report (reverted, refused, expired, not landed in time, or not its own). Look at the vault's address on that chain, then as the owner `remote_report` what landed, or no `out` if nothing did.
 - **cargo-near wants an update**: the message is harmless; the build used the installed version.

@@ -3,6 +3,7 @@
 //   npm run flows                 dry run: prints what is due, sends nothing
 //   npm run flows -- --send       runs due steps (as KEEPER_ACCOUNT_ID)
 //   npm run flows -- --send --once
+//   npm run flows -- --send --remote   also runs remote nodes: other chains and hops (below)
 //
 // Vaults are relay vaults: it finds them through the relay factory, reads each
 // one's record from the shared brain (one `get_vault` view: keeper, busy, flows),
@@ -11,9 +12,20 @@
 // {"step_hidden": ...}, from the plan its owner shared in ~/.flows/hidden/<vault>.json
 // (flows it has no plan for are skipped: the keeper can't see them). Price
 // triggers are checked first with a free view, so the keeper doesn't pay for
-// steps that would fail. Remote nodes (other chains) are only reported here:
-// their transaction is built by the chain's own runner (EVM nonce and fees, a
-// Solana message), which then calls step_remote and remote_report.
+// steps that would fail.
+//
+// Remote nodes (--send --remote, remote-run.ts): a node whose action is a transaction
+// on another chain (an EVM or Solana template) or a hop out of the vault's Intents
+// account. The keeper builds what the brain leaves open (a quoted minimum, a Solana
+// message from the protocol's SDK; the nonce, fee cap and deadline are the brain's),
+// calls step_remote, broadcasts the signed transaction to that chain's RPC, measures
+// what landed at the vault's own address there and calls remote_report with it. A hop
+// is sent by NEAR itself; the keeper watches the vault's balance where it lands.
+// Without --remote, or without the chain's RPC (EVM_RPC_<chainid>, SOLANA_RPC), they
+// are only listed: nothing leaves NEAR. A template with no builder is skipped, never
+// guessed. A step that can't land, or can't be seen to, is left to the owner (only
+// the owner may report one failed). In-flight steps are kept in
+// ~/.flows/keeper/<keeper>.json (FLOWS_KEEPER_DIR), so a restart resumes them.
 // The keeper can't do anything else to a vault: no withdrawing, no editing.
 // Best practice: give it a key that may only call `x` on the vaults.
 // A vault paying this keeper (keeper_fee > 0) whose free NEAR can't cover the
@@ -31,12 +43,16 @@
 //
 // Environment: FACTORY_ID (the relay factory), KEEPER_ACCOUNT_ID, NEAR_NETWORK (default testnet),
 // NEAR_RPC (default FastNEAR testnet), KEEPER_PRIVATE_KEY (or a near-cli key file), PYTH_API_KEY.
+// Remote nodes: EVM_RPC_<chainid>, SOLANA_RPC, FLOWS_KEEPER_DIR, REMOTE_SLIPPAGE_BPS (100),
+// SOL_SLIPPAGE_PCT (5), REMOTE_WAIT_MIN (30), HOP_WAIT_MIN (180), HOP_BRIDGE (1 on mainnet), V4_QUOTER_<chainid>.
 
 import { execFile } from "node:child_process";
 import { parseArgs, promisify } from "node:util";
 import { Chain, loadKey } from "./chain.ts";
 import { canPayKeeper, due, fired, keeperUnpaid, priceOf, runnable, type Flow, type FlowNode, type VaultState } from "./flows.ts";
 import { loadStore, unlock, type Node } from "./hidden.ts";
+import { evmPlan, solPlan, statePath, type Remote } from "./remote.ts";
+import { optsFromEnv, RemoteRunner, type RemoteNode, type VaultFull } from "./remote-run.ts";
 
 const { values: opt } = parseArgs({
   options: {
@@ -44,6 +60,7 @@ const { values: opt } = parseArgs({
     send: { type: "boolean", default: false },
     once: { type: "boolean", default: false },
     board: { type: "string" }, // post this board's prices on demand
+    remote: { type: "boolean", default: false }, // with --send: also run remote nodes (other chains, hops)
   },
 });
 
@@ -55,6 +72,17 @@ if (!factory || !keeperId) throw new Error("set FACTORY_ID and KEEPER_ACCOUNT_ID
 const chain = new Chain(rpc, factory, keeperId, opt.send ? loadKey(network, keeperId) : undefined);
 const brain = await chain.view<string>(factory, "get_brain");
 const log = (s: string) => console.log(`${new Date().toISOString().slice(11, 19)} ${s}`);
+// Remote nodes leave NEAR only with both flags: --send (sign) and --remote (other chains).
+const runner = opt.send && opt.remote ? new RemoteRunner(chain, brain, optsFromEnv(statePath(keeperId), log)) : null;
+if (runner?.inflight.length) log(`resuming ${runner.inflight.length} remote step(s) in flight (${statePath(keeperId)})`);
+
+/** One line on what a remote node needs, for the dry run (no network). */
+function remoteNote(r: Remote, state: VaultFull): string {
+  const c = r.call;
+  if (c.chain === "hop") return `a hop to ${r.out}`;
+  const p = c.chain === "evm" ? evmPlan(state.evm, c) : solPlan(state.sol, c, 0n);
+  return "skip" in p ? `${c.template}: ${p.skip}` : `${c.chain} ${c.template}`;
+}
 
 // Feeds posted for a vault this round (one post per vault per round is enough).
 let fresh = new Set<string>();
@@ -90,8 +118,17 @@ async function round() {
   const now = BigInt(Date.now()) * 1_000_000n;
   let mine = 0;
   let ran = 0;
+  const states = new Map<string, (VaultState & VaultFull) | null>();
+  for (const vault of vaults) states.set(vault, await chain.brainView<(VaultState & VaultFull) | null>(brain, vault, "get_vault"));
+  if (runner) {
+    // In-flight remote steps first: a report frees its flow and feeds the next node.
+    const ours = new Map([...states].filter(([, s]) => s?.keeper === keeperId));
+    const before = runner.inflight.length;
+    await runner.follow(ours);
+    if (runner.inflight.length !== before) for (const v of ours.keys()) states.set(v, await chain.brainView(brain, v, "get_vault"));
+  }
   for (const vault of vaults) {
-    const state = await chain.brainView<VaultState | null>(brain, vault, "get_vault");
+    const state = states.get(vault) ?? null;
     if (state?.keeper === keeperId) mine++;
     const flows: [number, Flow][] = [];
     const plans = loadStore(vault);
@@ -109,16 +146,38 @@ async function round() {
     // The owner's price for this keeper's runs (paid by the vault if a step works).
     // A vault that can't pay it gets no free work: the brain would refuse the step.
     const fee = BigInt(state?.keeper_fee ?? "0");
-    if (fee > 0n && todo.some((d) => !d.remote)) {
+    if (fee > 0n && todo.length > 0) {
       const free = await chain.freeNear(brain, vault).catch(() => null);
       if (free !== null && !canPayKeeper(fee, free)) {
         log(keeperUnpaid(vault, fee, free));
         continue;
       }
     }
+    const byId = new Map(flows);
     for (const d of todo) {
       if (d.remote) {
-        log(`${vault} flow ${d.flow} node ${d.node} "${d.label}" is due on another chain: its runner sends step_remote`);
+        const f = byId.get(d.flow)!;
+        const n = f.nodes[d.node] as unknown as RemoteNode;
+        const r = n.action.remote!;
+        const what = `${vault} flow ${d.flow} node ${d.node} "${d.label}" is due on another chain (${remoteNote(r, state!)})`;
+        if (!runner) {
+          log(`${what}: run with --send --remote to run it`);
+          continue;
+        }
+        const need = runner.needs(r, state!);
+        if (need) {
+          log(`${what}: ${need}; not stepped`);
+          continue;
+        }
+        log(what);
+        await freshen(vault);
+        const h = hidden.get(d.flow);
+        const stepped = await runner.step(vault, state!, d.flow, d.node, n, f.ledger.nodes[d.node].inbox, h ? { reveal: h.nodes[d.node], salt: h.salts[d.node] } : undefined)
+          .catch((e) => (log(`  remote step failed: ${(e as Error).message.slice(0, 200)}`), false));
+        if (stepped) {
+          ran++;
+          break; // one step per vault per round
+        }
         continue;
       }
       if (d.price) {

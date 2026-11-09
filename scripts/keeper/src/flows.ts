@@ -29,7 +29,8 @@ export type Flow = { name: string; nodes: FlowNode[]; inputs?: string[]; hidden?
 /** A relay vault's record in the brain (get_vault): flow ids are positions, deleted flows are null. */
 export type VaultState = { owner: string; keeper: string | null; busy: unknown | null; flows: (Flow | null)[]; keeper_fee?: string };
 
-export type Due = { flow: number; node: number; label: string; remote?: boolean; price?: { source: PriceSource; below?: bigint; above?: bigint } };
+/** `remote`: runs on another chain (step_remote); `chain` says where: an EVM or Solana template, or a hop out of Intents. */
+export type Due = { flow: number; node: number; label: string; remote?: boolean; chain?: "evm" | "sol" | "hop"; price?: { source: PriceSource; below?: bigint; above?: bigint } };
 
 /** The flows a keeper may run in a vault: only if it is the vault's keeper and no step is running. */
 export function runnable(v: VaultState | null, keeperId: string): [number, Flow][] {
@@ -49,7 +50,8 @@ export function due(flows: [number, Flow][], nowNs: bigint): Due[] {
       if (!collector && BigInt(s.inbox) === 0n) return; // nothing to spend
       const last = BigInt(s.last_run_ns);
       const w = n.when;
-      const base: Due = n.action.remote ? { flow: id, node: i, label: n.action.label, remote: true } : { flow: id, node: i, label: n.action.label };
+      const chain = (n.action.remote as { call?: { chain?: Due["chain"] } } | null | undefined)?.call?.chain;
+      const base: Due = n.action.remote ? { flow: id, node: i, label: n.action.label, remote: true, ...(chain ? { chain } : {}) } : { flow: id, node: i, label: n.action.label };
       switch (w.when) {
         case "manual":
           return; // only the owner runs these

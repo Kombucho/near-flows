@@ -20,8 +20,12 @@ them: no hop can pay anyone else.
   (`sol_sign_tx`, `evm_call`): owner only. As a remote flow node after a hop node: the keeper's,
   spending exactly what the hop landed (Solana `amount_field: 0`, EVM `amount_leaf: 0`, at the
   vault's next EVM nonce and the owner's fee cap).
-- **Keeper side**: `scripts/keeper/src/hop.ts` and `npm run hop` (read-only lookups, dry-run
-  quotes, withdrawal status). It never signs or sends anything.
+- **Keeper side**: the flow keeper runs hop nodes and the deposit templates after them by itself
+  (`npm run flows -- --send --remote`, AGENTS.md path (a) step 5): it steps the hop, watches the
+  vault's own address where the token lands (`SOLANA_RPC`, `EVM_RPC_<chainid>`; on mainnet also the
+  bridge's `withdrawal_status`), reports the difference, then builds, broadcasts and reports the
+  deposit back. `npm run hop` stays the read-only helper (lookups, dry-run quotes, withdrawal
+  status): it never signs or sends anything.
 
 ## The formats, and where they come from (checked 2026-11-06)
 
@@ -80,16 +84,18 @@ deploy one, or the owner self-hosts it (path (b) of AGENTS.md, pointed at mainne
    `set_limit {token: "intents:sol.omft.near", ...}`. Then either a flow node
    `{input: "intents:sol.omft.near", action: {calls: [], out: null, remote: {call: {chain: "hop"}, out: "sol:SOL"}}}`
    run with `step_remote {args: {chain: "hop"}}`, or (owner) a one-off `intents_hop_out {token, amount}`.
-   Follow it: `npm run hop -- status <near tx hash> sol.omft.near --wait`, then (flow node)
-   `remote_report {out: <amount - 14000>}`.
+   As a flow node the keeper does the rest (`--send --remote` with `SOLANA_RPC`): it records the
+   vault's SOL balance before the hop, waits until at least `amount - max_fee` has arrived (and the
+   bridge doesn't call the withdrawal failed), and reports what arrived. By hand:
+   `npm run hop -- status <near tx hash> sol.omft.near --wait`, then `remote_report {out: <amount - 14000>}`.
 5. **Use it on Solana.** The SOL is at the vault's own Solana address: pump.fun, Meteora, Hylo,
    Jupiter nodes, as on the forks.
 6. **Hop back in.** `npm run hop -- deposit-address <vault> sol:mainnet`; the owner pins it:
-   `sol_template` `intents_deposit_sol {deposit_address, max_lamports}`. The keeper builds a
-   System transfer (`SOLANA_RPC=<mainnet rpc> npx tsx src/fork-sol.ts pay-sol <vault sol> <deposit> <lamports>`)
-   and runs it as the flow node after the hop (`step_remote {args: {chain: "sol", message}}`; one-off,
-   the owner's `sol_sign_tx`), broadcasts (`fork-sol.ts send`), reports `remote_report {out: "0"}`, and
-   checks `npm run hop -- deposits <vault> sol:mainnet`.
+   `sol_template` `intents_deposit_sol {deposit_address, max_lamports}`. As the flow node after the
+   hop, the keeper builds the System transfer of exactly what landed, steps it
+   (`step_remote {args: {chain: "sol", message}}`), broadcasts it and reports `out: "0"` once it
+   confirmed. By hand: `fork-sol.ts pay-sol <vault sol> <deposit> <lamports>`, then `fork-sol.ts send`;
+   one-off, the owner's `sol_sign_tx`. Check `npm run hop -- deposits <vault> sol:mainnet`.
    USDC needs the deposit address's USDC account to exist first (a fresh deposit address has none;
    anyone can create it, ~0.002 SOL rent, not from the vault: its templates can't pay others' rent).
 7. **Out of Intents.** Swap back to wNEAR (step 3 reversed) and `intents_withdraw` (always to the vault).
@@ -121,4 +127,7 @@ once (the relay publish) and ~10 NEAR staked and refundable.
   its fee), report, then a template step there sending exactly what landed to the pinned deposit
   address. Plus the owner's one-off deposits and every other recipient refused. Shared Intents
   setup: `contracts/sandbox/tests/hopw/mod.rs`.
-- `scripts/keeper/src/hop.test.ts`: the keeper's pure parts (`npm test`).
+- `contracts/sandbox/tests/keeper_remote_fork.rs`: the real keeper process (`flows-main.ts --send
+  --remote`) runs a hop to Solana, the pump.fun buy after it and a Uniswap v4 swap on Robinhood
+  Chain by itself (anvil 9820, surfpool 9830/9831), and resumes the hop after a restart.
+- `scripts/keeper/src/hop.test.ts`, `remote.test.ts`: the keeper's pure parts (`npm test`).

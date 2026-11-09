@@ -22,15 +22,16 @@
 //
 // SOLANA_RPC: the fork (default http://127.0.0.1:8899).
 
-import { Connection, Keypair, Message, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
-import { createCloseAccountInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { Connection, Keypair, Message, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
+import { createCloseAccountInstruction, getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import * as build from "./sol-build.ts";
 import BN from "bn.js";
 import bs58 from "bs58";
 import { createRequire } from "node:module";
 // pump.fun's SDK through its CommonJS build: its ESM build imports `BN` from Anchor's ESM, which doesn't export it.
 const require = createRequire(import.meta.url);
 const pump = require("@pump-fun/pump-sdk");
-const { OnlinePumpSdk, PUMP_SDK, getBuyTokenAmountFromSolAmount, getSellSolAmountFromTokenAmount } = pump;
+const { OnlinePumpSdk } = pump;
 // The pump AMM (graduated coins): its own SDK (pump-sdk bundles it but does not export it).
 const pumpAmm = require("@pump-fun/pump-swap-sdk");
 const { OnlinePumpAmmSdk, PUMP_AMM_SDK } = pumpAmm;
@@ -40,31 +41,8 @@ const conn = new Connection(rpc, "confirmed");
 const [cmd, ...args] = process.argv.slice(2);
 const out = (x: unknown) => console.log(JSON.stringify(x));
 
-/** A legacy message (no lookup tables), the vault paying, as base64. `cosigners` sign without
- * being named by any instruction (the owner approving an LP open): web3.js refuses such
- * "unknown signers", so they're spliced in as read-only signers after the compiled ones. */
-async function message(payer: PublicKey, ixs: TransactionInstruction[], cosigners: PublicKey[] = []): Promise<string> {
-  const tx = new Transaction();
-  tx.add(...ixs);
-  tx.feePayer = payer;
-  tx.recentBlockhash = (await conn.getLatestBlockhash()).blockhash;
-  const m = tx.compileMessage();
-  const add = cosigners.filter((c) => !m.accountKeys.some((k) => k.equals(c)));
-  if (add.length === 0) return m.serialize().toString("base64");
-  const at = m.header.numRequiredSignatures;
-  const shift = (i: number) => (i >= at ? i + add.length : i);
-  const spliced = new Message({
-    header: {
-      numRequiredSignatures: at + add.length,
-      numReadonlySignedAccounts: m.header.numReadonlySignedAccounts + add.length,
-      numReadonlyUnsignedAccounts: m.header.numReadonlyUnsignedAccounts,
-    },
-    accountKeys: [...m.accountKeys.slice(0, at), ...add, ...m.accountKeys.slice(at)].map((k) => k.toBase58()),
-    recentBlockhash: m.recentBlockhash,
-    instructions: m.instructions.map((ix) => ({ programIdIndex: shift(ix.programIdIndex), accounts: ix.accounts.map(shift), data: ix.data })),
-  });
-  return spliced.serialize().toString("base64");
-}
+/** A legacy message, the vault paying, as base64 (sol-build.ts). */
+const message = (payer: PublicKey, ixs: TransactionInstruction[], cosigners: PublicKey[] = []) => build.message(conn, payer, ixs, cosigners);
 
 // Meteora's SDK, CommonJS build for the same reason as pump.fun's. No SOL wrapping: the vault
 // deposits one-sided in an SPL token, and an unwrap would close the account its fees land in.
@@ -83,7 +61,7 @@ async function trim(ixs: TransactionInstruction[]): Promise<TransactionInstructi
   return kept;
 }
 
-const describe = (ixs: TransactionInstruction[]) => ixs.map((i) => ({ program: i.programId.toBase58(), accounts: i.keys.length, data: i.data.toString("hex").slice(0, 16) }));
+const describe = build.describe;
 
 if (cmd === "pump-info") {
   const sdk = new OnlinePumpSdk(conn);
@@ -101,36 +79,12 @@ if (cmd === "pump-info") {
   // Default: buy what `lamports` quotes, paying up to slippage% more. "exact": pay at most
   // `lamports` exactly (a flow node must spend exactly its input) and take slippage% fewer coins.
   const [vault, mint, lamports, slippage, mode] = args;
-  const user = new PublicKey(vault), coin = new PublicKey(mint);
-  const sdk = new OnlinePumpSdk(conn);
-  const global = await sdk.fetchGlobal();
-  const feeConfig = await sdk.fetchFeeConfig();
-  const tokenProgram = (await conn.getAccountInfo(coin))!.owner;
-  const state = await sdk.fetchBuyState(coin, user, tokenProgram);
-  const mintInfo = await conn.getTokenSupply(coin);
-  const quoted: BN = getBuyTokenAmountFromSolAmount({ global, feeConfig, mintSupply: new BN(mintInfo.value.amount), bondingCurve: state.bondingCurve, amount: new BN(lamports) } as any);
-  const exact = mode === "exact";
-  const amount = exact ? quoted.muln(100 - Number(slippage)).divn(100) : quoted;
-  const ixs = await PUMP_SDK.buyInstructions({ global, bondingCurveAccountInfo: state.bondingCurveAccountInfo, bondingCurve: state.bondingCurve,
-    associatedUserAccountInfo: state.associatedUserAccountInfo, mint: coin, user, amount, solAmount: new BN(lamports), slippage: exact ? 0 : Number(slippage), tokenProgram });
-  out({ message: await message(user, ixs), tokens: amount.toString(), tokenProgram: tokenProgram.toBase58(), ata: getAssociatedTokenAddressSync(coin, user, true, tokenProgram).toBase58(), ixs: describe(ixs) });
+  out(await build.pumpBuy(conn, vault, mint, lamports, Number(slippage), mode === "exact"));
 } else if (cmd === "pump-sell") {
   // Sell `amount` coin units back to the curve; SOL out lands in the vault itself.
   const [vault, mint, amount, slippage] = args;
-  const user = new PublicKey(vault), coin = new PublicKey(mint);
-  const sdk = new OnlinePumpSdk(conn);
-  const global = await sdk.fetchGlobal();
-  const feeConfig = await sdk.fetchFeeConfig();
-  const tokenProgram = (await conn.getAccountInfo(coin))!.owner;
-  const state = await sdk.fetchSellState(coin, user, tokenProgram);
-  const mintInfo = await conn.getTokenSupply(coin);
-  const sol = getSellSolAmountFromTokenAmount({ global, feeConfig, mintSupply: new BN(mintInfo.value.amount), bondingCurve: state.bondingCurve, amount: new BN(amount) } as any);
-  const ixs = await PUMP_SDK.sellInstructions({ global, bondingCurveAccountInfo: state.bondingCurveAccountInfo, bondingCurve: state.bondingCurve,
-    mint: coin, user, amount: new BN(amount), solAmount: sol, slippage: Number(slippage), tokenProgram,
-    // The SDK's buy reads this from the curve, its sell defaults to false: a "mayhem mode" coin's
-    // fees go to other recipients, and the program refuses the wrong one (NotAuthorized).
-    mayhemMode: state.bondingCurve.isMayhemMode });
-  out({ message: await message(user, ixs), lamports: sol.toString(), tokenProgram: tokenProgram.toBase58(), ixs: describe(ixs) });
+  const { minLamports: _, ...res } = await build.pumpSell(conn, vault, mint, amount, Number(slippage));
+  out(res);
 } else if (cmd === "amm-info") {
   // A graduated coin's canonical pump AMM pool: its quote token and reserves.
   const amm = new OnlinePumpAmmSdk(conn);
@@ -235,14 +189,11 @@ if (cmd === "pump-info") {
   out({ message: await message(user, ixs), txs: txs.length, ixs: describe(ixs) });
 } else if (cmd === "pay-sol") {
   const [from, to, lamports] = args;
-  const ix = SystemProgram.transfer({ fromPubkey: new PublicKey(from), toPubkey: new PublicKey(to), lamports: BigInt(lamports) });
-  out({ message: await message(new PublicKey(from), [ix]) });
+  out(await build.paySol(conn, from, to, lamports));
 } else if (cmd === "pay-spl") {
   // From the vault's own associated token account to a given token account, mint and decimals checked.
   const [from, to, mint, units, decimals] = args;
-  const owner = new PublicKey(from), m = new PublicKey(mint);
-  const ix = createTransferCheckedInstruction(getAssociatedTokenAddressSync(m, owner, true), m, new PublicKey(to), owner, BigInt(units), Number(decimals));
-  out({ message: await message(owner, [ix]) });
+  out(await build.paySpl(conn, from, to, mint, units, Number(decimals)));
 } else if (cmd === "swap-key") {
   // A tampered copy of a message: every use of one account key replaced by another (refusal tests).
   const [msg, from, to] = args;
