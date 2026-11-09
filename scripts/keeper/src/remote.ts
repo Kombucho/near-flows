@@ -27,6 +27,7 @@ export type EvmArg =
   | { rule: "at_most"; max: string }
   | { rule: "floor"; of: number; num: string; den: string }
   | { rule: "market"; of: number; num: string; den: string; market: unknown }
+  | { rule: "share"; of: number; num: string; den: string; market: unknown; share: { name: string; a: string; b: string; k: string } }
   | { rule: "same"; of: number }
   | { rule: "bytes"; hex: string }
   | { rule: "encoded"; types: string; args: EvmArg[] }
@@ -91,7 +92,9 @@ export function evmLeaves(t: EvmTemplate): EvmArg[] {
  *  minimum to the Uniswap v4 quoter's answer less slippage; without one the brain's floor
  *  or market minimum is the minimum. Every other number is the brain's. */
 export const EVM_BUILDERS: Record<string, { gas: number; quote?: "v4" }> = {
-  // Robinhood Chain: Uniswap v4 ETH <-> NVDA, the ETHNVDA basket zap, Smart LP.
+  // Robinhood Chain: Uniswap v4 ETH <-> NVDA (the quote less slippage, raised by the brain to its market
+  // floor from the ETH and NVDA feeds), the ETHNVDA basket zap and Smart LP (the brain's share floor:
+  // the share's value from its tokens' feeds and the owner's pinned k).
   v4_swap_eth_nvda: { gas: 1_000_000, quote: "v4" },
   v4_swap_nvda_eth: { gas: 1_000_000, quote: "v4" },
   pairtoken_ethnvda_zap_eth: { gas: 1_000_000 },

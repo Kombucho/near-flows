@@ -4,7 +4,7 @@
 # just before a vault's step goes, fresh prices for the feeds that vault reads and
 # their backups from a different publisher (ETH/USDC/SOL from Pyth's Hermes, backed by
 # Chainlink on Arbitrum; NEAR from Chainlink on Arbitrum, backed by Optimism; NVDA from
-# Chainlink, single-source). The board keeps no average: nothing due, nothing posted, no gas.
+# Chainlink, backed by its USDG pool's 30-min TWAP). The board keeps no average: nothing due, nothing posted, no gas.
 #
 #   SUFFIX=fl08 ./live.sh                  # testnet deployment fl08
 #   SUFFIX=fl08 TICK=30 ./live.sh

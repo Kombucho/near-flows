@@ -44,9 +44,9 @@ The vault reads Pyth's three (`eth usdc sol`) from `nf-pyth-$SUFFIX`, a **pyth_c
 | sol | Pyth SOL/USD (Hermes's signed update, checked on chain) | Chainlink SOL/USD on Arbitrum (`sol-arb`) |
 | usdc | Pyth USDC/USD (Hermes's signed update, checked on chain) | Chainlink USDC/USD on Arbitrum (`usdc-arb`) |
 | near | Chainlink NEAR/USD on Arbitrum | Chainlink NEAR/USD on Optimism (`near-op`): a separate proxy, aggregator and update stream |
-| nvda | Chainlink RHNVDA/USD on Robinhood Chain | **none: `single_source`** |
+| nvda | Chainlink RHNVDA/USD on Robinhood Chain | the 30-min TWAP of the NVDA/USDG 0.05% Uniswap v3 pool on Robinhood Chain (`nvda-twap`) |
 
-**NVDA is single-source, and the vault says so.** No second independent NVDA token price exists on a chain we can read (Chainlink's NVDA/USD on Arbitrum is the stock, not the token, and comes from the same publisher), so its feed is set up as `{"kind": "single_source"}`, never with a made-up backup. `oracle_setup` logs `single_source_feed` "single-source feed: fixed floor + size caps apply", it can fire price triggers (the ladder's rungs), and the vault refuses any market floor that reads it, with the same words. A trade in NVDA is bounded by the owner's fixed floor and the node's size caps.
+**NVDA's backup is a pool, not a second oracle.** No second independent NVDA token price exists from an oracle on a chain we can read (Chainlink's NVDA-USD 24/5 on Optimism is the stock, without the token's 1.000775 multiplier, and comes from the same publisher). The NVDA/USDG pool `0xd4eb…14a3` (factory `0x1f7d…2EfA`'s 500 pool; ~9,300 NVDA + ~147k USDG, 7,200 observations) is a different source: `observe([1800, 0])` gives its 30-minute mean tick, which one block can't move and half an hour of manipulation costs the pool's depth. It only CONFIRMS Chainlink's price (within the vault's 2% tolerance): every floor is computed from Chainlink's, so a bent TWAP can make a vault refuse, never trade cheaper. USDG is taken as $1. On 2026-11-09 the TWAP read $178.72 against Chainlink's $179.02 (-0.17%), and $178.56 against $178.07 later that morning (+0.28%). When the stock market is closed Chainlink's feed pauses, so nothing reads NVDA and nothing trades in it: that's correct. The id is Chainlink's scheme with the pool's address, so an Evm board could check a Wormhole Query of `observe` later; today the keeper attests it (`npm run twap-price`).
 
 **pump.fun curve coins: no market floor.** No trusted price exists for them: anyone can buy into a curve and have it read at that slot, and Jupiter's API is unsigned. The board can carry their price (`jupiter-price`, `wormhole-price`) for triggers, but a vault names such a feed `single_source`, so no market floor reads it: the owner's fixed floor, max slippage and smaller size caps bound the trade. Graduated memecoins (DEX TWAP oracle accounts) are out of scope for now.
 
@@ -61,7 +61,8 @@ Two reasons for the board, both found on 2026-11-06:
 | their backups | Chainlink ETH, SOL, USDC / USD on Arbitrum | `0017…` + proxy | `npm run chainlink-price -- --board $BOARD eth-arb sol-arb usdc-arb` |
 | near | Chainlink NEAR / USD on Arbitrum | `0017…` + proxy | `npm run chainlink-price -- --board $BOARD near` |
 | near's backup | Chainlink NEAR / USD on Optimism | `0018…` + proxy | `npm run chainlink-price -- --board $BOARD near-op` |
-| nvda (single-source) | Chainlink RHNVDA / USD on Robinhood Chain | `0048…` + proxy | `npm run chainlink-price -- --board $BOARD nvda` |
+| nvda | Chainlink RHNVDA / USD on Robinhood Chain | `0048…` + proxy | `npm run chainlink-price -- --board $BOARD nvda` |
+| nvda's backup | NVDA/USDG Uniswap v3 30-min TWAP on Robinhood Chain | `0048…` + pool | `npm run twap-price -- --board $BOARD nvda-twap` |
 
 `--vault <vault>` instead of names posts exactly the feeds and backups that vault reads from the board (what the keeper does before a step). The keeper takes both boards at once: `npm run flows -- --send --board nf-pyth-$SUFFIX.testnet,nf-board-$SUFFIX.testnet` (`live.sh` adds `nf-pyth` when the deployment has one). Each script posts only what that kind of board takes.
 
@@ -97,7 +98,7 @@ Each proxy's `description()` was checked (`NEAR / USD`, `RHNVDA / USD`), and the
 | ETH, USDC, SOL (Pyth) | `nf-pyth`, pyth_core | Pyth's signers (3 of its 5), the Pythnet emitter, each price's Merkle proof | Pyth (its 5 routers), as Pyth's own receivers do. **Not the keeper.** |
 | their Chainlink backups (`-arb`) | `nf-board`, attested | nothing | **the keeper** |
 | NEAR, its backup `near-op` | `nf-board`, attested | nothing | **the keeper** |
-| NVDA (single-source) | `nf-board`, attested | nothing | **the keeper** |
+| NVDA, its backup `nvda-twap` | `nf-board`, attested | nothing | **the keeper** |
 
 So a market floor on ETH, USDC or SOL now rests on a price nobody but Pyth could have signed. Its backup still comes from the keeper: a lying keeper can make the vault REFUSE a trade (a backup more than 2% off), but it can no longer move the price the floor is computed from. NEAR and NVDA floors still rest on keeper-vouched prices until the Evm board (below) has a key.
 

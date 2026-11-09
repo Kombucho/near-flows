@@ -75,6 +75,6 @@ test("every backup is a different publisher's feed from its primary, and no two 
   // NEAR's backup is the same pair on another chain: its own proxy, its own updates.
   assert.notEqual(FEEDS.near.chain, FEEDS["near-op"].chain);
   for (const n of ["eth-arb", "sol-arb", "usdc-arb"]) assert.match(FEEDS[n].description, /^(ETH|SOL|USDC) \/ USD$/);
-  // NVDA has no second feed here: it stays single-source.
+  // NVDA has no second Chainlink feed here: its backup is a pool TWAP (twap.ts).
   assert.deepEqual(Object.values(FEEDS).filter((f) => /NVDA/.test(f.description)).length, 1);
 });

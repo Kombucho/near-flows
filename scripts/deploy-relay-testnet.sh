@@ -74,7 +74,8 @@ E24="000000000000000000000000"
 #   proxy address (npm run chainlink-price -- --board). The same ids work on an Evm board.
 # Every feed's backup is a DIFFERENT publisher, read at step time (the board keeps no average):
 # Pyth's ETH/USDC/SOL by Chainlink on Arbitrum, Chainlink NEAR on Arbitrum by Chainlink NEAR on
-# Optimism. NVDA has no second source: single_source (no market floor reads it; fixed floor + caps).
+# Optimism, Chainlink's RHNVDA by the 30-min TWAP of the NVDA/USDG 0.05% Uniswap v3 pool on
+# Robinhood Chain (same id scheme, the pool's address: npm run twap-price -- --board).
 USDC_ID="eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
 ETH_ID="ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"
 SOL_ID="ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
@@ -84,6 +85,7 @@ NEAR_OP_ID="001800000000000000000000ca6fa4b8cb365c02cd3ba70544efffe78f63ac82" # 
 ETH_ARB_ID="001700000000000000000000639fe6ab55c921f74e7fac1ee960c0b6293ba612"  # Chainlink ETH/USD, Arbitrum (23): ETH's backup
 SOL_ARB_ID="00170000000000000000000024cea4b8ce57cda5058b924b9b9987992450590c"  # Chainlink SOL/USD, Arbitrum (23): SOL's backup
 USDC_ARB_ID="00170000000000000000000050834f3163758fcc1df9973b6e91f0f0f0434ad3" # Chainlink USDC/USD, Arbitrum (23): USDC's backup
+NVDA_TWAP_ID="004800000000000000000000d4eb21209c4d6093f80b5b84f5c45cc093ea14a3" # NVDA/USDG Uniswap v3 TWAP, Robinhood Chain (72): NVDA's backup
 # Pyth's signer set since the Aug 2026 Core upgrade: guardian set 1, its 5 routers, 3 of 5 sign
 # (getGuardianSet(1) on Pyth's wormhole receivers on Arbitrum and Base, identical; checked against
 # real updates: contracts/priceboard/tests-data/pyth_core.json). Later sets: anyone posts the
@@ -286,8 +288,9 @@ if want oracle; then
   # Also for a vault that already exists: replaces its whole oracle config (owner only, through `x`).
   # Feeds for market floors and price triggers, all on the board, fresh = under 60 s, each within 2%
   # of its backup: the same asset from a different publisher, posted with it just before a step
-  # (the keeper with --board; nothing is posted between steps). NVDA is single-source, said so:
-  # it fires price triggers, but no market floor reads it.
+  # (the keeper with --board; nothing is posted between steps). NVDA's backup is its USDG pool's
+  # 30-min TWAP: it only confirms Chainlink's price (the floor is Chainlink's), so a bent TWAP
+  # can stop a trade, never cheapen one. Closed market (weekends): Chainlink pauses, nothing trades.
   echo "== oracle: $VAULT reads usdc eth sol from $PBOARD, near nvda and every backup from $BOARD"
   need "$OWNER" 0.05
   feed() { # feed <name> <board> <price id> <backup price id (on $BOARD), or single_source>
@@ -295,7 +298,7 @@ if want oracle; then
     [ "$4" = single_source ] || b="{\"kind\":\"other\",\"contract\":\"$BOARD\",\"price_id\":\"$4\"}"
     echo "{\"name\":\"$1\",\"contract\":\"$2\",\"price_id\":\"$3\",\"backup\":$b}"
   }
-  x "$OWNER" oracle_setup "{\"config\":{\"max_age_s\":60,\"max_conf_bps\":100,\"tolerance_bps\":200,\"feeds\":[$(feed near "$BOARD" $NEAR_ID $NEAR_OP_ID),$(feed usdc "$PBOARD" $USDC_ID $USDC_ARB_ID),$(feed eth "$PBOARD" $ETH_ID $ETH_ARB_ID),$(feed sol "$PBOARD" $SOL_ID $SOL_ARB_ID),$(feed nvda "$BOARD" $NVDA_ID single_source)]}}"
+  x "$OWNER" oracle_setup "{\"config\":{\"max_age_s\":60,\"max_conf_bps\":100,\"tolerance_bps\":200,\"feeds\":[$(feed near "$BOARD" $NEAR_ID $NEAR_OP_ID),$(feed usdc "$PBOARD" $USDC_ID $USDC_ARB_ID),$(feed eth "$PBOARD" $ETH_ID $ETH_ARB_ID),$(feed sol "$PBOARD" $SOL_ID $SOL_ARB_ID),$(feed nvda "$BOARD" $NVDA_ID $NVDA_TWAP_ID)]}}"
 fi
 
 if want flow; then
@@ -349,13 +352,13 @@ if want check; then
   [ "$PYTH_SOURCE" = core ] && echo "  pyth board.get_source:    $(rpc view "$PYTH_BOARD" get_source)"
   echo "  vault oracle (first 300): $(rpc view "$BRAIN" get_oracle "{\"vault\":\"$VAULT\"}")"
   for f in "near $NEAR_ID $BOARD" "near-op $NEAR_OP_ID $BOARD" "usdc $USDC_ID $PBOARD" "usdc-arb $USDC_ARB_ID $BOARD" "eth $ETH_ID $PBOARD" \
-           "eth-arb $ETH_ARB_ID $BOARD" "sol $SOL_ID $PBOARD" "sol-arb $SOL_ARB_ID $BOARD" "nvda $NVDA_ID $BOARD"; do
+           "eth-arb $ETH_ARB_ID $BOARD" "sol $SOL_ID $PBOARD" "sol-arb $SOL_ARB_ID $BOARD" "nvda $NVDA_ID $BOARD" "nvda-twap $NVDA_TWAP_ID $BOARD"; do
     set -- $f
     echo "  $3 $1: $(rpc view "$3" get_price_unsafe "{\"price_id\":\"$2\"}")"
   done
   echo "  (missing or stale is normal between steps: prices are posted on demand. To post now:"
   echo "     cd scripts/keeper && KEEPER_ACCOUNT_ID=$KEEPER PYTH_API_KEY=... npm run pyth -- --board $PBOARD --vault $VAULT"
-  echo "     and npm run chainlink-price -- --board $BOARD --vault $VAULT;"
+  echo "     npm run chainlink-price -- --board $BOARD --vault $VAULT and npm run twap-price -- --board $BOARD --vault $VAULT;"
   echo "     the live keeper: npm run flows -- --send --board $([ "$PYTH_SOURCE" = core ] && echo "$PYTH_BOARD,")$BOARD)"
 fi
 

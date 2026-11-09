@@ -104,12 +104,14 @@ async fn one_relay_vault_buys_memecoins_on_near_and_solana_sweeps_lp_fees_and_la
     x(&w.alice, &w.vault, "sol_setup", json!({"signer": w.signer.id(), "max_cu_price": 1_000_000u64, "max_cu_limit": 1_400_000u32})).await?.into_result()?;
     x(&w.alice, &w.vault, "evm_setup", json!({"signer": w.signer.id(), "chain_id": 4663u64,
         "max_fee": GWEI.to_string(), "max_tip": (GWEI / 10).to_string(), "gas_cap": 1_500_000u64})).await?.into_result()?;
-    // Prices: NEAR from Pyth (mock_pyth, Pyth's interface) confirmed by a second publisher;
-    // NVDA single-source (said plainly: it fires the ladder's rungs, no market floor reads it). At most 60 s old.
+    // Prices: NEAR, ETH and NVDA from Pyth (mock_pyth, Pyth's interface), each confirmed by a second
+    // publisher (on testnet NVDA's is the NVDA/USDG Uniswap v3 pool's 30-min TWAP). At most 60 s old.
+    // Every swap and zap of the ladder has a market floor from them.
     // The memecoin has no feed at all: no trusted price exists for it.
     x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 500, "feeds": [
         {"name": "near", "contract": pyth.id(), "price_id": NEAR_ID, "backup": common::backup(pyth.id(), NEAR_ID)},
-        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": common::single_source()}]}})).await?.into_result()?;
+        {"name": "eth", "contract": pyth.id(), "price_id": ladder::ETH_FEED, "backup": common::backup(pyth.id(), ladder::ETH_FEED)},
+        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": common::backup(pyth.id(), NVDA_FEED)}]}})).await?.into_result()?;
     let sol_me = w.brain.view("get_sol").args_json(json!({"vault": w.vault})).await?.json::<Value>()?["address"].as_str().unwrap().to_string();
     let evm_me = w.brain.view("get_evm").args_json(json!({"vault": w.vault})).await?.json::<Value>()?["address"].as_str().unwrap().to_string();
     let relay_kb = wasm("relay").len() as f64 / 1024.0;
@@ -316,7 +318,9 @@ async fn one_relay_vault_buys_memecoins_on_near_and_solana_sweeps_lp_fees_and_la
         let r = x(&w.alice, &w.vault, "evm_call", a).await?;
         assert_eq!(send(&rh, &signed(&r)).0, 1, "{name}");
     }
-    set_pyth(&w, &pyth, NVDA_FEED, 180 * 100_000_000, 0).await?;
+    // ETH moves with NVDA at the fork pool's own ratio, so the floors are the market the fork trades at.
+    let ratio = ladder::pool_ratio_e6(&rh);
+    ladder::set_pair(&w.alice, &pyth, 180, ratio, 0).await?;
     let h: u32 = x(&w.alice, &w.vault, "save_flow", json!({"name": "NVDA ladder", "nodes": ladder::ladder()})).await?.json()?;
     let eth_in = 30_000_000_000_000_000u128;
     x(&w.alice, &w.vault, "fund", json!({"flow_id": h, "node": 0, "amount": eth_in.to_string()})).await?.into_result()?;
@@ -334,10 +338,11 @@ async fn one_relay_vault_buys_memecoins_on_near_and_solana_sweeps_lp_fees_and_la
     let mut eth_back = 0u128;
     for (rung, usd) in [(1u16, 275i64), (2, 365), (3, 545)] {
         let at = 180 * [15, 20, 30][rung as usize - 1] / 10;
-        set_pyth(&w, &pyth, NVDA_FEED, (at - 1) * 100_000_000, 0).await?;
+        ladder::set_pair(&w.alice, &pyth, at - 1, ratio, 0).await?;
         let r = step(rung, args(v4_values(1, false), nonce(&rh))).await?;
         assert!(fails_with(&r, "NotYet"), "rung {rung} below its price: {:?}", r.failures());
-        set_pyth(&w, &pyth, NVDA_FEED, usd * 100_000_000, 0).await?;
+        // The fork's pool is thin and has no arbitrageurs: the market follows its mid after our own trades.
+        ladder::set_pair(&w.alice, &pyth, usd, ladder::pool_ratio_e6(&rh), 0).await?;
         let q = v4_quote(&rh, false, third);
         let before = eth_of(&rh);
         let r = step(rung, args(v4_values(q * 99 / 100, false), nonce(&rh))).await?;
@@ -346,6 +351,7 @@ async fn one_relay_vault_buys_memecoins_on_near_and_solana_sweeps_lp_fees_and_la
         let got = eth_of(&rh) + gas - before;
         x(&w.keeper, &w.vault, "remote_report", json!({"flow_id": h, "node": rung, "out": got.to_string()})).await?.into_result()?;
         eth_back += got;
+        ladder::set_pair(&w.alice, &pyth, usd, ladder::pool_ratio_e6(&rh), 0).await?;
         let shares_before = rh.balance(ETHNVDA, &evm_me);
         let r = step(4, args(vec!["0".into(); 5], nonce(&rh))).await?;
         assert_eq!(event(&r, "evm_call_requested")["value"], json!(got.to_string()), "the zap spends exactly the sale's ETH");

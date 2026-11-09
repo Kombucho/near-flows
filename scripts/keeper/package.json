@@ -13,7 +13,8 @@
     "pyth": "tsx src/pyth.ts",
     "jupiter-price": "tsx src/jupiter-price.ts",
     "wormhole-price": "tsx src/wormhole-price.ts",
-    "chainlink-price": "tsx src/chainlink-price.ts"
+    "chainlink-price": "tsx src/chainlink-price.ts",
+    "twap-price": "tsx src/twap-price.ts"
   },
   "author": "",
   "license": "MIT",

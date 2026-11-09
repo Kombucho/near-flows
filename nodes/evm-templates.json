@@ -1,5 +1,5 @@
 {
-  "about": "EVM nodes as templates the brain enforces for each relay vault (contracts/brain/src/evm.rs; set with x {\"evm_template\": {\"template\": ...}}). The brain builds each call, the vault signs it: fixed arguments are fixed here, 'vault' is the vault's own address, the keeper only fills at_most amounts (capped) and floor minimums (never below amount x num / den); a 'market' minimum is also never below the oracle's price for the amount less slippage_bps (the brain reads the two feeds, named as in the vault's oracle_setup: eth, usdc; no fresh price, no signature), and a 'deadline' is block time + 5 minutes, whatever the keeper sends. Every swap whose two feeds each have an independent backup has a market minimum (the fixed floor alone, ~90% of the market, is room to sandwich): the Base WETH -> USDC swap. NVDA has a single source (a market floor on it is refused), so the Robinhood v4 swaps keep their fixed floors, like the Smart LP and pair-token zaps (no share-price feed); there the fixed floor and the node's size caps bound the trade. Floors below were set on 2026-11-06 (Base: 1 WETH ~ 2,224 USDC; Smart LP sdAMZN-FR: 50 USDG ~ 49.68 shares): owners set their own. Tested on a Base mainnet fork: contracts/sandbox/tests/evm_fork.rs. Floors for the Robinhood v4 and pair token nodes: 0.01 ETH ~ 0.1186 NVDA, 0.05 NVDA ~ 0.0041 ETH, 0.01 ETH ~ 0.01707 ETHNVDA shares (fork, 2026-11-06), owner floor ~90% of that.",
+  "about": "EVM nodes as templates the brain enforces for each relay vault (contracts/brain/src/evm.rs; set with x {\"evm_template\": {\"template\": ...}}). The brain builds each call, the vault signs it: fixed arguments are fixed here, 'vault' is the vault's own address, the keeper only fills at_most amounts (capped) and floor minimums (never below amount x num / den); a 'market' minimum is also never below the oracle's price for the amount less slippage_bps (the brain reads the two feeds, named as in the vault's oracle_setup: eth, usdc, nvda; each confirmed by its backup; no fresh price, no signature), a 'share' minimum is a market minimum where one side is an LP share priced from its two tokens' feeds and the k the owner pins (see shares below), and a 'deadline' is block time + 5 minutes, whatever the keeper sends. The feed name 'usd' is exactly one dollar, never read (USDG, which no oracle prices). Every swap and zap here has a market or share minimum (a fixed floor alone, ~90% of the market, is room to sandwich): Base WETH -> USDC (1%), the Robinhood v4 swaps (3%: the ETH/NVDA pool's 1% fee and its gap to the feeds, ~1% on 2026-11-09), the ETHNVDA pair token zap and redeem (3%: the same pool, and it is thin, ~$5.5k at full range) and Smart LP deposit and withdraw (1%: a 0.3% pool and 10 bps retention). The fixed floors stay as the owner's backstop. NVDA's feed is Chainlink RHNVDA/USD on Robinhood Chain, its backup the 30-min TWAP of the NVDA/USDG 0.05% Uniswap v3 pool there (scripts/keeper/src/twap.ts); when the stock market is closed Chainlink pauses and nothing in NVDA trades. Fixed floors were set on 2026-11-06 (Base: 1 WETH ~ 2,224 USDC; Robinhood: 0.01 ETH ~ 0.1186 NVDA, 0.05 NVDA ~ 0.0041 ETH, 0.01 ETH ~ 0.01707 ETHNVDA shares, owner floor ~90% of that), the Smart LP ones on 2026-11-09 (50 USDG ~ 5.59e6 share-wei of sdAMZN-FR-USDG, owner floor ~89%): owners set their own. Tested on forks: contracts/sandbox/tests/evm_fork.rs (Base), evm_fork_robinhood.rs and ladder_fork_robinhood.rs (Robinhood Chain).",
   "chains": {
     "base": {
       "chain_id": 8453,
@@ -175,11 +175,11 @@
     },
     "robinhood": {
       "chain_id": 4663,
-      "verified": "read from a Robinhood Chain fork on 2026-11-06: vault from StonkBrokers' SmartLpRegistry 0xE8749183Fbf6A657EB58B3a4D3E4B9Cc09560146 (index 0, sdAMZN-FR, full range AMZN/USDG, pool fee 0.3%); ABI from stonkbrokers.io/integration/SmartLpVault.abi.json. Their guide: verify a vault's bytecode pin before use; never hardcode vault addresses (templates fix one, so re-check before publishing).",
+      "verified": "Smart LP: StonkBrokers' SmartLpRegistry 0xE8749183Fbf6A657EB58B3a4D3E4B9Cc09560146, read on 2026-11-09 (185 vaults): index 3, sdAMZN-FR-USDG 0x68199040683ac90e7c0f47e7b81a8e9edbb61f2f (full range AMZN/USDG on pool 0x8ac92da7...79ef, fee 0.3%, mode 0, owner 0xb668...7CDa, feed Chainlink AMZN/USD 0xD5a1508c...651C) passes two of StonkBrokers' three authenticity checks (stonkbrokers.io/docs, 'Verifying a vault is genuine'): runtime code exactly 23,718 bytes, and every library slot links SmartLpLib 0x4A2dA8e70b51595Bf564082A86336AbDDc62E32F (15 slots); the third (the code hash with immutables, library slots and metadata blanked: 0x1c32f129...b2e3) was not recomputed here. It was nearly empty that day (1,000 dead share-wei worth $0.0089), and works on a fork: 50 USDG in -> 5,593,486 share-wei, all out -> 49.80 USDG. The vault these templates used before, index 0 sdAMZN-FR 0x5019fca4...f17a (same pool, same owner, $1,519 TVL), FAILS that check, as do its siblings index 1 sdAMZN-BB and 2 sdAMZN-ASK: 24,376 bytes and no linked library, i.e. not StonkBrokers' audited code; 182 of the 185 listed vaults pass (index 115 was not read: RPC timeout). ABI from stonkbrokers.io/integration/SmartLpVault.abi.json. Their guide: verify a vault's bytecode pin before use; never hardcode vault addresses (templates fix one, so re-check before publishing). The ETHNVDA pair token 0x0d14...dca8 is a 45-byte proxy: its implementation was not checked against an audit.",
       "tokens": {
         "USDG": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
         "AMZN": "0x12f190a9f9d7d37a250758b26824b97ce941bf54",
-        "sdAMZN-FR": "0x5019fca4c0193908727810209b7621a90fc9f17a",
+        "sdAMZN-FR-USDG": "0x68199040683ac90e7c0f47e7b81a8e9edbb61f2f",
         "ETH (native)": "0x0000000000000000000000000000000000000000",
         "NVDA": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec",
         "ETHNVDA (pair token)": "0x0d142f0a847838f933114869f6f63bd618bedca8"
@@ -192,7 +192,7 @@
           "args": [
             {
               "rule": "fixed",
-              "value": "0x5019fca4c0193908727810209b7621a90fc9f17a"
+              "value": "0x68199040683ac90e7c0f47e7b81a8e9edbb61f2f"
             },
             {
               "rule": "at_most",
@@ -203,7 +203,7 @@
         },
         {
           "name": "smartlp_amzn_deposit_usdg",
-          "to": "0x5019fca4c0193908727810209b7621a90fc9f17a",
+          "to": "0x68199040683ac90e7c0f47e7b81a8e9edbb61f2f",
           "function": "zapDeposit(address,uint256,uint256,address)",
           "args": [
             {
@@ -215,10 +215,23 @@
               "max": "500000000"
             },
             {
-              "rule": "floor",
+              "rule": "share",
               "of": 1,
-              "num": "900000000000",
-              "den": "1"
+              "num": "1",
+              "den": "10",
+              "market": {
+                "sell": "usd",
+                "buy": "sdamzn",
+                "dec_in": 6,
+                "dec_out": 18,
+                "slippage_bps": 100
+              },
+              "share": {
+                "name": "sdamzn",
+                "a": "amzn",
+                "b": "usd",
+                "k": "551882584226203459448670186493"
+              }
             },
             {
               "rule": "vault"
@@ -231,7 +244,7 @@
         },
         {
           "name": "smartlp_amzn_withdraw_usdg",
-          "to": "0x5019fca4c0193908727810209b7621a90fc9f17a",
+          "to": "0x68199040683ac90e7c0f47e7b81a8e9edbb61f2f",
           "function": "zapWithdraw(uint256,address,uint256,bool,address)",
           "args": [
             {
@@ -243,10 +256,23 @@
               "value": "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
             },
             {
-              "rule": "floor",
+              "rule": "share",
               "of": 0,
-              "num": "1",
-              "den": "1100000000000"
+              "num": "8",
+              "den": "1",
+              "market": {
+                "sell": "sdamzn",
+                "buy": "usd",
+                "dec_in": 18,
+                "dec_out": 6,
+                "slippage_bps": 100
+              },
+              "share": {
+                "name": "sdamzn",
+                "a": "amzn",
+                "b": "usd",
+                "k": "551882584226203459448670186493"
+              }
             },
             {
               "rule": "fixed",
@@ -322,10 +348,17 @@
                                   "max": "100000000000000000"
                                 },
                                 {
-                                  "rule": "floor",
+                                  "rule": "market",
                                   "of": 8,
                                   "num": "1067",
-                                  "den": "100"
+                                  "den": "100",
+                                  "market": {
+                                    "sell": "eth",
+                                    "buy": "nvda",
+                                    "dec_in": 18,
+                                    "dec_out": 18,
+                                    "slippage_bps": 300
+                                  }
                                 },
                                 {
                                   "rule": "bytes",
@@ -483,10 +516,17 @@
                                   "max": "1000000000000000000"
                                 },
                                 {
-                                  "rule": "floor",
+                                  "rule": "market",
                                   "of": 8,
                                   "num": "738",
-                                  "den": "10000"
+                                  "den": "10000",
+                                  "market": {
+                                    "sell": "nvda",
+                                    "buy": "eth",
+                                    "dec_in": 18,
+                                    "dec_out": 18,
+                                    "slippage_bps": 300
+                                  }
                                 },
                                 {
                                   "rule": "bytes",
@@ -553,10 +593,23 @@
               "max": "100000000000000000"
             },
             {
-              "rule": "floor",
+              "rule": "share",
               "of": 1,
               "num": "1536",
-              "den": "1000"
+              "den": "1000",
+              "market": {
+                "sell": "eth",
+                "buy": "ethnvda",
+                "dec_in": 18,
+                "dec_out": 18,
+                "slippage_bps": 300
+              },
+              "share": {
+                "name": "ethnvda",
+                "a": "eth",
+                "b": "nvda",
+                "k": "2006968196877436792"
+              }
             },
             {
               "rule": "vault"
@@ -582,10 +635,23 @@
               "value": "0x0000000000000000000000000000000000000000"
             },
             {
-              "rule": "floor",
+              "rule": "share",
               "of": 0,
               "num": "527",
-              "den": "1000"
+              "den": "1000",
+              "market": {
+                "sell": "ethnvda",
+                "buy": "eth",
+                "dec_in": 18,
+                "dec_out": 18,
+                "slippage_bps": 300
+              },
+              "share": {
+                "name": "ethnvda",
+                "a": "eth",
+                "b": "nvda",
+                "k": "2006968196877436792"
+              }
             },
             {
               "rule": "vault"
@@ -601,7 +667,7 @@
         "how": "Universal Router execute(commands, inputs, deadline): command 0x10 = V4_SWAP; its input = abi.encode(actions, params) with actions 0x06 SWAP_EXACT_IN_SINGLE, 0x0c SETTLE_ALL, 0x0f TAKE_ALL (TAKE_ALL pays the caller: the vault). Leaves, depth first: 0 command, 1 actions, 2-6 pool key, 7 zeroForOne, 8 amountIn, 9 minimum out, 10 hookData, 11/12 settle currency/max (= 8), 13/14 take currency/min (= 9), 15 deadline, 16 ETH value (= 8, ETH-in swaps only).",
         "pool": "ETHNVDA's own pool: ETH/NVDA, fee 1%, tick spacing 200, no hook (read from the pair token's poolKey() on a fork, 2026-11-06)"
       },
-      "basket": "StonkBrokers has no basket or fund contract to deposit into: its 'Investment accounts' (stonkbrokers.io/integration/invest: StonkBroker Accounts NFT 0x0ef148BC47B18E5C93314Da76931860175d4bC2E, open() / openFor(to)) are per-user ERC-6551 wallets, whose trades go through executeCall(to, value, data) with arbitrary calldata (not templatable without letting a caller pick the call). The flows' basket is therefore the ETHNVDA pair token (pairtoken_ethnvda_zap_eth: ETH + NVDA in one Uniswap v4 position) or Smart LP (sdAMZN-FR, USDG in). Checked 2026-11-06.",
+      "basket": "StonkBrokers has no basket or fund contract to deposit into: its 'Investment accounts' (stonkbrokers.io/integration/invest: StonkBroker Accounts NFT 0x0ef148BC47B18E5C93314Da76931860175d4bC2E, open() / openFor(to)) are per-user ERC-6551 wallets, whose trades go through executeCall(to, value, data) with arbitrary calldata (not templatable without letting a caller pick the call). The flows' basket is therefore the ETHNVDA pair token (pairtoken_ethnvda_zap_eth: ETH + NVDA in one Uniswap v4 position) or Smart LP (sdAMZN-FR-USDG, USDG in). Checked 2026-11-06.",
       "ladder_flow": {
         "about": "The take-profit ladder as remote flow nodes (contracts/brain/src/remote.rs), as run in contracts/sandbox/tests/ladder_fork_robinhood.rs: node 0 buys NVDA with ETH and splits it 3,333 bps to each rung; rungs 1-3 sell at NVDA >= $270 / $360 / $540 (1.5x / 2x / 3x of $180, Pyth feed a470c4ac46f44b547b2cba52338f311fb642b79375ce5f0cfd5cb5b99227b852 via oracle_setup name 'nvda'); each sale's ETH goes to node 4, which zaps it into ETHNVDA. Needs approve_nvda_permit2 and permit2_nvda_universal_router once.",
         "nodes": [
@@ -711,7 +777,12 @@
             "token": "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
           }
         }
-      ]
+      ],
+      "shares": {
+        "about": "How a 'share' leaf prices an LP share (contracts/brain/src/oracle.rs ShareValue): USD per whole share = k x sqrt(P_a x P_b) / 1e18, P_a and P_b the two tokens' feeds (USD, 1e18). A full-range position of liquidity L is worth 2 L sqrt(P_a P_b) at the FEEDS' prices whatever the pool's price is (which a sandwich moves), so per share k = 1e18 x 2 L / S, decimals folded in. The owner pins k in the template from the chain; the keeper gives no number to it (no price, no L, no S). L / S only grows (fees compounded in, withdrawal fees left behind), so a pinned k is at most the true one: a redeem's floor from it is never above fair, a deposit's asks for at least fair less slippage, and once the share has grown past the slippage it refuses and the owner pins a fresh k.",
+        "ETHNVDA": "k = 1e18 x 2 x positionLiquidity() / totalSupply() (both tokens 18 decimals): 2,006,968,196,877,436,792 on 2026-11-09 (L 4,460,122,564,624,555,222, S 4,444,637,011,751,242,718; $1,231.83 a share at ETH $2,104.32, NVDA $179.02).",
+        "sdAMZN-FR-USDG": "k = 1e18 x (totalValueQuote() / 1e6) / (totalSupply() / 1e18) / sqrt(P_amzn) (USDG is 'usd'): 551,882,584,226,203,459,448,670,186,493 on 2026-11-09 (8,923 USDG units over 1,000 share-wei, AMZN $261.41). totalValueQuote is the vault's own 30-min TWAP valuation; within 0.1% of Chainlink's that day."
+      }
     }
   },
   "about_intents_deposits": "intents_deposits: money INTO the vault's own NEAR Intents account from its EVM address (relay vaults / the brain only). {deposit_address} is the vault's Intents deposit address on that chain, which the OWNER looks up once from the bridge API (POST https://bridge.chaindefuser.com/rpc, method deposit_address, params [{account_id: <vault>, chain: 'eth:8453' or 'eth:4663'}]; the same address on every EVM chain) and pins here: the keeper only fills the amount, capped. A plain transfer has function '' (value only, no calldata). Tested on a Base fork: contracts/sandbox/tests/hop_fork.rs."

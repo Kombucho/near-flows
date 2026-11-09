@@ -29,14 +29,36 @@ pub struct World {
     pub signer: Contract,
     pub pyth: Contract,
     pub vault: AccountId,
+    /// NVDA per ETH x 1e6: ETH's oracle price follows NVDA's at this ratio (a fork test moves it
+    /// to the pool's mid after its own trades: the arbitrage a real chain would do).
+    pub ratio_e6: std::cell::Cell<u128>,
 }
 
 pub fn tok(addr: &str) -> String {
     format!("evm:4663:{addr}")
 }
 
-/// A relay vault on Robinhood Chain (mock signer) with the node library's templates and an NVDA price feed.
+/// Pyth's ETH/USD id (the ladder's market floors read ETH and NVDA).
+pub const ETH_FEED: &str = "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace";
+/// NVDA per ETH, x 1e6, in the plain sandbox world: ETH $2,400 at NVDA $180.
+pub const RATIO_E6: u128 = 13_333_333;
+
+/// The vault's oracle for the ladder: ETH and NVDA, each confirmed by a second publisher
+/// (mock_pyth's backup id; on testnet NVDA's is the NVDA/USDG Uniswap v3 pool's 30-min TWAP).
+pub fn ladder_feeds(pyth: &impl std::fmt::Display) -> Value {
+    json!([
+        {"name": "eth", "contract": pyth.to_string(), "price_id": ETH_FEED, "backup": crate::common::backup(pyth, ETH_FEED)},
+        {"name": "nvda", "contract": pyth.to_string(), "price_id": NVDA_FEED, "backup": crate::common::backup(pyth, NVDA_FEED)},
+    ])
+}
+
+/// A relay vault on Robinhood Chain (mock signer) with the node library's templates and ETH and NVDA prices.
 pub async fn world() -> anyhow::Result<World> {
+    world_at(RATIO_E6).await
+}
+
+/// The same, with ETH priced at `ratio_e6` / 1e6 NVDA (a fork's pool ratio, so its floors can fill).
+pub async fn world_at(ratio_e6: u128) -> anyhow::Result<World> {
     let RelayWorld { worker, brain, alice, keeper, signer, vault, .. } = relay_world().await?;
     let pyth = worker.dev_deploy(&wasm("mock_pyth")).await?;
     pyth.call("new").transact().await?.into_result()?;
@@ -45,11 +67,70 @@ pub async fn world() -> anyhow::Result<World> {
     for t in crate::common::templates("robinhood") {
         x(&alice, &vault, "evm_template", json!({"template": t})).await?.into_result()?;
     }
-    x(&alice, &vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": crate::common::single_source()}]}})).await?.into_result()?;
-    let w = World { worker, brain, alice, keeper, signer, pyth, vault };
+    x(&alice, &vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": ladder_feeds(pyth.id())}})).await?.into_result()?;
+    let w = World { worker, brain, alice, keeper, signer, pyth, vault, ratio_e6: std::cell::Cell::new(ratio_e6) };
     nvda_price(&w, 180, 0).await?;
     Ok(w)
+}
+
+/// ETH's price (x 1e8) when NVDA is at `usd`: the pair moves together, at the world's ratio.
+pub fn eth_e8(w: &World, usd: i64) -> i64 {
+    (usd as u128 * 100_000_000 * w.ratio_e6.get() / 1_000_000) as i64
+}
+
+/// The brain's market minimum (oracle::market_min) for prices x 1e8 and same-decimal tokens:
+/// amount x p_in x (1 - slippage) / p_out, rounded down. Exact: the 1e10 to 1e18 cancels.
+pub fn market_floor(amount: u128, p_in_e8: i64, p_out_e8: i64, slippage_bps: u128) -> u128 {
+    amount * p_in_e8 as u128 * (10_000 - slippage_bps) / (p_out_e8 as u128 * 10_000)
+}
+
+/// The pair token's share-floor for an ETH zap (oracle::ShareValue, then market_min), to ~1e-12.
+pub fn zap_floor(eth_in: u128, eth_e8: i64, nvda_e8: i64, k: u128, slippage_bps: u128) -> f64 {
+    let vps = k as f64 / 1e18 * ((eth_e8 as f64) * (nvda_e8 as f64)).sqrt();
+    eth_in as f64 * eth_e8 as f64 / vps * (10_000 - slippage_bps) as f64 / 10_000.0
+}
+
+/// Chainlink on Robinhood Chain: RHNVDA/USD and AMZN/USD (8 decimals; the Smart LP's own feed).
+pub const RHNVDA_FEED: &str = "0x379ec4f7c378f34a1b47e4f3cbebcbac3e8e9f15";
+pub const AMZN_CHAINLINK: &str = "0xd5a1508ced74c084ebf3cbe853e2c968fb2a651c";
+/// The audited Smart LP vault (StonkBrokers registry index 3, sdAMZN-FR-USDG: 23,718 bytes, library linked).
+pub const SMART_LP: &str = "0x68199040683ac90e7c0f47e7b81a8e9edbb61f2f";
+
+/// A Chainlink feed's answer on the fork (x 1e8).
+pub fn chainlink_e8(fork: &Fork, proxy: &str) -> i64 {
+    let out = fork.cast(&["call", proxy, "latestRoundData()(uint80,int256,uint256,uint256,uint80)"]);
+    num(out.lines().nth(1).unwrap()) as i64
+}
+
+/// The pair token's k as its owner pins it from the chain: 1e18 x 2 x positionLiquidity() / totalSupply().
+pub fn fork_k_pair(fork: &Fork) -> u128 {
+    let l = num(&fork.cast(&["call", ETHNVDA, "positionLiquidity()(uint128)"]));
+    let s = num(&fork.cast(&["call", ETHNVDA, "totalSupply()(uint256)"]));
+    2 * l * (E18 / 1_000_000) / (s / 1_000_000)
+}
+
+/// The Smart LP's k from its own total value (USDG, 6 decimals) over its supply, at AMZN `amzn_e8`:
+/// value per whole share / sqrt(P_amzn x $1), x 1e18.
+pub fn fork_k_smartlp(fork: &Fork, amzn_e8: i64) -> u128 {
+    let tv = num(&fork.cast(&["call", SMART_LP, "totalValueQuote()(uint256)"])) as f64 / 1e6;
+    let s = num(&fork.cast(&["call", SMART_LP, "totalSupply()(uint256)"])) as f64 / 1e18;
+    (tv / s / (amzn_e8 as f64 / 1e8).sqrt() * 1e18) as u128
+}
+
+/// A library template with the owner's freshly pinned k in its share leaf.
+pub fn with_k(t: &Value, k: u128) -> Value {
+    let s = t.to_string();
+    let at = s.find(r#""k":""#).expect("a share leaf") + 5;
+    let end = at + s[at..].find('"').unwrap();
+    serde_json::from_str(&format!("{}{k}{}", &s[..at], &s[end..])).unwrap()
+}
+
+/// The k the node library pins for a template's share leaf.
+pub fn pinned_k(template: &str) -> u128 {
+    let t = crate::common::templates("robinhood").into_iter().find(|t| t["name"] == template).unwrap();
+    let s = t.to_string();
+    let at = s.find(r#""k":""#).unwrap() + 5;
+    s[at..at + s[at..].find('"').unwrap()].parse().unwrap()
 }
 
 /// The vault's own address on Robinhood Chain (the brain derives it from the vault's MPC path).
@@ -62,12 +143,28 @@ pub async fn req(w: &World, who: &Account, method: &str, args: Value) -> anyhow:
     x(who, &w.vault, method, args).await
 }
 
-/// NVDA at `usd` dollars (Pyth: x 1e-8, confidence 0.05%, EMA equal), published `age_s` ago.
+/// NVDA at `usd` dollars and ETH at the world's ratio (Pyth: x 1e-8, confidence 0.05%,
+/// each backup agreeing), published `age_s` ago.
 pub async fn nvda_price(w: &World, usd: i64, age_s: i64) -> anyhow::Result<()> {
-    let p = usd * 100_000_000;
-    w.alice.call(w.pyth.id(), "set_price").args_json(json!({"price_id": NVDA_FEED, "price": p.to_string(), "conf": (p / 2000).to_string(),
-        "expo": -8, "backup": p.to_string(), "age_s": age_s})).transact().await?.into_result()?;
+    set_pair(&w.alice, &w.pyth, usd, w.ratio_e6.get(), age_s).await
+}
+
+/// NVDA at `usd` and ETH at `ratio_e6` / 1e6 NVDA on mock_pyth, both with agreeing backups.
+pub async fn set_pair(who: &Account, pyth: &Contract, usd: i64, ratio_e6: u128, age_s: i64) -> anyhow::Result<()> {
+    let eth = (usd as u128 * 100_000_000 * ratio_e6 / 1_000_000) as i64;
+    for (id, p) in [(NVDA_FEED, usd * 100_000_000), (ETH_FEED, eth)] {
+        who.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": p.to_string(), "conf": (p / 2000).to_string(),
+            "expo": -8, "backup": p.to_string(), "age_s": age_s})).transact().await?.into_result()?;
+    }
     Ok(())
+}
+
+/// NVDA per ETH x 1e6 at the fork's ETH/NVDA v4 pool's mid price, fee taken out: quote a small
+/// amount both ways, out/in = mid x (1 - fee) and (1/mid) x (1 - fee), so mid = sqrt(ratio of the two).
+pub fn pool_ratio_e6(fork: &Fork) -> u128 {
+    let fwd = v4_quote(fork, true, E18 / 1000) as f64 / (E18 / 1000) as f64;
+    let back = v4_quote(fork, false, E18 / 100) as f64 / (E18 / 100) as f64;
+    ((fwd / back).sqrt() * 1e6) as u128
 }
 
 /// The ladder: 0 buys NVDA with ETH and splits it in three; 1-3 sell a third each when

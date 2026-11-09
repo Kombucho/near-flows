@@ -5,18 +5,24 @@
 //! Pyth price, Chainlink on another chain for a Chainlink price), read in the
 //! same round and within `tolerance_bps`. No price, no trade.
 //!
-//! A feed with no independent second source (NVDA's only feed is Chainlink on
-//! Robinhood Chain; a pump.fun curve coin has no trusted price at all) is named
-//! `single_source`, plainly, never given a made-up backup. It may fire price
-//! triggers, but no market floor reads it: a trade in it is bounded by the
-//! owner's fixed floor, slippage and size caps, and the vault refuses a market
-//! floor on it saying so.
+//! A feed with no independent second source (a pump.fun curve coin has no
+//! trusted price at all) is named `single_source`, plainly, never given a
+//! made-up backup. It may fire price triggers, but no market floor reads it: a
+//! trade in it is bounded by the owner's fixed floor, slippage and size caps,
+//! and the vault refuses a market floor on it saying so. (NVDA was one until
+//! its backup became the 30-min TWAP of the NVDA/USDG Uniswap v3 pool on
+//! Robinhood Chain: a backup only confirms, the floor is the primary's, so a
+//! bent TWAP can stop a trade, never cheapen one.)
+//!
+//! LP shares have no feed of their own: a `share` leaf (evm.rs) prices one
+//! from its two tokens' feeds and a per-share constant the owner pins
+//! (`ShareValue`). `usd` is a feed name that is exactly one dollar, never read.
 //!
 //! What changed in the split: the reads are views, so the BRAIN issues them
 //! (`feed_views`, then `on_read`), never the vault. Same contracts, same
 //! arguments, same checks (`prices`), same math (copied verbatim, same tests).
 
-use near_sdk::json_types::{I64, U64};
+use near_sdk::json_types::{I64, U128, U64};
 use near_sdk::{env, near, require, AccountId};
 
 use math::wide::U256;
@@ -58,6 +64,45 @@ pub struct OracleConfig {
     pub tolerance_bps: u32,
 }
 
+/// The feed name `usd`: exactly one dollar, never read. The owner's word that a
+/// token is a dollar (USDG, which no oracle prices), written into the template.
+pub const USD: &str = "usd";
+const E18: u128 = 1_000_000_000_000_000_000;
+
+/// A full-range LP share (a Smart LP vault, a pair token), priced from its two
+/// tokens' feeds: USD per whole share = `k` x sqrt(P_a x P_b) / 1e18.
+///
+/// WHY this is the price: a full-range position of liquidity L holds L/sqrt(p)
+/// of one token and L x sqrt(p) of the other; valued at the FEEDS' prices (not
+/// the pool's, which a sandwich moves) it is worth 2 L sqrt(P_a P_b), whatever
+/// the pool's price. Per share: 2 (L/S) sqrt(P_a P_b), so k = 1e18 x 2 L/S
+/// (with the decimals folded in). `k` is the owner's, pinned in the template
+/// from the chain (L and S, or the vault's own total value / supply): nothing
+/// the keeper says reaches it. L/S only grows (fees compounded into L, a
+/// withdrawal fee left behind), so a pinned k is never above the true one:
+/// a redeem floor from it is never above fair, a deposit floor never below
+/// (it asks for more shares, and refuses once the drift passes the slippage:
+/// then the owner pins a fresh k).
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShareValue {
+    /// The market side this share is: the template's market.sell or market.buy.
+    pub name: String,
+    /// The pool's two tokens, as feed names (or `usd`).
+    pub a: String,
+    pub b: String,
+    pub k: U128,
+}
+
+impl ShareValue {
+    /// USD per whole share (1e18) at the feeds' prices `p_a`, `p_b` (1e18 each).
+    pub fn usd_e18(&self, p_a: u128, p_b: u128) -> u128 {
+        let root = (U256::from(p_a) * U256::from(p_b)).integer_sqrt();
+        let r = U256::from(self.k.0) * root / U256::from(E18);
+        if r > U256::from(u128::MAX) { u128::MAX } else { r.as_u128() }
+    }
+}
+
 /// A floor that follows the market (same fields and order as the vault's: borsh-identical).
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
@@ -89,6 +134,7 @@ impl Talk {
         require!(config.max_conf_bps <= 1_000 && config.tolerance_bps <= 2_000, "max_conf_bps <= 10%, tolerance_bps <= 20%");
         for f in &config.feeds {
             require!(!f.name.is_empty() && f.name.len() <= 16, "feed name: 1 to 16 characters");
+            require!(f.name != USD, "feed name: 'usd' is one dollar, never read (name the feed after its token)");
             check_id(&f.price_id);
             match &f.backup {
                 Backup::Other { contract, price_id } => {
@@ -104,7 +150,7 @@ impl Talk {
 
     /// Refuse a market floor on any of `names` that has no second publisher.
     pub(crate) fn require_confirmed(&self, names: &[String]) {
-        for name in names {
+        for name in names.iter().filter(|n| *n != USD) {
             if self.feed(name).backup == Backup::SingleSource {
                 env::panic_str(&format!("refused: {name}: {SINGLE_SOURCE}"));
             }
@@ -229,6 +275,42 @@ mod tests {
         let buy = Market { sell: "near".into(), buy: "meme".into(), dec_in: 24, dec_out: 6, slippage_bps: 100 };
         assert_eq!(market_min(&buy, 10u128.pow(24), near, meme), 38_668_853_995_781);
         assert!(usd_e18(&p(-1, -8)).is_none() && usd_e18(&p(i64::MAX, 30)).is_none());
+    }
+
+    /// LP shares priced from their tokens' feeds, with Robinhood Chain's numbers at block
+    /// 109,995,929 (2026-11-09): Chainlink RHNVDA $179.02266357, AMZN $261.41373818, ETH/USD
+    /// (Arbitrum) $2,104.32245252; the ETHNVDA pair token's positionLiquidity()
+    /// 4,460,122,564,624,555,222 over totalSupply() 4,444,637,011,751,242,718; the audited
+    /// Smart LP sdAMZN-FR-USDG's totalValueQuote() 8,923 (USDG units) over 1,000 shares (wei).
+    /// Digits from Python integers.
+    #[test]
+    fn share_prices_follow_the_feeds_and_the_pinned_k_only() {
+        let eth = usd_e18(&p(210_432_245_252, -8)).unwrap();
+        let nvda = usd_e18(&p(17_902_266_357, -8)).unwrap();
+        let amzn = usd_e18(&p(26_141_373_818, -8)).unwrap();
+        // ETHNVDA: k = 1e18 x 2 L / S; a share is worth $1,231.83 (research read $1,231.18 a day earlier).
+        let pair = ShareValue { name: "ethnvda".into(), a: "eth".into(), b: "nvda".into(), k: U128(2_006_968_196_877_436_792) };
+        let v = pair.usd_e18(eth, nvda);
+        assert_eq!(v, 1_231_829_618_763_315_536_020);
+        // Zap 0.01 ETH in at 2% (pool fee and slippage): at least 0.016741 shares (the fork mints ~0.0170).
+        let zap = Market { sell: "eth".into(), buy: "ethnvda".into(), dec_in: 18, dec_out: 18, slippage_bps: 200 };
+        assert_eq!(market_min(&zap, 10_000_000_000_000_000, eth, v), 16_741_243_854_324_298);
+        // Redeem 0.01 shares to ETH at 2%: at least 0.005737 ETH.
+        let redeem = Market { sell: "ethnvda".into(), buy: "eth".into(), dec_in: 18, dec_out: 18, slippage_bps: 200 };
+        assert_eq!(market_min(&redeem, 10_000_000_000_000_000, v, eth), 5_736_730_247_507_425);
+        // Smart LP: $0.008923 per 1,000 share-wei = $8.923e12 per whole share, k pinned from it.
+        let lp = ShareValue { name: "sdamzn".into(), a: "amzn".into(), b: USD.into(), k: U128(551_882_584_226_203_459_448_670_186_493) };
+        let v = lp.usd_e18(amzn, E18);
+        assert_eq!(v, 8_922_999_999_999_999_999_999_999_999_985, "the pinned k gives back the vault's own value");
+        // Deposit 50 USDG at 1%: at least 5,547,461 shares (the fork minted 5,593,486).
+        let dep = Market { sell: USD.into(), buy: "sdamzn".into(), dec_in: 6, dec_out: 18, slippage_bps: 100 };
+        assert_eq!(market_min(&dep, 50_000_000, E18, v), 5_547_461);
+        // Limits: no k or no price, no value; the square root never overflows at the biggest prices.
+        assert_eq!(ShareValue { k: U128(0), ..pair.clone() }.usd_e18(eth, nvda), 0);
+        assert_eq!(pair.usd_e18(0, nvda), 0);
+        assert_eq!(ShareValue { k: U128(u128::MAX), ..pair.clone() }.usd_e18(u128::MAX, u128::MAX), u128::MAX);
+        // Both tokens up 50%: the share is worth 50% more (it is linear in sqrt(P_a P_b)).
+        assert_eq!(pair.usd_e18(eth * 3 / 2, nvda * 3 / 2) / 1_000_000, pair.usd_e18(eth, nvda) * 3 / 2 / 1_000_000);
     }
 
     const E18: u128 = 1_000_000_000_000_000_000;

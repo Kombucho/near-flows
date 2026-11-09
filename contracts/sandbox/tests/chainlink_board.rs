@@ -5,9 +5,12 @@
 //! - USDC: Pyth's price as `npm run pyth -- --board` relays Hermes to an attested
 //!   board, backed by Chainlink USDC/USD on Arbitrum as `npm run chainlink-price
 //!   -- --board` attests it to the same board;
-//! - NVDA: Chainlink RHNVDA/USD on Robinhood Chain, single-source (said so).
+//! - NVDA: Chainlink RHNVDA/USD on Robinhood Chain, backed by the 30-min TWAP of
+//!   the NVDA/USDG Uniswap v3 pool there, as `npm run twap-price -- --board`
+//!   attests it under the same id scheme (Wormhole chain 72 + the pool's address);
+//! - ETH (the ladder's other side): Pyth's, backed by Chainlink ETH/USD on Arbitrum.
 //! The brain reads them through Pyth's interface. A market floor on a NEAR ->
-//! USDC swap and a rung of the NVDA take-profit ladder then run off those prices.
+//! USDC swap and the NVDA take-profit ladder's market floors then run off those prices.
 //!
 //! The Chainlink answers are the real bytes read on 2026-11-06
 //! (priceboard/tests-data/chainlink_reads.json: NEAR $3.75297364, NVDA
@@ -39,6 +42,11 @@ const NEAR_OP_ID: &str = "001800000000000000000000ca6fa4b8cb365c02cd3ba70544efff
 const USDC_ID: &str = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a";
 /// Chainlink USDC/USD on Arbitrum (23), USDC's backup.
 const USDC_ARB_ID: &str = "00170000000000000000000050834f3163758fcc1df9973b6e91f0f0f0434ad3";
+/// NVDA's backup: the NVDA/USDG 0.05% Uniswap v3 pool on Robinhood Chain (72), its 30-min TWAP.
+const NVDA_TWAP_ID: &str = "004800000000000000000000d4eb21209c4d6093f80b5b84f5c45cc093ea14a3";
+/// Pyth's ETH/USD, and Chainlink ETH/USD on Arbitrum (23), its backup.
+const ETH_ID: &str = "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace";
+const ETH_ARB_ID: &str = "001700000000000000000000639fe6ab55c921f74e7fac1ee960c0b6293ba612";
 
 fn guardian(i: u8) -> Secp {
     Secp::from_slice(&[i + 1; 32]).unwrap()
@@ -168,6 +176,20 @@ async fn post_usdc(w: &Worker<Sandbox>, who: &near_workspaces::Account, att: &Co
     Ok(())
 }
 
+/// The ladder's other prices, attested by the keeper on demand: NVDA's pool TWAP ($188.90, within
+/// 2% of Chainlink's $189.56), Pyth's ETH ($2,500) and Chainlink's ETH on Arbitrum ($2,500.50).
+async fn post_ladder(w: &Worker<Sandbox>, who: &near_workspaces::Account, att: &Contract) -> anyhow::Result<()> {
+    use ed25519_dalek::Signer;
+    let t = now(w).await?;
+    for (id, price) in [(NVDA_TWAP_ID, 18_890_000_000i64), (ETH_ID, 250_000_000_000), (ETH_ARB_ID, 250_050_000_000)] {
+        let m = board::message(id, price, -8, t);
+        let report = json!({"attester": near_key(&attester(0)), "price": price.to_string(), "expo": -8, "publish_time": t, "signature": hex::encode(attester(0).sign(&m).to_bytes())});
+        // Refused if the same second (not newer): the price already there is as fresh.
+        let _ = who.call(att.id(), "push").args_json(json!({"feed": id, "reports": [report]})).max_gas().transact().await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_market_floor_and_a_ladder_rung_run_off_chainlink_prices_on_the_board() -> anyhow::Result<()> {
     let w = relay_world().await?;
@@ -180,12 +202,12 @@ async fn a_market_floor_and_a_ladder_rung_run_off_chainlink_prices_on_the_board(
     assert_eq!((p["price"].as_str(), p["conf"].as_str(), p["expo"].as_i64()), (Some("375297364"), Some("1876486"), Some(-8)), "NEAR $3.75297364 +-0.5%");
 
     // The vault's feeds, each confirmed by a different publisher: NEAR (Arbitrum) by NEAR on Optimism,
-    // USDC (Pyth) by Chainlink on Arbitrum; NVDA has no second source and says so.
+    // USDC (Pyth) by Chainlink on Arbitrum, NVDA (Chainlink) by its USDG pool's TWAP, ETH (Pyth) by Chainlink on Arbitrum.
     let other = |board: &Contract, id: &str| json!({"kind": "other", "contract": board.id(), "price_id": id});
     let feed = |name: &str, board: &Contract, id: &str, backup: Value| json!({"name": name, "contract": board.id(), "price_id": id, "backup": backup});
     x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
         feed("near", &evm, NEAR_ID, other(&evm, NEAR_OP_ID)), feed("usdc", &att, USDC_ID, other(&att, USDC_ARB_ID)),
-        feed("nvda", &evm, NVDA_ID, common::single_source())]}})).await?.into_result()?;
+        feed("nvda", &evm, NVDA_ID, other(&att, NVDA_TWAP_ID)), feed("eth", &att, ETH_ID, other(&att, ETH_ARB_ID))]}})).await?.into_result()?;
 
     // ---- a market floor: sell 10 wNEAR for USDC at most 1% under the board's price ----
     let minter = w.worker.dev_create_account().await?;
@@ -244,14 +266,19 @@ async fn a_market_floor_and_a_ladder_rung_run_off_chainlink_prices_on_the_board(
     let eth_in = 30_000_000_000_000_000u128;
     x(&w.alice, &w.vault, "fund", json!({"flow_id": lf, "node": 0, "amount": eth_in.to_string()})).await?.into_result()?;
     let step = |node: u16, args: Value| x(&w.keeper, &w.vault, "step_remote", json!({"flow_id": lf, "node": node, "args": args}));
-    step(0, evm_args(v4_values(1, true), 0)).await?.into_result()?;
-    let got = 355_200_000_000_000_000u128;
+    // The buy's market floor reads ETH and NVDA, each confirmed: 0.03 ETH x $2,500 / $189.56 less 3% = 0.3838 NVDA.
+    post_chainlink(&w.worker, &anyone, &evm).await.ok();
+    post_ladder(&w.worker, &anyone, &att).await?;
+    let r = step(0, evm_args(v4_values(1, true), 0)).await?;
+    assert_eq!(event(&r, "remote_step")["min_out"], json!((eth_in * 250_000_000_000 * 9_700 / (18_955_682_289 * 10_000)).to_string()), "{:?}", r.failures());
+    let got = 395_200_000_000_000_000u128;
     x(&w.keeper, &w.vault, "remote_report", json!({"flow_id": lf, "node": 0, "out": got.to_string()})).await?.into_result()?;
     post_chainlink(&w.worker, &anyone, &evm).await.ok(); // keep it fresh (refused if the same second: not newer)
+    post_ladder(&w.worker, &anyone, &att).await?;
     let r = step(1, evm_args(v4_values(1, false), 1)).await?;
     println!("GAS relay step_remote (rung on a board price): {:.1} Tgas", tgas(&r));
     assert_eq!(event(&r, "remote_price")["price"], json!((18_955_682_289u128 * 10u128.pow(16)).to_string()), "$189.55682289 x 1e24");
-    x(&w.keeper, &w.vault, "remote_report", json!({"flow_id": lf, "node": 1, "out": "9700000000000000"})).await?.into_result()?;
+    x(&w.keeper, &w.vault, "remote_report", json!({"flow_id": lf, "node": 1, "out": "10000000000000000"})).await?.into_result()?;
     assert!(fails_with(&step(2, evm_args(v4_values(1, false), 2)).await?, "NotYet"), "$360 not reached");
 
     // No fresh board price, no step: a minute on, the board's price is too old for the vault.

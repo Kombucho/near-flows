@@ -34,7 +34,8 @@ async fn a_take_profit_ladder_fires_on_oracle_prices_and_routes_only_bounded_rep
     assert!(fails_with(&req(&w, &w.keeper, "step", json!({"flow_id": f, "node": 0})).await?, "step_remote"), "a remote node isn't a NEAR step");
 
     // Buy: the keeper asks for 999 ETH in; the vault signs the node's 0.03 ETH, a deadline 5 minutes out,
-    // and the template's floor (10.67 NVDA per ETH) since the keeper's quote (1 wei) is lower.
+    // and the market floor (ETH $2,400 / NVDA $180 = 13.33 NVDA per ETH, less 3%) since the keeper's quote
+    // (1 wei) is lower, and so is the template's fixed floor (10.67 NVDA per ETH).
     let r = step(&w, &w.keeper, f, 0, evm_args(v4_values(1, true), 0)).await?;
     assert!(r.logs().iter().any(|l| l.contains("evm_signed")), "{:?} {:?}", r.logs(), r.failures());
     let call = event(&r, "evm_call_requested");
@@ -42,7 +43,8 @@ async fn a_take_profit_ladder_fires_on_oracle_prices_and_routes_only_bounded_rep
     let data = call["data"].as_str().unwrap().to_string();
     assert!(data.contains(&format!("{eth_in:064x}")) && !data.contains(&format!("{:064x}", 999 * E18)));
     let s = event(&r, "remote_step");
-    let min = eth_in * 1067 / 100; // 0.32010 NVDA
+    let min = market_floor(eth_in, eth_e8(&w, 180), 180 * 100_000_000, 300); // 0.38800 NVDA
+    assert!(min > eth_in * 1067 / 100 && min == 387_999_990_300_000_000, "{min}");
     assert_eq!((num(&s["amount"]), num(&s["min_out"]), num(&s["max_out"])), (eth_in, min, eth_in * 20));
     let deadline_ns = s["expires_ns"].as_u64().unwrap();
     assert!(data.contains(&format!("{:064x}", deadline_ns / 1_000_000_000 - 1)), "the signed deadline");
@@ -54,14 +56,14 @@ async fn a_take_profit_ladder_fires_on_oracle_prices_and_routes_only_bounded_rep
     // Reports outside the bounds: less than the signed minimum (that tx reverted), more than the cap.
     assert!(fails_with(&report(&w, &w.keeper, f, 0, Some(min - 1)).await?, "below the signed minimum"));
     assert!(fails_with(&report(&w, &w.keeper, f, 0, Some(eth_in * 20 + 1)).await?, "over the node's cap"));
-    // Landed: 0.3552 NVDA arrived. A third each to the rungs (3,333 bps), the rest stays free.
-    let got = 355_200_000_000_000_000u128;
+    // Landed: 0.3952 NVDA arrived. A third each to the rungs (3,333 bps), the rest stays free.
+    let got = 395_200_000_000_000_000u128;
     let r = report(&w, &w.keeper, f, 0, Some(got)).await?;
     assert!(r.is_success(), "{:?}", r.failures());
     let l = ledger(&w, f).await?;
     let third = got * 3_333 / 10_000;
     assert_eq!((inbox(&l, 0), inbox(&l, 1), inbox(&l, 2), inbox(&l, 3)), (0, third, third, third));
-    assert_eq!(third, 118_388_160_000_000_000);
+    assert_eq!(third, 131_720_160_000_000_000);
     assert!(fails_with(&report(&w, &w.keeper, f, 0, Some(got)).await?, "no remote step pending"), "reported once");
 
     // NVDA at $200: under every rung. The price is the oracle's: no keeper number goes in.
@@ -74,11 +76,13 @@ async fn a_take_profit_ladder_fires_on_oracle_prices_and_routes_only_bounded_rep
     let r = step(&w, &w.keeper, f, 1, evm_args(v4_values(1, false), 1)).await?;
     assert_eq!(num(&event(&r, "remote_price")["price"]), 275 * E24);
     let s = event(&r, "remote_step");
-    let min1 = third * 738 / 10_000; // the template's floor: 0.0738 ETH per NVDA (NVDA is single-source: no market floor)
+    // The market says 0.0750 ETH per NVDA less 3% = 0.07275: under the owner's fixed 0.0738, which wins.
+    let min1 = (third * 738 / 10_000).max(market_floor(third, 275 * 100_000_000, eth_e8(&w, 275), 300));
+    assert_eq!(min1, third * 738 / 10_000);
     assert_eq!((num(&s["amount"]), num(&s["min_out"]), num(&s["max_out"])), (third, min1, third / 5));
     // One step in flight per flow: the other rungs wait for its report.
     assert!(fails_with(&step(&w, &w.keeper, f, 2, evm_args(v4_values(1, false), 2)).await?, "Busy"));
-    let eth1 = 9_700_000_000_000_000u128; // 0.0097 ETH
+    let eth1 = 10_000_000_000_000_000u128; // 0.01 ETH
     report(&w, &w.keeper, f, 1, Some(eth1)).await?.into_result()?;
     assert!(fails_with(&step(&w, &w.keeper, f, 2, evm_args(v4_values(1, false), 2)).await?, "NotYet"), "$275 < 2 x 180");
     assert_eq!(inbox(&ledger(&w, f).await?, 4), eth1, "the sale's ETH waits at the basket node");
@@ -89,14 +93,19 @@ async fn a_take_profit_ladder_fires_on_oracle_prices_and_routes_only_bounded_rep
     assert!(fails_with(&r, "no price fresher"), "{:?}", r.failures());
     assert_eq!(inbox(&ledger(&w, f).await?, 2), third, "nothing taken");
 
-    // The basket node: 0.0097 ETH zapped into ETHNVDA, at least 1.536 shares per ETH.
+    // The basket node: 0.01 ETH zapped into ETHNVDA. Its minimum is the share's value from the ETH and
+    // NVDA feeds and the library's pinned k (2 L / S): 0.01 x $3,666.67 / (k sqrt(3,666.67 x 275)) less 3%
+    // = 0.01765 shares, over the fixed 1.536 per ETH. The keeper's 0 changes nothing.
+    nvda_price(&w, 275, 0).await?;
     let r = step(&w, &w.keeper, f, 4, evm_args(vec!["0".into(), "0".into(), "0".into(), "0".into(), "0".into()], 2)).await?;
     let s = event(&r, "remote_step");
-    assert_eq!((num(&s["amount"]), num(&s["min_out"])), (eth1, eth1 * 1536 / 1000));
+    let want = zap_floor(eth1, eth_e8(&w, 275), 275 * 100_000_000, pinned_k("pairtoken_ethnvda_zap_eth"), 300);
+    assert_eq!(num(&s["amount"]), eth1);
+    assert!((num(&s["min_out"]) as f64 / want - 1.0).abs() < 1e-9 && want > (eth1 * 1536 / 1000) as f64, "{} vs {want}", num(&s["min_out"]));
     assert_eq!(event(&r, "evm_call_requested")["value"], json!(eth1.to_string()));
-    report(&w, &w.keeper, f, 4, Some(eth1 * 17 / 10)).await?.into_result()?;
+    report(&w, &w.keeper, f, 4, Some(eth1 * 18 / 10)).await?.into_result()?;
     let l = ledger(&w, f).await?;
-    assert_eq!(num(&l["nodes"][4]["out_total"]), eth1 * 17 / 10);
+    assert_eq!(num(&l["nodes"][4]["out_total"]), eth1 * 18 / 10);
     Ok(())
 }
 
@@ -124,7 +133,9 @@ async fn a_remote_step_that_did_not_land_gives_its_input_back_only_on_the_owners
     let l = ledger(&w, f).await?;
     assert_eq!((inbox(&l, 0), l["nodes"][0]["failures"].as_u64().unwrap()), (eth_in, 1));
 
-    // The owner may settle at any time (e.g. after replacing the transaction's nonce).
+    // The owner may settle at any time (e.g. after replacing the transaction's nonce). Fresh prices
+    // first: the buy's market floor reads ETH and NVDA, and the fast-forward made them stale.
+    nvda_price(&w, 180, 0).await?;
     step(&w, &w.keeper, f, 0, evm_args(v4_values(1, true), 1)).await?.into_result()?;
     report(&w, &w.alice, f, 0, None).await?.into_result()?;
     assert_eq!(inbox(&ledger(&w, f).await?, 0), eth_in);
@@ -170,7 +181,7 @@ async fn a_keeper_cannot_pick_the_deadline_the_nonce_or_the_fee() -> anyhow::Res
     req(&w, &w.alice, "evm_call", approve).await?.into_result()?;
     assert!(fails_with(&step(&w, &w.keeper, f, 0, args(2)).await?, "next EVM nonce is 10"));
     step(&w, &w.keeper, f, 0, args(10)).await?.into_result()?;
-    report(&w, &w.keeper, f, 0, Some(eth_in * 11)).await?.into_result()?;
+    report(&w, &w.keeper, f, 0, Some(eth_in * 13)).await?.into_result()?;
     assert_eq!(view(&w.brain, &w.vault, "get_evm", Value::Null).await?["next_nonce"], json!(11));
     Ok(())
 }
@@ -368,5 +379,52 @@ async fn solana_lp_fees_are_swept_into_a_memecoin_buy() -> anyhow::Result<()> {
     rep(1, 160_000_000_000).await?.into_result()?;
     let l = view(&w.brain, vault, "get_flow", json!({"flow_id": f})).await?["ledger"].clone();
     assert_eq!((l["nodes"][1]["inbox"].as_str().unwrap(), l["nodes"][1]["out_total"].as_str().unwrap()), ("0", "160000000000"));
+    Ok(())
+}
+
+/// The ETHNVDA zap's `share` leaf: its minimum is the share's value from the ETH and NVDA feeds and the
+/// owner's pinned k, whatever the keeper sends (the keeper has no number in it: no price, no L, no S).
+/// Stale prices, a backup that disagrees (NVDA's pool TWAP more than 2% off) and a single-source NVDA
+/// are each refused before anything is signed.
+#[tokio::test]
+async fn a_share_floor_comes_from_the_feeds_and_the_owners_k_never_from_the_keeper() -> anyhow::Result<()> {
+    let w = world().await?;
+    let zap = ladder().pop().unwrap();
+    let f: u32 = req(&w, &w.alice, "save_flow", json!({"name": "basket", "nodes": [zap]})).await?.into_result()?.json()?;
+    let eth_in = 10_000_000_000_000_000u128;
+    req(&w, &w.alice, "fund", json!({"flow_id": f, "node": 0, "amount": eth_in.to_string()})).await?.into_result()?;
+    let k = pinned_k("pairtoken_ethnvda_zap_eth");
+    let zap_args = |min: u128, nonce: u64| evm_args(vec!["0".into(), "0".into(), min.to_string(), "0".into(), "0".into()], nonce);
+
+    // Honest path and the lying keeper: asking for 1 share-wei, or 90% of fair, signs the share floor
+    // (0.01 ETH x $2,400 / (k sqrt($2,400 x $180)) less 3% = 0.01765 shares); asking for more keeps the ask.
+    let want = zap_floor(eth_in, eth_e8(&w, 180), 180 * 100_000_000, k, 300);
+    for (nonce, lie) in [(0u64, 1u128), (1, (want * 0.9) as u128)] {
+        let r = step(&w, &w.keeper, f, 0, zap_args(lie, nonce)).await?;
+        let min = num(&event(&r, "remote_step")["min_out"]);
+        assert!((min as f64 / want - 1.0).abs() < 1e-9, "keeper said {lie}: signed {min}, the feeds say {want}");
+        assert!(event(&r, "evm_call_requested")["data"].as_str().unwrap().contains(&format!("{min:064x}")), "the minimum is in the signed call");
+        report(&w, &w.alice, f, 0, None).await?.into_result()?; // the owner settles it as not landed
+    }
+    let ask = want as u128 * 3 / 2; // under the node's cap of 3 shares per ETH
+    let r = step(&w, &w.keeper, f, 0, zap_args(ask, 2)).await?;
+    assert_eq!(num(&event(&r, "remote_step")["min_out"]), ask, "a higher ask stands (it can only revert)");
+    report(&w, &w.alice, f, 0, None).await?.into_result()?;
+
+    // Stale: a share has no price without fresh token prices.
+    nvda_price(&w, 180, 120).await?;
+    assert!(fails_with(&step(&w, &w.keeper, f, 0, zap_args(1, 3)).await?, "no price fresher"));
+    // NVDA's backup (on testnet: the NVDA/USDG pool's 30-min TWAP) 5% under Chainlink's: refused.
+    nvda_price(&w, 180, 0).await?;
+    w.alice.call(w.pyth.id(), "set_price").args_json(json!({"price_id": NVDA_FEED, "price": "18000000000", "conf": "9000000", "expo": -8,
+        "backup": "17100000000", "age_s": 0})).transact().await?.into_result()?;
+    assert!(fails_with(&step(&w, &w.keeper, f, 0, zap_args(1, 3)).await?, "nvda: price and backup disagree"));
+    // NVDA named single-source again: a share of it has no market floor.
+    let mut feeds = ladder_feeds(w.pyth.id());
+    feeds[1]["backup"] = common::single_source();
+    req(&w, &w.alice, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": feeds}})).await?.into_result()?;
+    nvda_price(&w, 180, 0).await?;
+    assert!(fails_with(&step(&w, &w.keeper, f, 0, zap_args(1, 3)).await?, "nvda: single-source feed"));
+    assert_eq!(inbox(&ledger(&w, f).await?, 0), eth_in, "nothing spent");
     Ok(())
 }

@@ -349,14 +349,16 @@ async fn an_oracle_triggered_remote_evm_step_fits_in_300_tgas() -> anyhow::Resul
     for t in common::templates("robinhood") {
         x(&w.alice, &w.vault, "evm_template", json!({"template": t})).await?.into_result()?;
     }
-    x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": common::single_source()}]}})).await?.into_result()?;
+    // ETH and NVDA, each with a backup: every swap and zap of the ladder has a market floor (2 feeds, 4 reads).
+    x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": ladder::ladder_feeds(pyth.id())}})).await?.into_result()?;
     let nvda = |usd: i64| {
         let (a, p) = (w.alice.clone(), pyth.clone());
         async move {
-            let p8 = usd * 100_000_000;
-            a.call(p.id(), "set_price").args_json(json!({"price_id": NVDA_FEED, "price": p8.to_string(), "conf": (p8 / 2000).to_string(), "expo": -8, "backup": p8.to_string(), "age_s": 0}))
-                .transact().await?.into_result()?;
+            let eth8 = (usd as u128 * 100_000_000 * ladder::RATIO_E6 / 1_000_000) as i64;
+            for (id, p8) in [(NVDA_FEED, usd * 100_000_000), (ladder::ETH_FEED, eth8)] {
+                a.call(p.id(), "set_price").args_json(json!({"price_id": id, "price": p8.to_string(), "conf": (p8 / 2000).to_string(), "expo": -8, "backup": p8.to_string(), "age_s": 0}))
+                    .transact().await?.into_result()?;
+            }
             anyhow::Ok(())
         }
     };
@@ -365,15 +367,15 @@ async fn an_oracle_triggered_remote_evm_step_fits_in_300_tgas() -> anyhow::Resul
     x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": "30000000000000000"})).await?.into_result()?;
     let r = x300(&w.keeper, &w.vault, "step_remote", json!({"flow_id": f, "node": 0, "args": evm_args(v4_values(1, true), 0)})).await?;
     let done = r.is_success() && logged(&r, "evm_signed");
-    row("step_remote, EVM template (buy)", &r, done);
+    row("step_remote, EVM template (buy, market floor)", &r, done);
     assert!(done, "{:?} {:?}", r.logs(), r.failures());
-    x(&w.keeper, &w.vault, "remote_report", json!({"flow_id": f, "node": 0, "out": "355200000000000000"})).await?.into_result()?;
+    x(&w.keeper, &w.vault, "remote_report", json!({"flow_id": f, "node": 0, "out": "395200000000000000"})).await?.into_result()?;
     nvda(275).await?;
     let r = x300(&w.keeper, &w.vault, "step_remote", json!({"flow_id": f, "node": 1, "args": evm_args(v4_values(1, false), 1)})).await?;
     let done = r.is_success() && logged(&r, "remote_price") && logged(&r, "evm_signed");
-    row("step_remote, oracle-triggered EVM template (rung)", &r, done);
+    row("step_remote, oracle-triggered EVM template (rung, market floor)", &r, done);
     assert!(done, "{:?} {:?}", r.logs(), r.failures());
-    let r = x300(&w.keeper, &w.vault, "remote_report", json!({"flow_id": f, "node": 1, "out": "9700000000000000"})).await?;
+    let r = x300(&w.keeper, &w.vault, "remote_report", json!({"flow_id": f, "node": 1, "out": "10000000000000000"})).await?;
     row("remote_report", &r, r.is_success());
     assert!(r.is_success(), "{:?}", r.failures());
     Ok(())

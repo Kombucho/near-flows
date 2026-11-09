@@ -1,6 +1,6 @@
 //! EVM chains through NEAR Chain Signatures: the brain
 //! BUILDS every transaction from a template the owner set (rule trees over the
-//! ABI: fixed / vault / at_most / floor / market / same / deadline / bytes /
+//! ABI: fixed / vault / at_most / floor / market / share / same / deadline / bytes /
 //! encoded / tuple / list), applies caps, floors, market minimums and its own
 //! deadlines, takes a keeper's transaction at the vault's next nonce, counts spending,
 //! and answers with the vault's `sign` call (the MPC key is derived from the
@@ -54,6 +54,10 @@ pub enum Arg {
     /// A swap's deadline: the brain writes block time + 5 min, whatever the keeper sends
     /// (a far deadline lets a signed swap wait for a price that leaves its floor behind).
     Deadline,
+    /// A market minimum where one side is an LP share (`share.name` is market.sell
+    /// or market.buy), priced from its two tokens' feeds and the owner's pinned k
+    /// (oracle::ShareValue). Appended last: older templates keep their borsh tags.
+    Share { of: u8, num: U128, den: U128, market: crate::oracle::Market, share: crate::oracle::ShareValue },
 }
 
 #[near(serializers = [borsh, json])]
@@ -357,7 +361,7 @@ fn check_template(t: &mut EvmTemplate) {
     let rules: Vec<Arg> = leaves(t);
     for (i, r) in rules.iter().enumerate() {
         match r {
-            Arg::Floor { of, .. } | Arg::Market { of, .. } => require!(kinds.get(*of as usize) == Some(&Leaf::Amount), format!("leaf {i}: a floor is relative to an at_most amount")),
+            Arg::Floor { of, .. } | Arg::Market { of, .. } | Arg::Share { of, .. } => require!(kinds.get(*of as usize) == Some(&Leaf::Amount), format!("leaf {i}: a floor is relative to an at_most amount")),
             Arg::Same { of } => require!(matches!(kinds.get(*of as usize), Some(Leaf::Amount | Leaf::Min)), format!("leaf {i}: same as an at_most or floor number")),
             _ => {}
         }
@@ -386,6 +390,14 @@ fn check_rule(r: &mut Arg, ty: &Ty, kinds: &mut Vec<Leaf>, depth: u8) {
         }
         (Arg::Market { den, market, .. }, Ty::Uint(_)) => {
             require!(den.0 > 0 && market.slippage_bps <= 5_000 && market.dec_in <= 36 && market.dec_out <= 36, format!("leaf {i}: den > 0, slippage <= 50%, decimals <= 36"));
+            kinds.push(Leaf::Min)
+        }
+        (Arg::Share { den, market, share, .. }, Ty::Uint(_)) => {
+            require!(den.0 > 0 && market.slippage_bps <= 5_000 && market.dec_in <= 36 && market.dec_out <= 36, format!("leaf {i}: den > 0, slippage <= 50%, decimals <= 36"));
+            require!((market.sell == share.name) != (market.buy == share.name), format!("leaf {i}: the share is market.sell or market.buy (one of them)"));
+            require!(share.name != crate::oracle::USD && share.name != share.a && share.name != share.b && !share.a.is_empty() && !share.b.is_empty(),
+                format!("leaf {i}: a share is priced from two other feeds"));
+            require!(share.k.0 > 0, format!("leaf {i}: k > 0"));
             kinds.push(Leaf::Min)
         }
         (Arg::Same { .. }, Ty::Uint(_)) => kinds.push(Leaf::Same),
@@ -435,6 +447,7 @@ fn rule_name(r: &Arg) -> &'static str {
         Arg::Tuple { .. } => "tuple",
         Arg::List { .. } => "list",
         Arg::Deadline => "deadline",
+        Arg::Share { .. } => "share",
     }
 }
 
@@ -452,19 +465,31 @@ pub(crate) fn leaves(t: &EvmTemplate) -> Vec<Arg> {
     out
 }
 
-/// The feeds a template's market leaves need, each once.
+/// The feeds a template's market and share leaves need, each once (a share's own
+/// name and `usd` are no feeds: the first is computed, the second is one dollar).
 pub(crate) fn market_feeds(rules: &[Arg]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for r in rules {
-        if let Arg::Market { market, .. } = r {
-            for f in [&market.sell, &market.buy] {
-                if !out.contains(f) {
-                    out.push(f.clone());
-                }
+        let names: Vec<&String> = match r {
+            Arg::Market { market, .. } => vec![&market.sell, &market.buy],
+            Arg::Share { market, share, .. } => [&market.sell, &market.buy, &share.a, &share.b].into_iter().filter(|f| **f != share.name).collect(),
+            _ => continue,
+        };
+        for f in names {
+            if f != crate::oracle::USD && !out.contains(f) {
+                out.push(f.clone());
             }
         }
     }
     out
+}
+
+/// A feed's price from the brain's reads (`usd` is exactly one dollar).
+fn price_of(prices: &[(String, u128)], f: &str) -> u128 {
+    if f == crate::oracle::USD {
+        return 1_000_000_000_000_000_000;
+    }
+    prices.iter().find(|(n, _)| n == f).map(|(_, p)| *p).unwrap_or_else(|| env::panic_str("refused: no price"))
 }
 
 /// The deadline the brain signs: block time + 5 minutes, in seconds.
@@ -495,7 +520,13 @@ fn numbers(rules: &[Arg], values: &[U128], prices: &[(String, u128)], deadline: 
             }
             Arg::Market { of, num, den, market } => {
                 let amount = nums[*of as usize].unwrap_or(0);
-                let price = |f: &String| prices.iter().find(|(n, _)| n == f).map(|(_, p)| *p).unwrap_or_else(|| env::panic_str("refused: no price"));
+                let floor = crate::mul_div(amount, num.0, den.0).max(crate::oracle::market_min(market, amount, price_of(prices, &market.sell), price_of(prices, &market.buy)));
+                nums[i] = Some(values[i].0.max(floor));
+            }
+            Arg::Share { of, num, den, market, share } => {
+                let amount = nums[*of as usize].unwrap_or(0);
+                let value = share.usd_e18(price_of(prices, &share.a), price_of(prices, &share.b));
+                let price = |f: &String| if *f == share.name { value } else { price_of(prices, f) };
                 let floor = crate::mul_div(amount, num.0, den.0).max(crate::oracle::market_min(market, amount, price(&market.sell), price(&market.buy)));
                 nums[i] = Some(values[i].0.max(floor));
             }
@@ -566,5 +597,66 @@ fn fixed_word(value: &str, ty: &Ty) -> [u8; 32] {
             w
         }
         _ => env::panic_str("fixed: only addresses, numbers and bools"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oracle::{Market, ShareValue, USD};
+
+    const E18: u128 = 1_000_000_000_000_000_000;
+
+    fn zap(k: u128) -> EvmTemplate {
+        let share = Arg::Share {
+            of: 1, num: U128(1), den: U128(1_000_000_000),
+            market: Market { sell: "eth".into(), buy: "ethnvda".into(), dec_in: 18, dec_out: 18, slippage_bps: 200 },
+            share: ShareValue { name: "ethnvda".into(), a: "eth".into(), b: "nvda".into(), k: U128(k) },
+        };
+        EvmTemplate {
+            name: "zap".into(), to: "0x0d142f0a847838f933114869f6f63bd618bedca8".into(), function: "zapDeposit(address,uint256,uint256,address)".into(),
+            args: vec![Arg::Fixed { value: "0x0000000000000000000000000000000000000000".into() }, Arg::AtMost { max: U128(E18) }, share, Arg::Vault],
+            value: Some(Arg::Same { of: 1 }), spends: None,
+        }
+    }
+
+    /// The feeds a share leaf reads are its two tokens' (never the share, never `usd`), and the
+    /// minimum is the share's market floor whatever the keeper sends: its 0 or 1 is raised.
+    #[test]
+    fn a_share_leaf_reads_its_tokens_feeds_and_raises_a_lying_keepers_minimum() {
+        let mut t = zap(2_006_968_196_877_436_792);
+        check_template(&mut t);
+        let rules = leaves(&t);
+        assert_eq!(market_feeds(&rules), vec!["eth".to_string(), "nvda".to_string()]);
+        let prices = vec![("eth".to_string(), 2_104_322_452_520_000_000_000), ("nvda".to_string(), 179_022_663_570_000_000_000)];
+        let amount = 10_000_000_000_000_000u128; // 0.01 ETH
+        for lie in [0u128, 1, 16_000_000_000_000_000] {
+            let nums = numbers(&rules, &[U128(0), U128(amount), U128(lie), U128(0), U128(0)], &prices, 0);
+            assert_eq!(nums[2], Some(16_741_243_854_324_298), "keeper said {lie}");
+        }
+        // A keeper asking for more is kept (the call may then revert: that moves nothing).
+        let nums = numbers(&rules, &[U128(0), U128(amount), U128(17_000_000_000_000_000), U128(0), U128(0)], &prices, 0);
+        assert_eq!(nums[2], Some(17_000_000_000_000_000));
+        // A Smart LP deposit: USDG is `usd` (one dollar, never read): only AMZN's feed is.
+        let lp = vec![Arg::AtMost { max: U128(1) }, Arg::Share { of: 0, num: U128(0), den: U128(1),
+            market: Market { sell: USD.into(), buy: "sdamzn".into(), dec_in: 6, dec_out: 18, slippage_bps: 100 },
+            share: ShareValue { name: "sdamzn".into(), a: "amzn".into(), b: USD.into(), k: U128(1) } }];
+        assert_eq!(market_feeds(&lp), vec!["amzn".to_string()]);
+    }
+
+    #[test]
+    #[should_panic(expected = "the share is market.sell or market.buy")]
+    fn a_share_leaf_must_be_one_side_of_its_market() {
+        let mut t = zap(1);
+        if let Arg::Share { share, .. } = &mut t.args[2] {
+            share.name = "other".into();
+        }
+        check_template(&mut t);
+    }
+
+    #[test]
+    #[should_panic(expected = "k > 0")]
+    fn a_share_leaf_needs_a_pinned_k() {
+        check_template(&mut zap(0));
     }
 }

@@ -235,10 +235,10 @@ async fn the_testnet_deploy_script_runs_as_written() -> anyhow::Result<()> {
     assert_eq!((ps["kind"].as_str(), ps["guardian_set"].as_u64(), ps["guardians"].as_array().map(|g| g.len()), ps["emitter_chain"].as_u64()), (Some("pyth_core"), Some(1), Some(5), Some(26)), "{ps}");
     assert_eq!(ps["feeds"].as_array().unwrap().len(), 3);
     assert_eq!((oracle["feeds"][0]["price_id"].as_str(), oracle["feeds"][4]["price_id"].as_str()), (Some(NEAR_ID), Some(NVDA_ID)));
-    // Every feed is confirmed by a different publisher on the board; NVDA has none and says so.
+    // Every feed is confirmed by a different publisher on the board: NVDA by its USDG pool's TWAP.
     let backups: Vec<Value> = oracle["feeds"].as_array().unwrap().iter().map(|f| f["backup"].clone()).collect();
     let other = |pid: &str| json!({"kind": "other", "contract": id("board"), "price_id": pid});
-    assert_eq!(backups, [other(NEAR_OP_ID), other(USDC_ARB_ID), other(ETH_ARB_ID), other(SOL_ARB_ID), json!({"kind": "single_source"})]);
+    assert_eq!(backups, [other(NEAR_OP_ID), other(USDC_ARB_ID), other(ETH_ARB_ID), other(SOL_ARB_ID), other("004800000000000000000000d4eb21209c4d6093f80b5b84f5c45cc093ea14a3")]);
 
     // The keeper's key, as the keeper scripts use it, gets a Chainlink price (NEAR, chainlink-price),
     // a Pyth one (ETH, as pyth --board does with PYTH_SOURCE=attested) and ETH's backup (Chainlink

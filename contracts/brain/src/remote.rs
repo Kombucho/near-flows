@@ -317,7 +317,7 @@ impl Talk {
                 let (tx, nums) = self.evm_prepare(&cfg, &t, values, nonce, max_fee, max_tip, gas, prices, !by_owner);
                 let min = match at(min_leaf) {
                     Some(m) => {
-                        require!(matches!(rules[m], Arg::Floor { .. } | Arg::Market { .. }), "min_leaf: a floor or market leaf");
+                        require!(matches!(rules[m], Arg::Floor { .. } | Arg::Market { .. } | Arg::Share { .. }), "min_leaf: a floor, market or share leaf");
                         nums[m].unwrap_or(0)
                     }
                     None => 0,

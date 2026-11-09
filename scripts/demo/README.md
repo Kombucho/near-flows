@@ -29,7 +29,7 @@ it, and refuses anything else.
 
 **Simulated or stood in**
 - The MPC signer. `mock_signer` holds real secp256k1 / Ed25519 keys and signs the way NEAR's MPC network would. Only the key custody differs. The derived addresses are the mock's own, not mainnet MPC addresses.
-- Oracle prices. `mock_pyth` has Pyth's read interface and the test sets the prices: NEAR $2 (with a second publisher's price as its backup), then NVDA walking $180 → $545 (single-source, it only fires the rungs).
+- Oracle prices. `mock_pyth` has Pyth's read interface and the test sets the prices: NEAR $2 (with a second publisher's price as its backup), then NVDA walking $180 → $545 with ETH alongside at the fork pool's own ratio (each with a backup that agrees), so every swap and zap of the ladder has a market floor the fork can meet: the swaps' from the ETH and NVDA prices, the zap's from the ETHNVDA share's value at those prices.
 - MEME on NEAR is a mock token (6 decimals). Its Rhea pool is seeded at $5.1204e-8, a real pump.fun curve price from earlier.
 - Balances on the forks are set with cheat codes: 2 SOL, 500 USDC, 1 ETH. The whale and the trader are test accounts.
 - Remote outputs are keeper-reported. The vault can't see Solana or EVM balances, so it accepts a report only between the minimum it signed and the node's cap. In the demo the keeper reports what the fork shows.

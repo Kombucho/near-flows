@@ -6,7 +6,9 @@
 //! One vault, three flows:
 //! - EVM: a Uniswap v4 buy of NVDA with 0.03 ETH. The keeper quotes the pool, takes the
 //!   brain's next nonce and the owner's fee cap, broadcasts the signed swap on the fork,
-//!   measures the NVDA that arrived at the vault's address and reports it.
+//!   measures the NVDA that arrived at the vault's address and reports it. The brain raises
+//!   the keeper's minimum to its market floor (the ETH and NVDA feeds, each with a backup:
+//!   mock_pyth here, kept fresh at the fork pool's ratio while the keeper works).
 //! - Hop then Solana: 0.1 SOL out of the vault's Intents account (the real verifier and
 //!   omni-token code) to the vault's own Solana address; the keeper watches that address,
 //!   reports what landed (the test plays the bridge's payout, less its fee), and the next
@@ -23,6 +25,7 @@
 
 mod common;
 mod hopw;
+mod ladder;
 mod relayw;
 
 use std::process::{Child, Command, Stdio};
@@ -129,6 +132,24 @@ async fn the_keeper_runs_an_evm_swap_a_hop_and_a_pump_fun_buy_by_itself_and_resu
     i.bridge_in(&i.sol, &w.vault, SOL).await?;
     x(&w.alice, &w.vault, "intents_hop", hop_rule(i.sol.id(), "sol", SOL / 2, SOL / 10_000)).await?.into_result()?;
 
+    // The swap's market floor reads ETH and NVDA (each with its backup): fresh prices at the
+    // fork pool's ratio, re-posted every 15 s while the keeper works (a feed is good for 60 s).
+    let pyth = w.worker.dev_deploy(&common::wasm("mock_pyth")).await?;
+    pyth.call("new").transact().await?.into_result()?;
+    x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": ladder::ladder_feeds(pyth.id())}})).await?.into_result()?;
+    let ratio = ladder::pool_ratio_e6(&evm);
+    let nvda_usd = ladder::chainlink_e8(&evm, ladder::RHNVDA_FEED) / 100_000_000;
+    ladder::set_pair(&w.alice, &pyth, nvda_usd, ratio, 0).await?;
+    let fresh = {
+        let (a, p) = (w.alice.clone(), pyth.clone());
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                let _ = ladder::set_pair(&a, &p, nvda_usd, ratio, 0).await;
+            }
+        })
+    };
+
     // Flow 0, EVM: buy NVDA with 0.03 ETH on Uniswap v4.
     let remote = |input: &str, label: &str, call: Value, out: Value, cap: Option<u128>, next: Value| json!({"input": input, "when": {"when": "now"}, "next": next,
         "action": {"label": label, "calls": [], "out": null, "min_out_per_in": null, "price": null,
@@ -176,7 +197,10 @@ async fn the_keeper_runs_an_evm_swap_a_hop_and_a_pump_fun_buy_by_itself_and_resu
     assert_eq!(u(&node(&v, f_evm, 0)["inbox"]), 0);
     assert_eq!(v["evm"]["next_nonce"], 1, "the brain's nonce, used once");
     assert_eq!(num(&evm.cast(&["nonce", &evm_me])), 1, "and landed at it");
-    println!("keeper: 0.03 ETH -> {:.6} NVDA on the Robinhood fork, reported", nvda as f64 / 1e18);
+    fresh.abort();
+    let floor = ladder::market_floor(30_000_000_000_000_000, (nvda_usd as u128 * 100_000_000 * ratio / 1_000_000) as i64, nvda_usd * 100_000_000, 300);
+    assert!(nvda >= floor, "at least the market floor");
+    println!("keeper: 0.03 ETH -> {:.6} NVDA on the Robinhood fork, reported (market floor {:.6})", nvda as f64 / 1e18, floor as f64 / 1e18);
 
     // 2. The hop: sent by NEAR, waiting for the bridge. Stop the keeper while it waits.
     until(&w, &k, 120, "the hop sent", |v| v["remote"].as_array().is_some_and(|r| r.iter().any(|p| p["flow"] == f_sol && p["node"] == 0 && p["signed"] == true))).await?;

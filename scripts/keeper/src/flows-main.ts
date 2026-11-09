@@ -95,7 +95,8 @@ const run = promisify(execFile);
 async function freshen(vault: string) {
   if (!boards.length || !opt.send || fresh.has(vault)) return;
   fresh.add(vault);
-  const scripts = ["chainlink-price", ...(process.env.PYTH_API_KEY ? ["pyth"] : [])];
+  // twap-price: pool TWAPs behind a feed (NVDA's backup), on attested boards.
+  const scripts = ["chainlink-price", "twap-price", ...(process.env.PYTH_API_KEY ? ["pyth"] : [])];
   // Every board x every script: each script posts only what it can to that kind of board
   // (and says "which feeds?" when there's nothing, which is fine).
   for (const board of boards) {

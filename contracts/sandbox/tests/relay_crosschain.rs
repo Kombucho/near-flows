@@ -30,17 +30,22 @@ async fn ladder_world() -> anyhow::Result<(RelayWorld, Contract)> {
     for t in common::templates("robinhood") {
         x(&w.alice, &w.vault, "evm_template", json!({"template": t})).await?.into_result()?;
     }
-    x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": [
-        {"name": "nvda", "contract": pyth.id(), "price_id": NVDA_FEED, "backup": common::single_source()}]}})).await?.into_result()?;
+    x(&w.alice, &w.vault, "oracle_setup", json!({"config": {"max_age_s": 60, "max_conf_bps": 100, "tolerance_bps": 200, "feeds": ladder_feeds(pyth.id())}})).await?.into_result()?;
     price(&w, &pyth, 180, 0).await?;
     Ok((w, pyth))
 }
 
+/// NVDA at `usd`, ETH at 13.33 NVDA (ladder::RATIO_E6), both confirmed by their backups.
 async fn price(w: &RelayWorld, pyth: &Contract, usd: i64, age_s: i64) -> anyhow::Result<()> {
-    let p = usd * 100_000_000;
-    w.alice.call(pyth.id(), "set_price").args_json(json!({"price_id": NVDA_FEED, "price": p.to_string(), "conf": (p / 2000).to_string(),
-        "expo": -8, "backup": p.to_string(), "age_s": age_s})).transact().await?.into_result()?;
+    for (id, p) in [(NVDA_FEED, usd * 100_000_000), (ladder::ETH_FEED, eth_usd_e8(usd))] {
+        w.alice.call(pyth.id(), "set_price").args_json(json!({"price_id": id, "price": p.to_string(), "conf": (p / 2000).to_string(),
+            "expo": -8, "backup": p.to_string(), "age_s": age_s})).transact().await?.into_result()?;
+    }
     Ok(())
+}
+
+fn eth_usd_e8(nvda_usd: i64) -> i64 {
+    (nvda_usd as u128 * 100_000_000 * RATIO_E6 / 1_000_000) as i64
 }
 
 async fn ledger_of(w: &RelayWorld, f: u32) -> anyhow::Result<Value> {
@@ -58,7 +63,7 @@ async fn the_nvda_ladder_runs_on_a_relay_vault_with_the_same_bounds() -> anyhow:
     x(&w.alice, &w.vault, "fund", json!({"flow_id": f, "node": 0, "amount": eth_in.to_string()})).await?.into_result()?;
     assert!(fails_with(&x(&w.keeper, &w.vault, "step", json!({"flow_id": f, "node": 0})).await?, "step_remote"));
 
-    // Buy: the brain signs the node's own 0.03 ETH, a 5-minute deadline and the template's floor.
+    // Buy: the brain signs the node's own 0.03 ETH, a 5-minute deadline and the market floor (ETH and NVDA's feeds, less 3%).
     let step = |node: u16, args: Value| x(&w.keeper, &w.vault, "step_remote", json!({"flow_id": f, "node": node, "args": args}));
     let r = step(0, evm_args(v4_values(1, true), 0)).await?;
     println!("GAS relay step_remote (buy): {:.1} Tgas", tgas(&r));
@@ -68,7 +73,7 @@ async fn the_nvda_ladder_runs_on_a_relay_vault_with_the_same_bounds() -> anyhow:
     let req = event(&r, "evm_call_requested");
     assert_eq!(req["value"], json!(eth_in.to_string()), "the ETH attached is the node's input");
     let s = event(&r, "remote_step");
-    let min = eth_in * 1067 / 100;
+    let min = market_floor(eth_in, eth_usd_e8(180), 180 * 100_000_000, 300);
     assert_eq!((num(&s["amount"]), num(&s["min_out"]), num(&s["max_out"])), (eth_in, min, eth_in * 20));
 
     // Bounds: busy, only the owner may fail it early, below the signed minimum, over the cap.
@@ -81,7 +86,7 @@ async fn the_nvda_ladder_runs_on_a_relay_vault_with_the_same_bounds() -> anyhow:
     assert!(fails_with(&report(&w.keeper, 0, None).await?, "only the owner may say"));
     assert!(fails_with(&report(&w.keeper, 0, Some(min - 1)).await?, "below the signed minimum"));
     assert!(fails_with(&report(&w.keeper, 0, Some(eth_in * 20 + 1)).await?, "over the node's cap"));
-    let got = 355_200_000_000_000_000u128;
+    let got = 395_200_000_000_000_000u128;
     report(&w.keeper, 0, Some(got)).await?.into_result()?;
     let third = got * 3_333 / 10_000;
     let l = ledger_of(&w, f).await?;
@@ -94,7 +99,7 @@ async fn the_nvda_ladder_runs_on_a_relay_vault_with_the_same_bounds() -> anyhow:
     let r = step(1, evm_args(v4_values(1, false), 1)).await?;
     println!("GAS relay step_remote (rung, oracle read): {:.1} Tgas", tgas(&r));
     assert_eq!(num(&event(&r, "remote_price")["price"]), 275 * E24);
-    report(&w.keeper, 1, Some(9_700_000_000_000_000)).await?.into_result()?;
+    report(&w.keeper, 1, Some(10_000_000_000_000_000)).await?.into_result()?;
     price(&w, &pyth, 400, 120).await?;
     assert!(fails_with(&step(2, evm_args(v4_values(1, false), 2)).await?, "no price fresher"));
     assert_eq!(inbox(&ledger_of(&w, f).await?, 2), third, "nothing taken");

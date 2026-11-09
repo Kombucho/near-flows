@@ -8,8 +8,8 @@
 // Wormhole Queries can read, so an Evm board can check them without trusting us.
 // And every feed needs a backup from a DIFFERENT publisher (a vault checks the two
 // agree, read in the same round): Chainlink on Arbitrum backs Pyth's ETH, SOL and
-// USDC, and Chainlink's NEAR/USD on Optimism backs the one on Arbitrum. NVDA has
-// no independent second source; a vault names it single_source.
+// USDC, and Chainlink's NEAR/USD on Optimism backs the one on Arbitrum. NVDA's
+// backup is no oracle: its USDG pool's 30-min TWAP (twap.ts).
 
 /** keccak256("latestRoundData()")[..4] and keccak256("decimals()")[..4]. */
 export const LATEST_ROUND_DATA = "feaf968c";
