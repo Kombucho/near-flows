@@ -7,6 +7,7 @@ import {
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
+  useViewport,
   type Edge,
   type Node,
   type NodeProps,
@@ -14,8 +15,9 @@ import {
 import "@xyflow/react/dist/style.css";
 import { edgeCaption } from "../model/compose";
 import type { FlowNode } from "../model/flow";
+import { layoutGraph } from "../model/place";
 import { DEMO_ACCOUNT } from "../demo/fixtures";
-import { nodeReadout, type LiveBook } from "../live/quotes";
+import { nodeReadout, quotedToken, type LiveBook } from "../live/quotes";
 import { chainLabel } from "../model/shell";
 import type { NodeStage, Stage } from "../model/replay";
 import { Spark } from "./bits";
@@ -49,17 +51,33 @@ function shortToken(token: string): string {
 }
 
 function StepNode({ data, selected }: NodeProps<Node<Data>>) {
-  const quote = nodeReadout({
+  const { zoom } = useViewport();
+  const readout = nodeReadout({
     demo: data.demo,
-    token: data.node.output ?? data.node.input,
+    token: quotedToken(data.node.input, data.node.output),
+    service: data.node.service,
+    inputToken: data.node.input,
     planAmount: data.node.planAmount,
-    demoAmount: data.demo ? "420 NEAR" : undefined,
     demoEntry: data.demo ? DEMO_ACCOUNT.nearPrice.toFixed(2) : undefined,
     book: data.book,
     now: data.now,
   });
   const running = data.stages.includes("signed") && !data.stages.includes("reported") && !data.stages.includes("failed");
   const status = data.demo ? "demo" : running ? "running" : "idle";
+  const failed = data.stages.includes("failed");
+  if (zoom < 0.72) {
+    return (
+      <article className={selected ? "step step-mini selected" : "step step-mini"} data-chain={data.node.chain}>
+        <Handle type="target" position={Position.Left} />
+        <header>
+          <strong>{data.node.title}</strong>
+          <span className={readout.changeUp == null ? "muted" : readout.changeUp ? "up" : "down"}>{readout.change ?? "unknown"}</span>
+        </header>
+        <p className="mini-value num">{readout.current}</p>
+        <Handle type="source" position={Position.Right} />
+      </article>
+    );
+  }
   return (
     <article className={selected ? "step selected" : "step"} data-chain={data.node.chain} data-pulse={data.pulse ? "1" : "0"}>
       <Handle type="target" position={Position.Left} />
@@ -68,18 +86,31 @@ function StepNode({ data, selected }: NodeProps<Node<Data>>) {
         <span className={`status ${status}`}>{status}</span>
       </header>
       <p className="venue">{data.node.venue} · {chainLabel(data.node.chain)}{data.node.auto ? " · auto" : ""}</p>
-      <dl className="quote">
-        <div><dt>Entry {quote.entryTag ? <span className="chip demo-tag">{quote.entryTag}</span> : null}</dt><dd>{quote.entry}</dd></div>
-        <div><dt>Amount {quote.amountTag ? <span className="chip demo-tag">{quote.amountTag}</span> : null}</dt><dd>{quote.amount}</dd></div>
-        <div><dt>Value {quote.currentTag ? <span className="chip ok">{quote.currentTag}</span> : null}</dt><dd className={data.pulse ? "pulse" : ""}>{quote.current}</dd></div>
-        <div><dt>Change</dt><dd className={quote.changeUp == null ? "" : quote.changeUp ? "up" : "down"}>{quote.change ?? "unknown"}</dd></div>
-      </dl>
-      {quote.spark.length > 1 ? <Spark points={quote.spark} up={quote.changeUp !== false} /> : null}
-      <p className="ago">{quote.ago}</p>
+      <div className="quote">
+        <div>
+          <div className="q-label">Entry {readout.entryTag ? <span className="chip demo-tag">{readout.entryTag}</span> : null}</div>
+          <div className="q-value num">{readout.entry}</div>
+        </div>
+        <div>
+          <div className="q-label">Amount {readout.amountTag ? <span className="chip demo-tag">{readout.amountTag}</span> : null}</div>
+          <div className="q-value num">{readout.amount}</div>
+        </div>
+        <div>
+          <div className="q-label">Value {readout.currentTag ? <span className="chip ok">{readout.currentTag}</span> : null}</div>
+          <div className={data.pulse ? "q-value num pulse" : "q-value num"}>{readout.current}</div>
+        </div>
+        <div className="q-change">
+          <div className="q-label">Change</div>
+          <div className={readout.changeUp == null ? "q-value" : readout.changeUp ? "q-value up" : "q-value down"}>{readout.change ?? "unknown"}</div>
+        </div>
+      </div>
+      {readout.spark.length > 1 ? <Spark points={readout.spark} up={readout.changeUp !== false} /> : null}
+      <p className="ago">{readout.ago}</p>
       <div className="chips">
-        {STAGE_NAMES.map((stage) => (
-          <span key={stage} className={data.stages.includes(stage) ? `chip ${stage === "failed" ? "bad" : "ok"}` : "chip neutral"}>{stage}</span>
+        {STAGE_NAMES.filter((stage) => stage !== "failed").map((stage) => (
+          <span key={stage} className={data.stages.includes(stage) ? "chip ok" : "chip wait"}>{stage}</span>
         ))}
+        {failed ? <span className="chip bad">failed</span> : null}
       </div>
       <footer>
         <span className="muted">{shortToken(data.node.input)} → {data.node.output ? shortToken(data.node.output) : "held"}</span>
@@ -127,15 +158,16 @@ function BoardInner({
 }) {
   const flow = useReactFlow();
   const stageById = useMemo(() => new Map(stages.map((stage) => [stage.nodeId, stage.evidenced])), [stages]);
+  const placed = useMemo(() => new Map(layoutGraph(nodes).map((item) => [item.id, item])), [nodes]);
   const flowNodes = useMemo<Node<Data>[]>(() => {
     return nodes.map((node) => ({
       id: node.id,
       type: "step",
-      position: { x: node.position.x, y: node.position.y },
+      position: placed.get(node.id) ?? node.position,
       data: { node, stages: stageById.get(node.id) ?? [], demo, book, now, pulse, onOpen: onDetails },
       selected: node.id === selectedId,
     }));
-  }, [nodes, stageById, selectedId, onDetails, demo, book, now, pulse]);
+  }, [nodes, placed, stageById, selectedId, onDetails, demo, book, now, pulse]);
 
   const edges = useMemo<Edge[]>(() => {
     const byIndex = new Map(nodes.map((node) => [node.index, node]));
@@ -161,7 +193,8 @@ function BoardInner({
   }, [nodes, selectedId, theme]);
 
   const anchor = nodes.reduce<{ x: number; y: number } | null>((best, node) => {
-    if (!best || node.position.x < best.x || (node.position.x === best.x && node.position.y < best.y)) return node.position;
+    const at = placed.get(node.id) ?? node.position;
+    if (!best || at.x < best.x || (at.x === best.x && at.y < best.y)) return at;
     return best;
   }, null);
   const narrow = typeof window !== "undefined" && window.matchMedia("(max-width: 860px)").matches;

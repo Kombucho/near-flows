@@ -77,13 +77,28 @@ export function parseMeteoraPools(body: unknown): PoolRow[] {
 
 export type Asset = "near" | "sol" | "eth" | "usdc";
 
-export function assetFor(token: string | null): Asset | null {
-  if (!token) return null;
-  if (token === "near" || token.includes("wrap") || token.includes("linear")) return "near";
-  if (token.startsWith("sol:SOL") || token === "sol:SOL") return "sol";
-  if (token.includes("usdc") || token.includes("EPj")) return "usdc";
-  if (token.endsWith(":eth") || token.endsWith(":ethnvda")) return "eth";
-  return null;
+export function tokenUnit(token: string | null): { asset: Asset | null; symbol: string } {
+  if (!token || token === "none") return { asset: null, symbol: "—" };
+  if (token === "near") return { asset: "near", symbol: "NEAR" };
+  if (token.includes("wrap")) return { asset: "near", symbol: "wNEAR" };
+  if (token.includes("linear")) return { asset: "near", symbol: "LiNEAR" };
+  if (token === "sol:SOL" || token.endsWith(":SOL")) return { asset: "sol", symbol: "SOL" };
+  if (token.includes("EPj") || token.toLowerCase().includes("usdc")) return { asset: "usdc", symbol: "USDC" };
+  if (token.endsWith(":ethnvda")) return { asset: null, symbol: "ETHNVDA" };
+  if (token.endsWith(":nvda")) return { asset: null, symbol: "NVDA" };
+  if (token.endsWith(":eth")) return { asset: "eth", symbol: "ETH" };
+  if (token.includes("meme")) return { asset: null, symbol: "MEME" };
+  if (token.startsWith("sol:")) return { asset: null, symbol: "coin" };
+  return { asset: null, symbol: "token" };
+}
+
+/** Prefer the output when we can price it. Otherwise the input. Never a different asset. */
+export function quotedToken(input: string, output: string | null): string {
+  const produced = tokenUnit(output);
+  if (output && produced.asset) return output;
+  const accepted = tokenUnit(input);
+  if (accepted.asset) return input;
+  return output ?? input;
 }
 
 export type NodeReadout = {
@@ -100,36 +115,59 @@ export type NodeReadout = {
   spark: number[];
 };
 
+function demoAmount(symbol: string, service: string | undefined, input: string | undefined): string | null {
+  if (symbol === "wNEAR" && service === "wnear") return "180 wNEAR";
+  if (symbol === "LiNEAR" && service === "linear") return "180 LiNEAR";
+  if (symbol === "SOL" && (service === "pump" || service === "meteora" || service === "vault")) return "18.4 SOL";
+  if (symbol === "USDC" && service === "meteora") return "1,200 USDC";
+  if (symbol === "ETH" && (service === "uniswap-v4" || service === "stonk") && input?.endsWith(":eth")) return "0.62 ETH";
+  return null;
+}
+
 export function nodeReadout(input: {
   demo: boolean;
   token: string | null;
   planAmount?: string;
-  demoAmount?: string;
+  service?: string;
+  inputToken?: string;
+  /** Demo wrap/entry price for NEAR and wNEAR only, e.g. "4.40". */
   demoEntry?: string;
   book: LiveBook;
   now: number;
 }): NodeReadout {
-  const asset = assetFor(input.token);
-  const spot = asset ? input.book[asset] : null;
+  const unit = tokenUnit(input.token);
+  const spot = unit.asset ? input.book[unit.asset] : null;
   const live = input.book.status === "live" && !!spot;
   const seconds = live && input.book.updatedAt ? Math.max(0, Math.round((input.now - input.book.updatedAt) / 1000)) : null;
-  const amount = input.planAmount
-    ? { text: `${input.planAmount} NEAR`, tag: "Plan" as const }
-    : input.demo && input.demoAmount
-      ? { text: input.demoAmount, tag: "Demo" as const }
-      : { text: "unknown", tag: null };
-  const sparkKey = asset === "sol" ? "sol" : asset === "eth" ? "eth" : "near";
+  const nearFamily = unit.symbol === "NEAR" || unit.symbol === "wNEAR" || unit.symbol === "LiNEAR";
+  const sample = input.demo ? demoAmount(unit.symbol, input.service, input.inputToken) : null;
+  const amount = input.planAmount && nearFamily
+    ? { text: `${input.planAmount} ${unit.symbol}`, tag: "Plan" as const }
+    : sample
+      ? { text: sample, tag: "Demo" as const }
+      : { text: `unknown ${unit.symbol}`, tag: null };
+  const entryNumber = input.demo && input.demoEntry && nearFamily ? Number(input.demoEntry) : null;
+  const entryKnown = entryNumber != null && Number.isFinite(entryNumber) && entryNumber > 0;
+  let change: string | null = "unknown";
+  let changeUp: boolean | null = null;
+  if (entryKnown && live && spot) {
+    const pct = ((spot.usd - entryNumber) / entryNumber) * 100;
+    change = `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+    changeUp = pct >= 0;
+  }
+  const sparkKey = unit.asset === "sol" ? "sol" : unit.asset === "eth" ? "eth" : unit.asset === "near" ? "near" : null;
+  const decimals = unit.asset === "usdc" ? 4 : 2;
   return {
-    entry: input.demo && input.demoEntry && asset === "near" ? input.demoEntry : "unknown",
-    entryTag: input.demo && input.demoEntry && asset === "near" ? "Demo" : null,
+    entry: entryKnown ? input.demoEntry! : "unknown",
+    entryTag: entryKnown ? "Demo" : null,
     amount: amount.text,
     amountTag: amount.tag,
-    current: live && spot ? spot.usd.toFixed(asset === "usdc" ? 4 : 2) : "price unavailable",
+    current: live && spot ? `$${spot.usd.toFixed(decimals)} / ${unit.symbol}` : "price unavailable",
     currentTag: live ? "live" : null,
-    change: live && spot?.changePct != null ? `${spot.changePct >= 0 ? "+" : ""}${spot.changePct.toFixed(1)}%` : null,
-    changeUp: live && spot?.changePct != null ? spot.changePct >= 0 : null,
+    change,
+    changeUp,
     ago: seconds != null ? `live · updated ${seconds}s ago` : "price unavailable",
     status: input.demo ? "demo" : "idle",
-    spark: live ? input.book.sparks[sparkKey] ?? [] : [],
+    spark: live && sparkKey ? input.book.sparks[sparkKey] ?? [] : [],
   };
 }

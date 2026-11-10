@@ -183,7 +183,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   position: absolute;
   z-index: 4;
   left: 16px;
-  bottom: 118px;
+  top: 132px;
   display: flex;
   gap: 6px;
 }
@@ -230,16 +230,17 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .toast {
   position: absolute;
-  z-index: 7;
-  right: 16px;
-  bottom: 88px;
+  z-index: 8;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
   margin: 0;
-  max-width: 280px;
-  padding: 10px 12px;
+  max-width: min(420px, calc(100% - 160px));
+  padding: 10px 14px;
   border-radius: 14px;
   background: var(--card);
-  border: 1px solid var(--line);
-  box-shadow: var(--lift);
+  box-shadow: var(--shadow), var(--lift);
+  white-space: nowrap;
 }
 
 .pnl { text-align: center; }
@@ -267,7 +268,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .panel-flows, .panel-connect, .panel-settings, .panel-review { top: 72px; right: 14px; }
 .panel-settings, .panel-review { width: min(420px, calc(100vw - 28px)); }
 .panel-nodes { right: 16px; bottom: 88px; }
-.panel-inspector { top: 132px; left: 14px; }
+.panel-inspector { top: 120px; left: 14px; max-height: calc(100vh - 140px); }
 .panel ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .menu-item {
   width: 100%;
@@ -390,12 +391,20 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .stat-row { display: flex; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 12px; }
 .position { display: grid; gap: 6px; padding: 12px; border-radius: 12px; background: var(--tile); }
 .empty-well { margin: 0; padding: 16px; border-radius: 12px; background: var(--tile); color: var(--muted); }
+.runs-toggle {
+  position: absolute;
+  z-index: 6;
+  left: 150px;
+  bottom: 18px;
+}
 .demo-runs {
   position: absolute;
   z-index: 6;
-  top: 188px;
   left: 16px;
-  width: min(300px, calc(100% - 32px));
+  bottom: 128px;
+  width: min(280px, calc(100% - 200px));
+  max-height: 42vh;
+  overflow: auto;
   display: grid;
   gap: 12px;
   padding: 16px;
@@ -404,7 +413,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
   box-shadow: var(--shadow), var(--lift);
 }
 .step {
-  width: 248px;
+  width: 300px;
   background: var(--card-2);
   border: 0;
   border-radius: 16px;
@@ -430,13 +439,16 @@ dd { margin: 0; overflow-wrap: anywhere; }
   padding: 0;
   min-height: 0;
 }
-.quote { display: grid; gap: 4px; margin: 4px 0; }
-.quote div { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
-.quote dt, .quote dd { margin: 0; font-size: 12px; white-space: nowrap; }
-.quote dt { color: var(--muted); font-weight: 500; }
-.quote dd { font-weight: 650; }
-.quote dd.up { color: var(--green); }
-.quote dd.down { color: var(--red); }
+.quote { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; margin: 4px 0; }
+.q-label { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 11px; font-weight: 500; }
+.q-value { margin-top: 2px; font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.q-change { text-align: right; }
+.q-change .q-label { justify-content: flex-end; }
+.q-value.up { color: var(--green); }
+.q-value.down { color: var(--red); }
+.step-mini { min-height: 72px; }
+.step-mini .mini-value { margin: 0; font-size: 14px; font-weight: 650; }
+.chip.wait { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); }
 .ago { margin: 0; font-size: 11px; color: var(--muted); }
 .status { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; border-radius: 999px; padding: 2px 8px; background: var(--tile); }
 .status.demo { background: #ff9f0a1f; color: #c2760a; }

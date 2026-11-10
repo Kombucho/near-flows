@@ -35,6 +35,7 @@ export function Workspace() {
   const [now, setNow] = useState(() => Date.now());
   const [pulse, setPulse] = useState(false);
   const [compose, setCompose] = useState(false);
+  const [runsOpen, setRunsOpen] = useState(false);
   const book = useLiveBook();
   const pools = useMeteoraPools();
   const spot = book.near?.usd ?? null;
@@ -282,6 +283,9 @@ export function Workspace() {
           <button type="button" className="icon-btn" aria-label={theme === "dark" ? "Use light theme" : "Use dark theme"} onClick={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}>
             {theme === "dark" ? "Light" : "Dark"}
           </button>
+          {demo && strategies ? (
+            <button type="button" className="chip-btn" aria-pressed={runsOpen} onClick={() => setRunsOpen((value) => !value)}>Runs</button>
+          ) : null}
           <button type="button" className="chip-btn" aria-pressed={demo} onClick={() => setDemo((value) => !value)}>
             Try demo
           </button>
@@ -297,10 +301,11 @@ export function Workspace() {
       {strategies && app.replay ? (
         <span className="replay-flag chip replay">Replay</span>
       ) : null}
-      {strategies && demo ? (
+      {strategies && demo && runsOpen ? (
         <aside className="demo-runs" aria-label="Demo runs">
           <div className="desk-head">
             <h2>Run history</h2>
+            <button type="button" className="chip-btn" onClick={() => setRunsOpen(false)}>Hide</button>
             <DemoTag />
           </div>
           <ul className="feed">
