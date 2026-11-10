@@ -9,8 +9,12 @@ import { CHAIN_PINS, chainPin, paletteGroups } from "../model/shell";
 import { useApp, type Surface, type VaultDraft } from "../state";
 import { ChartView } from "./ChartView";
 import { ChainDesk, PortfolioDesk, ProtocolDesk } from "./Desk";
+import type { PoolRow } from "../live/quotes";
+import { useLiveBook, useMeteoraPools } from "../live/useLive";
 import { DemoTag } from "./bits";
+import { Composer } from "./Composer";
 import { FlowBoard } from "./FlowBoard";
+import { ProtocolApp } from "./ProtocolApp";
 
 type Panel = "flows" | "nodes" | "connect" | "settings" | "review" | "inspector" | null;
 type ThemeName = "light" | "dark";
@@ -28,6 +32,12 @@ export function Workspace() {
   const app = useApp();
   const [theme, setTheme] = useState<ThemeName>(readTheme);
   const [demo, setDemo] = useState(() => localStorage.getItem(DEMO_KEY) === "1");
+  const [now, setNow] = useState(() => Date.now());
+  const [pulse, setPulse] = useState(false);
+  const [compose, setCompose] = useState(false);
+  const book = useLiveBook();
+  const pools = useMeteoraPools();
+  const spot = book.near?.usd ?? null;
   const [panel, setPanel] = useState<Panel>(null);
   const [note, setNote] = useState<string | null>(null);
   const [flowName, setFlowName] = useState("");
@@ -43,6 +53,18 @@ export function Workspace() {
   useEffect(() => {
     localStorage.setItem(DEMO_KEY, demo ? "1" : "0");
   }, [demo]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (spot == null) return;
+    setPulse(true);
+    const timer = window.setTimeout(() => setPulse(false), 700);
+    return () => window.clearTimeout(timer);
+  }, [spot]);
 
   useEffect(() => {
     if (!note) return;
@@ -155,6 +177,12 @@ export function Workspace() {
           }}
           onMove={app.moveNode}
           onConnectEnds={onConnect}
+          demo={demo}
+          book={book}
+          now={now}
+          pulse={pulse}
+          onCompose={() => setCompose(true)}
+          onComposeFrom={() => setCompose(true)}
         />
       ) : strategies ? (
         <div className="canvas-wrap bare">
@@ -291,6 +319,24 @@ export function Workspace() {
       ) : null}
 
       {note ? <p className="toast" role="status">{note}</p> : null}
+
+      {strategies ? (
+        <button type="button" className="compose-fab" aria-label="Compose node" onClick={() => setCompose(true)}>+</button>
+      ) : null}
+      {compose && strategies ? (
+        <Composer
+          demo={demo}
+          startIndex={(flow?.nodes.reduce((max, node) => Math.max(max, node.index), -1) ?? -1) + 1}
+          origin={{ x: (flow?.nodes.reduce((max, node) => Math.max(max, node.position.x), 0) ?? 0) + 340, y: 200 }}
+          onClose={() => setCompose(false)}
+          onCreate={(nodes) => {
+            app.appendNodes(nodes);
+            setCompose(false);
+            setPanel("inspector");
+            setNote("Plan added. Nothing is signed.");
+          }}
+        />
+      ) : null}
 
       {strategies ? <button
         type="button"
@@ -453,6 +499,8 @@ export function Workspace() {
           onChange={app.updateVisibleNode}
           onClose={() => setPanel(null)}
           onNote={setNote}
+          demo={demo}
+          pools={pools}
         />
       ) : null}
 
@@ -478,12 +526,16 @@ function Inspector({
   onChange,
   onClose,
   onNote,
+  demo,
+  pools,
 }: {
   node: FlowNode;
   nodes: FlowNode[];
   onChange: (node: FlowNode) => void;
   onClose: () => void;
   onNote: (note: string) => void;
+  demo: boolean;
+  pools: { status: "live" | "unavailable"; pools: PoolRow[] };
 }) {
   const titleId = useId();
   const left = remainderBps(node);
@@ -534,7 +586,9 @@ function Inspector({
           {issues.map((issue) => <li key={issue.code}>{issue.code}</li>)}
         </ul>
       ) : null}
+      {node.auto ? <p className="quiet">Auto step. You can edit the title. Nothing is signed.</p> : null}
       {!node.serializable ? <p className="quiet">Blocks a contract payload.</p> : null}
+      <ProtocolApp service={node.service} demo={demo} pools={pools} />
     </section>
   );
 }

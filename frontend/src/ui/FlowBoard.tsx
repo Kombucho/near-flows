@@ -12,21 +12,25 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { edgeCaption } from "../model/compose";
 import type { FlowNode } from "../model/flow";
-import { remainderBps } from "../model/flow";
+import { DEMO_ACCOUNT } from "../demo/fixtures";
+import { nodeReadout, type LiveBook } from "../live/quotes";
 import { chainLabel } from "../model/shell";
 import type { NodeStage, Stage } from "../model/replay";
+import { Spark } from "./bits";
 
 type Data = {
   node: FlowNode;
   stages: Stage[];
+  demo: boolean;
+  book: LiveBook;
+  now: number;
+  pulse: boolean;
   onOpen: (id: string) => void;
 };
 
-function stageLabel(stages: Stage[]): string {
-  if (stages.length === 0) return "Awaiting evidence";
-  return stages.join(" · ");
-}
+const STAGE_NAMES: Stage[] = ["signed", "sent", "landed", "reported", "failed"];
 
 function shortToken(token: string): string {
   if (token === "none") return "collector";
@@ -45,28 +49,41 @@ function shortToken(token: string): string {
 }
 
 function StepNode({ data, selected }: NodeProps<Node<Data>>) {
-  const stages = data.stages;
-  const latest = stages.at(-1);
-  const left = remainderBps(data.node);
+  const quote = nodeReadout({
+    demo: data.demo,
+    token: data.node.output ?? data.node.input,
+    planAmount: data.node.planAmount,
+    demoAmount: data.demo ? "420 NEAR" : undefined,
+    demoEntry: data.demo ? DEMO_ACCOUNT.nearPrice.toFixed(2) : undefined,
+    book: data.book,
+    now: data.now,
+  });
+  const running = data.stages.includes("signed") && !data.stages.includes("reported") && !data.stages.includes("failed");
+  const status = data.demo ? "demo" : running ? "running" : "idle";
   return (
-    <article className={selected ? "step selected" : "step"} data-chain={data.node.chain}>
+    <article className={selected ? "step selected" : "step"} data-chain={data.node.chain} data-pulse={data.pulse ? "1" : "0"}>
       <Handle type="target" position={Position.Left} />
       <header>
         <strong>{data.node.title}</strong>
-        <span className="muted">{chainLabel(data.node.chain)}</span>
+        <span className={`status ${status}`}>{status}</span>
       </header>
-      <p className="venue">{data.node.venue}</p>
+      <p className="venue">{data.node.venue} · {chainLabel(data.node.chain)}{data.node.auto ? " · auto" : ""}</p>
+      <dl className="quote">
+        <div><dt>Entry {quote.entryTag ? <span className="chip demo-tag">{quote.entryTag}</span> : null}</dt><dd>{quote.entry}</dd></div>
+        <div><dt>Amount {quote.amountTag ? <span className="chip demo-tag">{quote.amountTag}</span> : null}</dt><dd>{quote.amount}</dd></div>
+        <div><dt>Value {quote.currentTag ? <span className="chip ok">{quote.currentTag}</span> : null}</dt><dd className={data.pulse ? "pulse" : ""}>{quote.current}</dd></div>
+        <div><dt>Change</dt><dd className={quote.changeUp == null ? "" : quote.changeUp ? "up" : "down"}>{quote.change ?? "unknown"}</dd></div>
+      </dl>
+      {quote.spark.length > 1 ? <Spark points={quote.spark} up={quote.changeUp !== false} /> : null}
+      <p className="ago">{quote.ago}</p>
       <div className="chips">
-        <span className="chip">{shortToken(data.node.input)}</span>
-        <span className="chip">{data.node.output ? shortToken(data.node.output) : "no output"}</span>
-        {left != null && left > 0 ? <span className="chip">{left} bps free</span> : null}
-        {!data.node.serializable ? <span className="chip">Local</span> : null}
+        {STAGE_NAMES.map((stage) => (
+          <span key={stage} className={data.stages.includes(stage) ? `chip ${stage === "failed" ? "bad" : "ok"}` : "chip neutral"}>{stage}</span>
+        ))}
       </div>
       <footer>
-        <span className={latest ? `stage ${latest}` : "stage"}>{stages.length ? stageLabel(stages) : "Not recorded"}</span>
-        <button type="button" className="btn-quiet nodrag nopan" onClick={() => data.onOpen(data.node.id)}>
-          Details
-        </button>
+        <span className="muted">{shortToken(data.node.input)} → {data.node.output ? shortToken(data.node.output) : "held"}</span>
+        <button type="button" className="btn-quiet nodrag nopan" onClick={() => data.onOpen(data.node.id)}>Open</button>
       </footer>
       <Handle type="source" position={Position.Right} />
     </article>
@@ -81,20 +98,32 @@ function BoardInner({
   selectedId,
   theme,
   focusKey,
+  demo,
+  book,
+  now,
+  pulse,
   onSelect,
   onDetails,
   onMove,
   onConnectEnds,
+  onCompose,
+  onComposeFrom,
 }: {
   nodes: FlowNode[];
   stages: NodeStage[];
   selectedId: string | null;
   theme: "light" | "dark";
   focusKey: string;
+  demo: boolean;
+  book: LiveBook;
+  now: number;
+  pulse: boolean;
   onSelect: (id: string) => void;
   onDetails: (id: string) => void;
   onMove: (id: string, position: { x: number; y: number }) => void;
   onConnectEnds: (sourceId: string, targetId: string) => void;
+  onCompose: () => void;
+  onComposeFrom: (sourceId: string) => void;
 }) {
   const flow = useReactFlow();
   const stageById = useMemo(() => new Map(stages.map((stage) => [stage.nodeId, stage.evidenced])), [stages]);
@@ -103,10 +132,10 @@ function BoardInner({
       id: node.id,
       type: "step",
       position: { x: node.position.x, y: node.position.y },
-      data: { node, stages: stageById.get(node.id) ?? [], onOpen: onDetails },
+      data: { node, stages: stageById.get(node.id) ?? [], demo, book, now, pulse, onOpen: onDetails },
       selected: node.id === selectedId,
     }));
-  }, [nodes, stageById, selectedId, onDetails]);
+  }, [nodes, stageById, selectedId, onDetails, demo, book, now, pulse]);
 
   const edges = useMemo<Edge[]>(() => {
     const byIndex = new Map(nodes.map((node) => [node.index, node]));
@@ -118,7 +147,8 @@ function BoardInner({
           id: `${node.id}-${target.id}-${route.bps}`,
           source: node.id,
           target: target.id,
-          label: `${(route.bps / 100).toFixed(2).replace(/\.00$/, "")}%`,
+          label: edgeCaption(node, route.bps),
+          className: "flow-edge",
           style: { stroke: theme === "light" ? "#a8a29e" : "#78716c", strokeWidth: node.id === selectedId || target.id === selectedId ? 2 : 1.5 },
           labelStyle: { fill: theme === "light" ? "#1c1917" : "#f5f4f1", fontSize: 12, fontWeight: 560 },
           labelBgStyle: { fill: theme === "light" ? "#fffcf8" : "#1c1b19" },
@@ -164,11 +194,14 @@ function BoardInner({
         minZoom={0.45}
         maxZoom={1.6}
         proOptions={{ hideAttribution: true }}
-        onNodeClick={(_, node) => onSelect(node.id)}
-        onPaneClick={() => onSelect("")}
+        onNodeClick={(_, node) => { onSelect(node.id); onDetails(node.id); }}
+        onPaneClick={() => { onSelect(""); onCompose(); }}
         onNodeDragStop={(_, node) => onMove(node.id, node.position)}
         onConnect={(connection) => {
           if (connection.source && connection.target) onConnectEnds(connection.source, connection.target);
+        }}
+        onConnectEnd={(_, state) => {
+          if (!state.toNode && state.fromNode) onComposeFrom(state.fromNode.id);
         }}
         nodesDraggable
         elementsSelectable
@@ -188,10 +221,16 @@ export function FlowBoard(props: {
   selectedId: string | null;
   theme: "light" | "dark";
   focusKey: string;
+  demo: boolean;
+  book: LiveBook;
+  now: number;
+  pulse: boolean;
   onSelect: (id: string) => void;
   onDetails: (id: string) => void;
   onMove: (id: string, position: { x: number; y: number }) => void;
   onConnectEnds: (sourceId: string, targetId: string) => void;
+  onCompose: () => void;
+  onComposeFrom: (sourceId: string) => void;
 }) {
   return (
     <ReactFlowProvider>

@@ -91,7 +91,8 @@ type Api = AppState & {
   selectNode: (id: string | null) => void;
   updateVisibleNode: (node: FlowNode) => void;
   moveNode: (id: string, position: { x: number; y: number }) => void;
-  addFromPalette: (catalogId: string) => void;
+      addFromPalette: (catalogId: string) => void;
+  appendNodes: (nodes: FlowNode[]) => void;
   replaceNodes: (nodes: FlowNode[]) => void;
   setReplay: (doc: ReplayDocument | null) => void;
   setCursor: (cursor: number) => void;
@@ -177,6 +178,13 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
             const index = flow.nodes.reduce((max, node) => Math.max(max, node.index), -1) + 1;
             return nodeFromPalette(entry, index).id;
           })(),
+        })),
+      appendNodes: (created) =>
+        setState((s) => ({
+          ...s,
+          selectedNodeId: created.at(-1)?.id ?? s.selectedNodeId,
+          surface: "strategies",
+          flows: s.flows.map((flow) => (flow.id === s.selectedFlowId ? { ...flow, nodes: [...flow.nodes, ...created] } : flow)),
         })),
       setReplay: (doc) => setState((s) => ({ ...s, replay: doc, replayCursor: 0, replayPlaying: false })),
       setCursor: (cursor) => setState((s) => ({ ...s, replayCursor: cursor })),

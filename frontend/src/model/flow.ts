@@ -35,6 +35,10 @@ export type FlowNode = {
    */
   serializable: boolean;
   catalogId?: string;
+  /** Prerequisite the composer inserted. Editable. Not an execution receipt. */
+  auto?: boolean;
+  /** NEAR the user chose to put in. A plan figure, not an observed balance. */
+  planAmount?: string;
 };
 
 export type FlowDocument = {
