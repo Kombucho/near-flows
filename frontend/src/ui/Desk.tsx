@@ -1,10 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Skeleton } from "skullet/react";
+import { DEMO_ACCOUNT, cardFace } from "../demo/fixtures";
 import { PALETTE } from "../model/draft";
 import type { FlowNode } from "../model/flow";
 import { loadLayouts, moveSlot, normalizeSlots, saveLayouts, toggleHidden, toggleSpan, type Slot } from "../model/layout";
 import { projectLegs, type ReplayDocument, type Stage } from "../model/replay";
 import { paletteGroups, type ChainPin, type ProtocolPin } from "../model/shell";
+import { ChangeChip, DemoTag, Roll, Spark, TokenMark, usd } from "./bits";
 
 const STAGES: Stage[] = ["signed", "sent", "landed", "reported", "failed"];
 
@@ -25,12 +27,13 @@ function useLayout(page: string, ids: string[], wide: string[]) {
   };
 }
 
-function useSettled() {
+function useSettled(key: string) {
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    const timer = window.setTimeout(() => setReady(true), 680);
+    setReady(false);
+    const timer = window.setTimeout(() => setReady(true), 560);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [key]);
   return ready;
 }
 
@@ -57,8 +60,8 @@ function tokensIn(nodes: FlowNode[]): string[] {
   return [...found];
 }
 
-export function PortfolioDesk({ nodes, activity }: { nodes: FlowNode[]; activity: ReplayDocument | null }) {
-  const ready = useSettled();
+export function PortfolioDesk({ nodes, activity, demo }: { nodes: FlowNode[]; activity: ReplayDocument | null; demo: boolean }) {
+  const ready = useSettled(demo ? "demo" : "off");
   const layout = useLayout("portfolio", ["hero", "holdings", "activity"], ["hero"]);
   const [arrange, setArrange] = useState(false);
   const holdings = tokensIn(nodes);
@@ -81,9 +84,9 @@ export function PortfolioDesk({ nodes, activity }: { nodes: FlowNode[]; activity
           onHide={layout.hide}
           onSpan={layout.span}
           render={(id) => {
-            if (id === "hero") return <Hero />;
-            if (id === "holdings") return <Holdings tokens={holdings} />;
-            return <Activity doc={activity} />;
+            if (id === "hero") return <Hero demo={demo} />;
+            if (id === "holdings") return <Holdings demo={demo} tokens={holdings} />;
+            return <Activity demo={demo} doc={activity} />;
           }}
         />
       </Skeleton>
@@ -94,13 +97,15 @@ export function PortfolioDesk({ nodes, activity }: { nodes: FlowNode[]; activity
 export function ChainDesk({
   chain,
   nodes,
+  demo,
   onOpen,
 }: {
   chain: ChainPin;
   nodes: FlowNode[];
+  demo: boolean;
   onOpen: (protocolId: string) => void;
 }) {
-  const ready = useSettled();
+  const ready = useSettled(`${chain.id}:${demo ? "demo" : "off"}`);
   const ids = chain.protocols.map((protocol) => protocol.id);
   const layout = useLayout(`chain:${chain.id}`, ids, []);
   const [arrange, setArrange] = useState(false);
@@ -124,12 +129,15 @@ export function ChainDesk({
             const protocol = chain.protocols.find((item) => item.id === id);
             if (!protocol) return null;
             const count = nodes.filter((node) => node.chain === chain.id && node.service === protocol.id).length;
+            const sample = DEMO_ACCOUNT.positions.filter((position) => position.protocol === protocol.id);
+            const sampleValue = sample.reduce((sum, position) => sum + position.valueUsd, 0);
             return (
               <button type="button" className="plain" disabled={arrange} onClick={() => onOpen(protocol.id)}>
                 <p className="eyebrow">{chain.label}</p>
                 <h2>{protocol.label}</h2>
+                {demo ? <DemoTag /> : null}
                 <p className="quiet">{count} in this strategy</p>
-                <p>Balance unknown</p>
+                <p>{demo ? usd(sampleValue) : "unknown"}</p>
               </button>
             );
           }}
@@ -144,6 +152,7 @@ export function ProtocolDesk({
   protocol,
   nodes,
   replay,
+  demo,
   onAdd,
   onOpenStrategy,
 }: {
@@ -151,10 +160,11 @@ export function ProtocolDesk({
   protocol: ProtocolPin;
   nodes: FlowNode[];
   replay: ReplayDocument | null;
+  demo: boolean;
   onAdd: (catalogId: string) => void;
   onOpenStrategy: () => void;
 }) {
-  const ready = useSettled();
+  const ready = useSettled(`${protocol.id}:${demo ? "demo" : "off"}`);
   const layout = useLayout(`protocol:${protocol.id}`, ["positions", "actions", "runs"], ["positions"]);
   const [arrange, setArrange] = useState(false);
   const mine = nodes.filter((node) => node.chain === chain.id && node.service === protocol.id);
@@ -180,9 +190,9 @@ export function ProtocolDesk({
           onHide={layout.hide}
           onSpan={layout.span}
           render={(id) => {
-            if (id === "positions") return <Positions nodes={mine} />;
+            if (id === "positions") return <Positions demo={demo} protocolId={protocol.id} nodes={mine} />;
             if (id === "actions") return <Actions protocol={protocol} items={actions} onAdd={onAdd} />;
-            return <Runs stages={stages} labelled={Boolean(replay)} />;
+            return <Runs demo={demo} protocolId={protocol.id} stages={stages} labelled={Boolean(replay)} />;
           }}
         />
       </Skeleton>
@@ -246,22 +256,47 @@ function CardGrid({
   );
 }
 
-function Hero() {
+function Hero({ demo }: { demo: boolean }) {
+  const face = cardFace(demo, "portfolio.hero");
   return (
     <div className="hero">
       <p className="eyebrow">Total value</p>
-      <p className="hero-value">Unavailable</p>
-      <span className="chip neutral">unknown</span>
-      <p className="quiet">Cost basis unknown</p>
+      {demo ? <Roll value={DEMO_ACCOUNT.totalUsd} /> : <p className="hero-value">{face.primary}</p>}
+      {demo ? <ChangeChip pct={DEMO_ACCOUNT.changePct} /> : <span className="chip neutral">unknown</span>}
+      <p className="quiet">{demo ? `Cost basis ${usd(DEMO_ACCOUNT.costBasisUsd)}` : "Cost basis unknown"}</p>
+      {demo ? <DemoTag /> : null}
+      {demo ? <span className="chip demo-keeper">{cardFace(true, "portfolio.keeper").primary}</span> : null}
     </div>
   );
 }
 
-function Holdings({ tokens }: { tokens: string[] }) {
+function Holdings({ demo, tokens }: { demo: boolean; tokens: string[] }) {
   return (
     <div>
-      <h2>Holdings</h2>
-      {tokens.length === 0 ? <p>unknown</p> : (
+      <div className="desk-head">
+        <h2>Holdings</h2>
+        {demo ? <DemoTag /> : null}
+      </div>
+      {demo ? (
+        <ul className="feed">
+          {DEMO_ACCOUNT.holdings.map((holding) => (
+            <li key={holding.id}>
+              <span className="hold-id">
+                <TokenMark symbol={holding.symbol} />
+                <span>
+                  <strong>{holding.symbol}</strong>
+                  <div className="quiet">{holding.chain} · {holding.amount}</div>
+                </span>
+              </span>
+              <Spark points={holding.spark} up={holding.changePct >= 0} />
+              <span className="hold-val">
+                <strong className="num">{usd(holding.valueUsd)}</strong>
+                <ChangeChip pct={holding.changePct} />
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : tokens.length === 0 ? <p className="empty-well">unknown</p> : (
         <ul className="feed">
           {tokens.map((token) => (
             <li key={token}>
@@ -275,13 +310,30 @@ function Holdings({ tokens }: { tokens: string[] }) {
   );
 }
 
-function Activity({ doc }: { doc: ReplayDocument | null }) {
+function Activity({ demo, doc }: { demo: boolean; doc: ReplayDocument | null }) {
   const rows = doc?.events.slice(0, 8) ?? [];
   return (
     <div>
-      <h2>Activity</h2>
-      {doc ? <span className="chip replay">Replay</span> : null}
-      {rows.length === 0 ? <p>No activity recorded</p> : (
+      <div className="desk-head">
+        <h2>Activity</h2>
+        {demo ? <DemoTag /> : null}
+        {doc ? <span className="chip replay">Replay</span> : null}
+      </div>
+      {demo ? (
+        <ul className="feed">
+          {DEMO_ACCOUNT.activity.map((event) => (
+            <li key={event.id}>
+              <span>
+                <strong>{event.title}</strong>
+                <div className="quiet">{event.chain}</div>
+              </span>
+              <StageChips evidenced={event.evidenced} />
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {!demo && rows.length === 0 ? <p className="empty-well">No activity recorded</p> : null}
+      {rows.length > 0 ? (
         <ul className="feed">
           {rows.map((event) => (
             <li key={event.id}>
@@ -296,16 +348,36 @@ function Activity({ doc }: { doc: ReplayDocument | null }) {
             </li>
           ))}
         </ul>
-      )}
+      ) : null}
     </div>
   );
 }
 
-function Positions({ nodes }: { nodes: FlowNode[] }) {
+function Positions({ demo, protocolId, nodes }: { demo: boolean; protocolId: string; nodes: FlowNode[] }) {
+  const sample = DEMO_ACCOUNT.positions.filter((position) => position.protocol === protocolId);
   return (
     <div>
-      <h2>Positions</h2>
-      {nodes.length === 0 ? <p>unknown</p> : (
+      <div className="desk-head">
+        <h2>Positions</h2>
+        {demo ? <DemoTag /> : null}
+      </div>
+      {demo ? sample.map((position) => (
+        <div key={position.title} className="position">
+          <div className="desk-head">
+            <strong>{position.title}</strong>
+            <ChangeChip pct={position.changePct} />
+          </div>
+          <p className="quiet">{position.detail}</p>
+          <p className="hero-value num">{usd(position.valueUsd)}</p>
+          <div className="stat-row">
+            <span>APR {position.apr}</span>
+            <span>Range {position.range}</span>
+            <span>Fees {position.fees}</span>
+          </div>
+        </div>
+      )) : null}
+      {!demo && nodes.length === 0 ? <p className="empty-well">unknown</p> : null}
+      {!demo && nodes.length > 0 ? (
         <ul className="feed">
           {nodes.map((node) => (
             <li key={node.id}>
@@ -317,7 +389,7 @@ function Positions({ nodes }: { nodes: FlowNode[] }) {
             </li>
           ))}
         </ul>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -351,12 +423,44 @@ function Actions({
   );
 }
 
-function Runs({ stages, labelled }: { stages: ReturnType<typeof projectLegs>; labelled: boolean }) {
+function StageChips({ evidenced }: { evidenced: readonly string[] }) {
+  return (
+    <span className="stage-row">
+      {STAGES.map((stage) => (
+        <span key={stage} className={evidenced.includes(stage) ? `chip ${stage === "failed" ? "bad" : "ok"}` : "chip neutral"}>
+          {stage}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function Runs({ demo, protocolId, stages, labelled }: { demo: boolean; protocolId: string; stages: ReturnType<typeof projectLegs>; labelled: boolean }) {
+  const shown = demo
+    ? DEMO_ACCOUNT.activity.filter((event) => {
+        return event.protocol === protocolId;
+      })
+    : [];
   return (
     <div>
-      <h2>Runs</h2>
-      {labelled ? <span className="chip replay">Replay</span> : null}
-      {stages.length === 0 ? <p>No runs recorded</p> : (
+      <div className="desk-head">
+        <h2>Runs</h2>
+        {demo ? <DemoTag /> : null}
+        {labelled ? <span className="chip replay">Replay</span> : null}
+      </div>
+      {demo && shown.length === 0 ? <p className="quiet">No sample run for this protocol.</p> : null}
+      {demo && shown.length > 0 ? (
+        <ul className="feed">
+          {shown.map((event) => (
+            <li key={event.id}>
+              <strong>{event.title}</strong>
+              <StageChips evidenced={event.evidenced} />
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {!demo && stages.length === 0 ? <p className="empty-well">No runs recorded</p> : null}
+      {!demo && stages.length > 0 ? (
         <ul className="feed">
           {stages.map((stage) => (
             <li key={stage.nodeId}>
@@ -368,7 +472,7 @@ function Runs({ stages, labelled }: { stages: ReturnType<typeof projectLegs>; la
             </li>
           ))}
         </ul>
-      )}
+      ) : null}
     </div>
   );
 }

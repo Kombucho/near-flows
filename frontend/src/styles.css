@@ -355,6 +355,54 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .pele-host { min-height: 220px; overflow: auto; }
 .pele-host svg { max-width: 100%; height: auto; }
 .replay-flag { position: absolute; z-index: 6; left: 16px; bottom: 168px; }
+.demo-badge {
+  background: var(--orange);
+  color: #1c0e00;
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+.chip.demo-tag, .chip.demo-keeper { background: #ff9f0a1f; color: #c2760a; }
+[data-theme="dark"] .chip.demo-tag, [data-theme="dark"] .chip.demo-keeper { color: #ff9f0a; }
+.tcard, .feed li, .pin, .chip-btn { transition: transform 0.18s var(--ease), background 0.18s var(--ease); }
+.tcard:hover { transform: translateY(-2px); }
+.feed li:hover { background: #00000010; }
+[data-theme="dark"] .feed li:hover { background: #ffffff14; }
+.token-mark {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: var(--tile);
+  box-shadow: var(--shadow);
+  font-size: 11px;
+  font-weight: 700;
+}
+.hold-id { display: flex; align-items: center; gap: 10px; }
+.hold-val { display: grid; justify-items: end; gap: 4px; }
+.spark { width: 72px; height: 24px; flex: none; }
+.spark path { fill: none; stroke-width: 1.8; stroke-linecap: round; }
+.spark.up path { stroke: var(--green); }
+.spark.down path { stroke: var(--red); }
+.stat-row { display: flex; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 12px; }
+.position { display: grid; gap: 6px; padding: 12px; border-radius: 12px; background: var(--tile); }
+.empty-well { margin: 0; padding: 16px; border-radius: 12px; background: var(--tile); color: var(--muted); }
+.demo-runs {
+  position: absolute;
+  z-index: 6;
+  top: 176px;
+  right: 16px;
+  width: min(300px, calc(100% - 32px));
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--shadow), var(--lift);
+}
 .step {
   width: 232px;
   background: var(--card-2);

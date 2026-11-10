@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { SkulletProvider } from "skullet/react";
+import { DEMO_ACCOUNT } from "../demo/fixtures";
 import { ABI } from "../model/abi";
 import { contractSerialize, exportLocalDraft, importLocalDraft, proposeRoute, remainderBps, validateFlow, visibleNodes, type ChainId, type FlowNode } from "../model/flow";
 import { SOURCE_COMMIT } from "../model/limits";
@@ -8,12 +9,14 @@ import { CHAIN_PINS, chainPin, paletteGroups } from "../model/shell";
 import { useApp, type Surface, type VaultDraft } from "../state";
 import { ChartView } from "./ChartView";
 import { ChainDesk, PortfolioDesk, ProtocolDesk } from "./Desk";
+import { DemoTag } from "./bits";
 import { FlowBoard } from "./FlowBoard";
 
 type Panel = "flows" | "nodes" | "connect" | "settings" | "review" | "inspector" | null;
 type ThemeName = "light" | "dark";
 
 const THEME_KEY = "near-flows.theme";
+const DEMO_KEY = "near-flows.demo";
 
 function readTheme(): ThemeName {
   const saved = localStorage.getItem(THEME_KEY);
@@ -24,6 +27,7 @@ function readTheme(): ThemeName {
 export function Workspace() {
   const app = useApp();
   const [theme, setTheme] = useState<ThemeName>(readTheme);
+  const [demo, setDemo] = useState(() => localStorage.getItem(DEMO_KEY) === "1");
   const [panel, setPanel] = useState<Panel>(null);
   const [note, setNote] = useState<string | null>(null);
   const [flowName, setFlowName] = useState("");
@@ -35,6 +39,10 @@ export function Workspace() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem(DEMO_KEY, demo ? "1" : "0");
+  }, [demo]);
 
   useEffect(() => {
     if (!note) return;
@@ -159,6 +167,7 @@ export function Workspace() {
         <main className="sheet">
           {app.surface === "chart" ? (
             <ChartView
+              demo={demo}
               replay={app.replay}
               playing={app.replayPlaying}
               cursor={app.replay ? app.replayCursor || app.replay.events.length : 0}
@@ -169,12 +178,13 @@ export function Workspace() {
               onSpeed={app.setSpeed}
             />
           ) : null}
-          {app.surface === "portfolio" ? <PortfolioDesk nodes={flow?.nodes ?? []} activity={app.replay} /> : null}
+          {app.surface === "portfolio" ? <PortfolioDesk demo={demo} nodes={flow?.nodes ?? []} activity={app.replay} /> : null}
           {app.surface === "chain" && chain ? (
-            <ChainDesk chain={chain} nodes={flow?.nodes ?? []} onOpen={pickProtocol} />
+            <ChainDesk demo={demo} chain={chain} nodes={flow?.nodes ?? []} onOpen={pickProtocol} />
           ) : null}
           {app.surface === "protocol" && chain && protocol ? (
             <ProtocolDesk
+              demo={demo}
               chain={chain}
               protocol={protocol}
               nodes={flow?.nodes ?? []}
@@ -193,6 +203,7 @@ export function Workspace() {
         <div className="stack">
           <div className="island">
             <span className="mark" aria-hidden="true">流</span>
+            {demo ? <span className="demo-badge" role="status">DEMO</span> : null}
             <div className="pins" role="toolbar" aria-label="Chains">
               {CHAIN_PINS.map((pin) => (
                 <button
@@ -243,6 +254,9 @@ export function Workspace() {
           <button type="button" className="icon-btn" aria-label={theme === "dark" ? "Use light theme" : "Use dark theme"} onClick={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}>
             {theme === "dark" ? "Light" : "Dark"}
           </button>
+          <button type="button" className="chip-btn" aria-pressed={demo} onClick={() => setDemo((value) => !value)}>
+            Try demo
+          </button>
           <button type="button" className="connect-btn" aria-expanded={panel === "connect"} onClick={() => toggle("connect")}>
             Connect NEAR
           </button>
@@ -254,6 +268,26 @@ export function Workspace() {
 
       {strategies && app.replay ? (
         <span className="replay-flag chip replay">Replay</span>
+      ) : null}
+      {strategies && demo ? (
+        <aside className="demo-runs" aria-label="Demo runs">
+          <div className="desk-head">
+            <h2>Run history</h2>
+            <DemoTag />
+          </div>
+          <ul className="feed">
+            {DEMO_ACCOUNT.strategies.flatMap((strategy) => strategy.runs.map((run) => (
+              <li key={strategy.name + run.when}>
+                <span>
+                  <strong>{strategy.name}</strong>
+                  <div className="quiet">{run.when}</div>
+                </span>
+                <span>{run.result}</span>
+              </li>
+            )))}
+          </ul>
+          <span className="chip demo-keeper">{DEMO_ACCOUNT.keeper}</span>
+        </aside>
       ) : null}
 
       {note ? <p className="toast" role="status">{note}</p> : null}
@@ -422,7 +456,7 @@ export function Workspace() {
         />
       ) : null}
 
-      {panel === "connect" ? <ConnectPanel onClose={() => setPanel(null)} /> : null}
+      {panel === "connect" ? <ConnectPanel demo={demo} onDemo={() => setDemo((value) => !value)} onClose={() => setPanel(null)} /> : null}
       {panel === "settings" ? <SettingsPanel onClose={() => setPanel(null)} /> : null}
       {panel === "review" && flow ? <ReviewPanel name={flow.name} nodes={flow.nodes} onClose={() => setPanel(null)} /> : null}
     </div>
@@ -505,7 +539,7 @@ function Inspector({
   );
 }
 
-function ConnectPanel({ onClose }: { onClose: () => void }) {
+function ConnectPanel({ demo, onDemo, onClose }: { demo: boolean; onDemo: () => void; onClose: () => void }) {
   const titleId = useId();
   return (
     <section className="panel panel-connect" role="dialog" aria-labelledby={titleId}>
@@ -515,6 +549,7 @@ function ConnectPanel({ onClose }: { onClose: () => void }) {
       </div>
       <p>No wallet connector in this build.</p>
       <p className="quiet">Drafts stay on this device.</p>
+      <button type="button" className="chip-btn" aria-pressed={demo} onClick={onDemo}>Try demo</button>
     </section>
   );
 }

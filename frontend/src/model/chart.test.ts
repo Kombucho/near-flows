@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { replayStageChart } from "./chart";
+import { portfolioPnlChart, replayStageChart } from "./chart";
 
 describe("replay chart", () => {
   it("draws one bar per imported row and invents no price series", () => {
@@ -19,5 +19,10 @@ describe("replay chart", () => {
 
   it("returns nothing when there is no imported row", () => {
     expect(replayStageChart([])).toBeNull();
+  });
+
+  it("builds a labelled demo PnL chart only while demo is on", () => {
+    expect(portfolioPnlChart(false, "1W")).toBeNull();
+    expect(portfolioPnlChart(true, "1W")).toContain('title "Demo PnL 1W"');
   });
 });

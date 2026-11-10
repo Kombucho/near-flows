@@ -1,4 +1,12 @@
+import { demoPnlSource, type DemoRange } from "../demo/fixtures";
+
 export type ChartPoint = { row: number; count: number };
+
+/** Pele source for the demo portfolio. Null when the demo account is off. */
+export function portfolioPnlChart(demo: boolean, range: DemoRange): string | null {
+  if (!demo) return null;
+  return demoPnlSource(range);
+}
 
 /**
  * XY source for Pele. Points are evidenced stage counts on imported DEMO| rows.

@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { mount, register } from "pele/core";
 import xychart from "pele/diagrams/xychart";
-import { replayStageChart } from "../model/chart";
+import { DEMO_ACCOUNT, DEMO_RANGES, type DemoRange } from "../demo/fixtures";
+import { portfolioPnlChart, replayStageChart } from "../model/chart";
 import type { ReplayDocument } from "../model/replay";
+import { DemoTag, Spark, usd } from "./bits";
 
 register(xychart);
 
 export function ChartView({
+  demo,
   replay,
   onImport,
   playing,
@@ -16,6 +19,7 @@ export function ChartView({
   onSpeed,
   speed,
 }: {
+  demo: boolean;
   replay: ReplayDocument | null;
   onImport: (file: File) => void;
   playing: boolean;
@@ -27,6 +31,8 @@ export function ChartView({
 }) {
   const revealed = replay?.events.slice(0, cursor) ?? [];
   const chart = replay ? replayStageChart(revealed.length > 0 ? revealed : replay.events) : null;
+  const [range, setRange] = useState<DemoRange>("1W");
+  const pnl = portfolioPnlChart(demo, range);
   return (
     <section className="desk" aria-label="Chart">
       <div className="desk-head">
@@ -38,14 +44,33 @@ export function ChartView({
       </div>
       <div className="masonry">
         <article className="tcard">
-          <h2>Price</h2>
-          <p className="hero-value">Unavailable</p>
-          <p className="quiet">No price history is recorded.</p>
+          <div className="desk-head"><h2>Price</h2>{demo ? <DemoTag /> : null}</div>
+          {demo ? (
+            <>
+              <p className="hero-value num">NEAR {DEMO_ACCOUNT.nearPrice}</p>
+              <Spark points={DEMO_ACCOUNT.holdings[0].spark} up />
+            </>
+          ) : <p className="hero-value">Unavailable</p>}
+          <p className="quiet">{demo ? "Sample NEAR print." : "No price history is recorded."}</p>
         </article>
         <article className="tcard">
-          <h2>Position</h2>
-          <p className="hero-value">unknown</p>
-          <p className="quiet">Cost basis unknown</p>
+          <div className="desk-head"><h2>Position</h2>{demo ? <DemoTag /> : null}</div>
+          {demo ? <p className="hero-value num">{usd(DEMO_ACCOUNT.costBasisUsd)}</p> : <p className="hero-value">unknown</p>}
+          <p className="quiet">{demo ? `PnL ${usd(DEMO_ACCOUNT.pnlUsd)}` : "Cost basis unknown"}</p>
+        </article>
+        <article className="tcard span-2">
+          <div className="desk-head">
+            <h2>PnL</h2>
+            {demo ? <DemoTag /> : null}
+          </div>
+          {demo ? (
+            <div className="row">
+              {DEMO_RANGES.map((item) => (
+                <button key={item} type="button" className="chip-btn" aria-pressed={range === item} onClick={() => setRange(item)}>{item}</button>
+              ))}
+            </div>
+          ) : null}
+          {pnl ? <PeleChart source={pnl} points={DEMO_ACCOUNT.pnl[range].map((value, index) => ({ row: index + 1, count: value }))} /> : <p className="empty-well">Unavailable</p>}
         </article>
         <article className="tcard span-2">
           <div className="desk-head">
