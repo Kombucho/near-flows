@@ -15,4 +15,16 @@ describe("flow layout", () => {
     const nvda = placed.find((item) => item.id === "nvda")!;
     expect(sells[0].x - nvda.x).toBeGreaterThanOrEqual(NODE_W);
   });
+
+  it("sends every route to the right, so an edge never has to turn back", () => {
+    const nodes = boardDocument("v").nodes;
+    const at = new Map(layoutGraph(nodes).map((item) => [item.id, item]));
+    for (const node of nodes) {
+      for (const route of node.routes) {
+        const target = nodes.find((item) => item.index === route.to);
+        expect(target).toBeTruthy();
+        expect(at.get(target!.id)!.x).toBeGreaterThan(at.get(node.id)!.x);
+      }
+    }
+  });
 });

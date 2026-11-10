@@ -48,7 +48,11 @@ export function ProtocolApp({
           </div>
           <label>Bin range <input aria-label="Bin range" defaultValue="±25" /></label>
           <label>Deposit <input aria-label="Deposit" defaultValue="the plan amount" /></label>
-          <label className="row"><input type="checkbox" defaultChecked /> Sweep fees</label>
+          <label className="switch">
+            <input type="checkbox" role="switch" defaultChecked aria-label="Sweep fees" />
+            <span className="switch-ui" aria-hidden="true" />
+            <span>Sweep fees</span>
+          </label>
           <p className="quiet">Rebalance when the active bin leaves the range. Not sent.</p>
         </>
       ) : null}

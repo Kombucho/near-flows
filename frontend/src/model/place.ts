@@ -1,8 +1,8 @@
-/** Card size the canvas lays out around. Wider than the seed coordinates, so those coordinates overlap. */
-export const NODE_W = 300;
-export const NODE_H = 292;
-export const GAP_X = 80;
-export const GAP_Y = 48;
+/** Trading-card size the canvas lays out around. The seed coordinates are tighter, so they overlap. */
+export const NODE_W = 252;
+export const NODE_H = 352;
+export const GAP_X = 88;
+export const GAP_Y = 56;
 
 export type PlaceNode = { id: string; index: number; routes: { to: number }[] };
 
@@ -32,8 +32,17 @@ export function layoutGraph(nodes: PlaceNode[]): { id: string; x: number; y: num
     columns.set(column, list);
   }
   const placed: { id: string; x: number; y: number }[] = [];
-  for (const [column, list] of columns) {
-    list.forEach((node, row) => {
+  const rowOf = new Map<string, number>();
+  const byIndex = new Map(nodes.map((node) => [node.index, node]));
+  const maxColumn = Math.max(0, ...columns.keys());
+  for (let column = 0; column <= maxColumn; column += 1) {
+    const list = columns.get(column) ?? [];
+    const ordered = [...list].sort((a, b) => {
+      const delta = bary(a) - bary(b);
+      return delta !== 0 ? delta : a.index - b.index;
+    });
+    ordered.forEach((node, row) => {
+      rowOf.set(node.id, row);
       placed.push({
         id: node.id,
         x: column * (NODE_W + GAP_X),
@@ -42,6 +51,13 @@ export function layoutGraph(nodes: PlaceNode[]): { id: string; x: number; y: num
     });
   }
   return placed;
+
+  function bary(node: PlaceNode): number {
+    const preds = nodes.filter((source) => source.routes.some((route) => route.to === node.index) && byIndex.has(source.index));
+    const rows = preds.map((source) => rowOf.get(source.id)).filter((row): row is number => row != null);
+    if (!rows.length) return node.index;
+    return rows.reduce((sum, row) => sum + row, 0) / rows.length;
+  }
 }
 
 export function boxesCollide(nodes: { position: { x: number; y: number } }[]): boolean {

@@ -6,6 +6,8 @@ import "@fontsource/inter/500.css";
 import "@fontsource/inter/600.css";
 import "@fontsource/nunito/600.css";
 import "@fontsource/nunito/700.css";
+import "@fontsource/nunito/800.css";
+import "@fontsource/nunito/900.css";
 import "skullet/styles.css";
 import { App } from "./App";
 import { AppStateProvider } from "./state";

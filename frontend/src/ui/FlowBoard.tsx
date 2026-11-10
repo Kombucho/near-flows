@@ -1,14 +1,19 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import {
   Background,
+  BaseEdge,
   Controls,
+  EdgeLabelRenderer,
+  getSmoothStepPath,
   Handle,
   Position,
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
+  useUpdateNodeInternals,
   useViewport,
   type Edge,
+  type EdgeProps,
   type Node,
   type NodeProps,
 } from "@xyflow/react";
@@ -16,11 +21,10 @@ import "@xyflow/react/dist/style.css";
 import { edgeCaption } from "../model/compose";
 import type { FlowNode } from "../model/flow";
 import { layoutGraph } from "../model/place";
-import { DEMO_ACCOUNT } from "../demo/fixtures";
-import { nodeReadout, quotedToken, type LiveBook } from "../live/quotes";
-import { chainLabel } from "../model/shell";
+import type { LiveBook } from "../live/quotes";
 import type { NodeStage, Stage } from "../model/replay";
-import { Spark } from "./bits";
+import { positionOwner } from "./cardModel";
+import { ProtocolCard } from "./ProtocolCard";
 
 type Data = {
   node: FlowNode;
@@ -29,99 +33,93 @@ type Data = {
   book: LiveBook;
   now: number;
   pulse: boolean;
+  usePosition: boolean;
   onOpen: (id: string) => void;
 };
 
-const STAGE_NAMES: Stage[] = ["signed", "sent", "landed", "reported", "failed"];
-
-function shortToken(token: string): string {
-  if (token === "none") return "collector";
-  if (token === "near") return "NEAR";
-  if (token.startsWith("evm:")) return token.split(":").at(-1)?.toUpperCase() ?? token;
-  if (token.startsWith("sol:")) {
-    const mint = token.slice(4);
-    if (mint === "SOL") return "SOL";
-    if (mint.startsWith("EPj")) return "USDC";
-    return `${mint.slice(0, 4)}…`;
-  }
-  if (token.includes("wrap")) return "wNEAR";
-  if (token.includes("linear")) return "LiNEAR";
-  if (token.includes("meme")) return "MEME";
-  return token.length > 16 ? `${token.slice(0, 14)}…` : token;
+function StepNode({ id, data, selected, dragging }: NodeProps<Node<Data>>) {
+  const { zoom } = useViewport();
+  const compact = zoom < 0.6;
+  const update = useUpdateNodeInternals();
+  useEffect(() => {
+    update(id);
+  }, [compact, id, update]);
+  return (
+    <div className={selected ? "pcard-shell selected" : "pcard-shell"}>
+      <Handle type="target" position={Position.Left} />
+      <ProtocolCard
+        node={data.node}
+        demo={data.demo}
+        book={data.book}
+        now={data.now}
+        evidenced={data.stages}
+        usePosition={data.usePosition}
+        compact={compact}
+        dragging={Boolean(dragging)}
+        pulse={data.pulse}
+        selected={Boolean(selected)}
+        onOpen={data.onOpen}
+      />
+      <Handle type="source" position={Position.Right} />
+    </div>
+  );
 }
 
-function StepNode({ data, selected }: NodeProps<Node<Data>>) {
-  const { zoom } = useViewport();
-  const readout = nodeReadout({
-    demo: data.demo,
-    token: quotedToken(data.node.input, data.node.output),
-    service: data.node.service,
-    inputToken: data.node.input,
-    planAmount: data.node.planAmount,
-    demoEntry: data.demo ? DEMO_ACCOUNT.nearPrice.toFixed(2) : undefined,
-    book: data.book,
-    now: data.now,
+function LtrEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  sourcePosition,
+  targetPosition,
+  style,
+  markerEnd,
+  label,
+  labelStyle,
+  labelBgStyle,
+  labelBgPadding,
+  labelBgBorderRadius,
+}: EdgeProps) {
+  const [path, labelX, labelY] = getSmoothStepPath({
+    sourceX,
+    sourceY,
+    targetX,
+    targetY,
+    sourcePosition,
+    targetPosition,
+    borderRadius: 12,
+    offset: 28,
   });
-  const running = data.stages.includes("signed") && !data.stages.includes("reported") && !data.stages.includes("failed");
-  const status = data.demo ? "demo" : running ? "running" : "idle";
-  const failed = data.stages.includes("failed");
-  if (zoom < 0.72) {
-    return (
-      <article className={selected ? "step step-mini selected" : "step step-mini"} data-chain={data.node.chain}>
-        <Handle type="target" position={Position.Left} />
-        <header>
-          <strong>{data.node.title}</strong>
-          <span className={readout.changeUp == null ? "muted" : readout.changeUp ? "up" : "down"}>{readout.change ?? "unknown"}</span>
-        </header>
-        <p className="mini-value num">{readout.current}</p>
-        <Handle type="source" position={Position.Right} />
-      </article>
-    );
-  }
+  const padding = labelBgPadding ?? [6, 3];
   return (
-    <article className={selected ? "step selected" : "step"} data-chain={data.node.chain} data-pulse={data.pulse ? "1" : "0"}>
-      <Handle type="target" position={Position.Left} />
-      <header>
-        <strong>{data.node.title}</strong>
-        <span className={`status ${status}`}>{status}</span>
-      </header>
-      <p className="venue">{data.node.venue} · {chainLabel(data.node.chain)}{data.node.auto ? " · auto" : ""}</p>
-      <div className="quote">
-        <div>
-          <div className="q-label">Entry {readout.entryTag ? <span className="chip demo-tag">{readout.entryTag}</span> : null}</div>
-          <div className="q-value num">{readout.entry}</div>
-        </div>
-        <div>
-          <div className="q-label">Amount {readout.amountTag ? <span className="chip demo-tag">{readout.amountTag}</span> : null}</div>
-          <div className="q-value num">{readout.amount}</div>
-        </div>
-        <div>
-          <div className="q-label">Value {readout.currentTag ? <span className="chip ok">{readout.currentTag}</span> : null}</div>
-          <div className={data.pulse ? "q-value num pulse" : "q-value num"}>{readout.current}</div>
-        </div>
-        <div className="q-change">
-          <div className="q-label">Change</div>
-          <div className={readout.changeUp == null ? "q-value" : readout.changeUp ? "q-value up" : "q-value down"}>{readout.change ?? "unknown"}</div>
-        </div>
-      </div>
-      {readout.spark.length > 1 ? <Spark points={readout.spark} up={readout.changeUp !== false} /> : null}
-      <p className="ago">{readout.ago}</p>
-      <div className="chips">
-        {STAGE_NAMES.filter((stage) => stage !== "failed").map((stage) => (
-          <span key={stage} className={data.stages.includes(stage) ? "chip ok" : "chip wait"}>{stage}</span>
-        ))}
-        {failed ? <span className="chip bad">failed</span> : null}
-      </div>
-      <footer>
-        <span className="muted">{shortToken(data.node.input)} → {data.node.output ? shortToken(data.node.output) : "held"}</span>
-        <button type="button" className="btn-quiet nodrag nopan" onClick={() => data.onOpen(data.node.id)}>Open</button>
-      </footer>
-      <Handle type="source" position={Position.Right} />
-    </article>
+    <>
+      <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} interactionWidth={18} />
+      {label ? (
+        <EdgeLabelRenderer>
+          <div
+            className="nodrag nopan edge-label"
+            style={{
+              position: "absolute",
+              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+              background: labelBgStyle?.fill as string | undefined,
+              color: (labelStyle?.fill as string | undefined) ?? undefined,
+              fontSize: labelStyle?.fontSize,
+              fontWeight: labelStyle?.fontWeight,
+              padding: `${padding[1]}px ${padding[0]}px`,
+              borderRadius: labelBgBorderRadius,
+            }}
+          >
+            {label}
+          </div>
+        </EdgeLabelRenderer>
+      ) : null}
+    </>
   );
 }
 
 const nodeTypes = { step: StepNode };
+const edgeTypes = { ltr: LtrEdge };
 
 function BoardInner({
   nodes,
@@ -159,15 +157,16 @@ function BoardInner({
   const flow = useReactFlow();
   const stageById = useMemo(() => new Map(stages.map((stage) => [stage.nodeId, stage.evidenced])), [stages]);
   const placed = useMemo(() => new Map(layoutGraph(nodes).map((item) => [item.id, item])), [nodes]);
+  const owners = useMemo(() => positionOwner(nodes), [nodes]);
   const flowNodes = useMemo<Node<Data>[]>(() => {
     return nodes.map((node) => ({
       id: node.id,
       type: "step",
       position: placed.get(node.id) ?? node.position,
-      data: { node, stages: stageById.get(node.id) ?? [], demo, book, now, pulse, onOpen: onDetails },
+      data: { node, stages: stageById.get(node.id) ?? [], demo, book, now, pulse, usePosition: owners.has(node.id), onOpen: onDetails },
       selected: node.id === selectedId,
     }));
-  }, [nodes, placed, stageById, selectedId, onDetails, demo, book, now, pulse]);
+  }, [nodes, placed, stageById, selectedId, onDetails, demo, book, now, pulse, owners]);
 
   const edges = useMemo<Edge[]>(() => {
     const byIndex = new Map(nodes.map((node) => [node.index, node]));
@@ -175,10 +174,11 @@ function BoardInner({
       node.routes.flatMap((route) => {
         const target = byIndex.get(route.to);
         if (!target) return [];
-        return [{
+          return [{
           id: `${node.id}-${target.id}-${route.bps}`,
           source: node.id,
           target: target.id,
+          type: "ltr",
           label: edgeCaption(node, route.bps),
           className: "flow-edge",
           style: { stroke: theme === "light" ? "#a8a29e" : "#78716c", strokeWidth: node.id === selectedId || target.id === selectedId ? 2 : 1.5 },
@@ -222,6 +222,7 @@ function BoardInner({
         nodes={flowNodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         colorMode={theme}
         defaultViewport={defaultViewport}
         minZoom={0.45}
@@ -241,7 +242,7 @@ function BoardInner({
         panOnScroll
         fitView={false}
       >
-        <Background color={theme === "light" ? "#d6d1c8" : "#2a2926"} gap={28} size={1.2} />
+        <Background color={theme === "light" ? "#d3cec2" : "#1c1c1f"} gap={22} size={1} />
         <Controls showInteractive={false} />
       </ReactFlow>
     </div>

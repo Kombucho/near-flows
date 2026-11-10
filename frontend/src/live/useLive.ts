@@ -25,6 +25,7 @@ export function useLiveBook(): LiveBook {
         fresh = Date.now();
         setBook((previous) => ({
           status: "live",
+          source: "CoinGecko",
           updatedAt: Date.now(),
           ...spots,
           sparks: {
@@ -43,6 +44,7 @@ export function useLiveBook(): LiveBook {
           fresh = Date.now();
           setBook((previous) => ({
             status: "live",
+            source: "Ref Finance",
             updatedAt: Date.now(),
             near: { usd: near, changePct: null },
             sol: null,

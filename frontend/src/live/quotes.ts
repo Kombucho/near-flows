@@ -2,6 +2,8 @@ export type Spot = { usd: number; changePct: number | null };
 export type LiveBook = {
   status: "live" | "unavailable";
   updatedAt: number | null;
+  /** Which public feed produced the spots. Absent when the book is empty. */
+  source?: "CoinGecko" | "Ref Finance";
   near: Spot | null;
   sol: Spot | null;
   eth: Spot | null;
