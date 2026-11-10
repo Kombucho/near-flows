@@ -1,10 +1,13 @@
 import { useEffect, useId, useMemo, useState } from "react";
+import { SkulletProvider } from "skullet/react";
 import { ABI } from "../model/abi";
 import { contractSerialize, exportLocalDraft, importLocalDraft, proposeRoute, remainderBps, validateFlow, visibleNodes, type ChainId, type FlowNode } from "../model/flow";
 import { SOURCE_COMMIT } from "../model/limits";
 import { parseDemoLog, projectLegs } from "../model/replay";
 import { CHAIN_PINS, chainPin, paletteGroups } from "../model/shell";
 import { useApp, type Surface, type VaultDraft } from "../state";
+import { ChartView } from "./ChartView";
+import { ChainDesk, PortfolioDesk, ProtocolDesk } from "./Desk";
 import { FlowBoard } from "./FlowBoard";
 
 type Panel = "flows" | "nodes" | "connect" | "settings" | "review" | "inspector" | null;
@@ -51,7 +54,7 @@ export function Workspace() {
   }, []);
 
   useEffect(() => {
-    if (app.surface !== "replay" || !app.replayPlaying || !app.replay) return;
+    if (!app.replayPlaying || !app.replay) return;
     const delay = 700 / app.replaySpeed;
     const timer = window.setTimeout(() => {
       if (!app.replay || app.replayCursor >= app.replay.events.length) app.setPlaying(false);
@@ -66,7 +69,7 @@ export function Workspace() {
   const visible = useMemo(() => (flow ? visibleNodes(flow.nodes, app.lens) : []), [flow, app.lens]);
   const selected = flow?.nodes.find((node) => node.id === app.selectedNodeId) ?? null;
   const revealed = app.replay ? app.replay.events.slice(0, app.replayCursor) : [];
-  const stages = flow && app.surface === "replay" && app.replay ? projectLegs(flow.nodes, revealed) : [];
+  const stages = flow && app.surface === "strategies" && app.replay ? projectLegs(flow.nodes, revealed) : [];
   const groups = paletteGroups(app.lens.chain, app.lens.service);
   const protocol = chain?.protocols.find((item) => item.id === app.lens.service) ?? null;
 
@@ -76,13 +79,28 @@ export function Workspace() {
   }
 
   function pickChain(id: ChainId) {
-    if (app.lens.chain === id) app.setLens({ chain: "all", service: "all" });
-    else app.setLens({ chain: id, service: "all" });
+    if (app.lens.chain === id) {
+      app.setLens({ chain: "all", service: "all" });
+      app.setSurface("portfolio");
+    } else {
+      app.setLens({ chain: id, service: "all" });
+      app.setSurface("chain");
+    }
   }
 
   function pickProtocol(id: string) {
     if (!chain) return;
-    app.setLens({ chain: chain.id, service: app.lens.service === id ? "all" : id });
+    if (app.lens.service === id) {
+      app.setLens({ chain: chain.id, service: "all" });
+      app.setSurface("chain");
+    } else {
+      app.setLens({ chain: chain.id, service: id });
+      app.setSurface("protocol");
+    }
+  }
+
+  function openStrategy() {
+    app.setSurface("strategies");
   }
 
   function saveDraft() {
@@ -101,10 +119,20 @@ export function Workspace() {
     }
   }
 
-  const showBoard = app.surface !== "pnl" && flow;
+  const strategies = app.surface === "strategies";
+  const showBoard = strategies && flow;
 
   return (
-    <div className="studio">
+    <SkulletProvider
+      mode={theme}
+      theme={{
+        radius: "8px",
+        animation: "shimmer",
+        dark: { base: "#1c1c1c", highlight: "#2a2a2e" },
+        light: { base: "#e4e4e7", highlight: "#f4f4f5" },
+      }}
+    >
+    <div className={strategies ? "studio board-mode" : chain ? "studio tall" : "studio"}>
       {showBoard ? (
         <FlowBoard
           nodes={visible}
@@ -120,20 +148,45 @@ export function Workspace() {
           onMove={app.moveNode}
           onConnectEnds={onConnect}
         />
-      ) : (
+      ) : strategies ? (
         <div className="canvas-wrap bare">
-          {app.surface === "pnl" ? (
-            <div className="pnl">
-              <h1>PnL</h1>
-              <p>Unavailable</p>
-            </div>
-          ) : (
-            <div className="pnl">
-              <h1>{app.vaults.find((vault) => vault.id === app.selectedVaultId)?.label}</h1>
-              <p>No flow</p>
-            </div>
-          )}
+          <div className="pnl">
+            <h1>{app.vaults.find((vault) => vault.id === app.selectedVaultId)?.label}</h1>
+            <p>No strategy</p>
+          </div>
         </div>
+      ) : (
+        <main className="sheet">
+          {app.surface === "chart" ? (
+            <ChartView
+              replay={app.replay}
+              playing={app.replayPlaying}
+              cursor={app.replay ? app.replayCursor || app.replay.events.length : 0}
+              speed={app.replaySpeed}
+              onImport={(file) => file.text().then((text) => app.setReplay(parseDemoLog(text, file.name)))}
+              onPlay={() => app.setPlaying(!app.replayPlaying)}
+              onReset={() => app.resetReplay()}
+              onSpeed={app.setSpeed}
+            />
+          ) : null}
+          {app.surface === "portfolio" ? <PortfolioDesk nodes={flow?.nodes ?? []} activity={app.replay} /> : null}
+          {app.surface === "chain" && chain ? (
+            <ChainDesk chain={chain} nodes={flow?.nodes ?? []} onOpen={pickProtocol} />
+          ) : null}
+          {app.surface === "protocol" && chain && protocol ? (
+            <ProtocolDesk
+              chain={chain}
+              protocol={protocol}
+              nodes={flow?.nodes ?? []}
+              replay={app.replay}
+              onAdd={(id) => {
+                app.addFromPalette(id);
+                setNote("Added to the strategy");
+              }}
+              onOpenStrategy={openStrategy}
+            />
+          ) : null}
+        </main>
       )}
 
       <header className="chrome">
@@ -156,13 +209,13 @@ export function Workspace() {
               ))}
             </div>
           </div>
-          {chain ? (
-            <div className="island">
-              <div className="pins" role="toolbar" aria-label="Board">
-                <ViewButton current={app.surface} id="flow" onPick={app.setSurface}>Flow</ViewButton>
-                <ViewButton current={app.surface} id="pnl" onPick={app.setSurface}>PnL</ViewButton>
-                <ViewButton current={app.surface} id="replay" onPick={app.setSurface}>Replay</ViewButton>
-              </div>
+          <div className="island">
+            <div className="pins" role="toolbar" aria-label="Views">
+              <ViewButton current={app.surface} id="portfolio" onPick={app.setSurface}>Portfolio</ViewButton>
+              <ViewButton current={app.surface} id="strategies" onPick={app.setSurface}>Strategies</ViewButton>
+              <ViewButton current={app.surface} id="chart" onPick={app.setSurface}>Chart</ViewButton>
+            </div>
+            {chain ? (
               <div className="pins" role="toolbar" aria-label={`${chain.label} protocols`}>
                 {chain.protocols.map((item) => (
                   <button
@@ -176,8 +229,8 @@ export function Workspace() {
                   </button>
                 ))}
               </div>
-            </div>
-          ) : null}
+            ) : null}
+          </div>
         </div>
 
         <div className="island right">
@@ -199,34 +252,13 @@ export function Workspace() {
         </div>
       </header>
 
-      {app.surface === "replay" && showBoard ? (
-        <div className="replay-bar">
-          <label className="file-btn">
-            Import
-            <input
-              aria-label="Import DEMO log"
-              type="file"
-              accept=".log,.txt,text/plain"
-              hidden
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (!file) return;
-                file.text().then((text) => app.setReplay(parseDemoLog(text, file.name)));
-              }}
-            />
-          </label>
-          <button type="button" disabled={!app.replay} onClick={() => app.setPlaying(!app.replayPlaying)}>{app.replayPlaying ? "Pause" : "Play"}</button>
-          <button type="button" disabled={!app.replay} onClick={() => app.resetReplay()}>Reset</button>
-          {([0.5, 1, 2] as const).map((speed) => (
-            <button key={speed} type="button" disabled={!app.replay} aria-pressed={app.replaySpeed === speed} onClick={() => app.setSpeed(speed)}>{speed}×</button>
-          ))}
-          <span className="quiet">{app.replay ? `Row ${app.replayCursor}` : "No log"}</span>
-        </div>
+      {strategies && app.replay ? (
+        <span className="replay-flag chip replay">Replay</span>
       ) : null}
 
       {note ? <p className="toast" role="status">{note}</p> : null}
 
-      <button
+      {strategies ? <button
         type="button"
         className="nodes-chip"
         aria-expanded={panel === "nodes"}
@@ -236,7 +268,7 @@ export function Workspace() {
           <strong>Nodes</strong>
           <small>{protocol?.label ?? chain?.label ?? "All chains"}</small>
         </span>
-      </button>
+      </button> : null}
 
       {panel === "flows" ? (
         <section className="panel panel-flows" aria-label="Flows">
@@ -394,6 +426,7 @@ export function Workspace() {
       {panel === "settings" ? <SettingsPanel onClose={() => setPanel(null)} /> : null}
       {panel === "review" && flow ? <ReviewPanel name={flow.name} nodes={flow.nodes} onClose={() => setPanel(null)} /> : null}
     </div>
+    </SkulletProvider>
   );
 }
 

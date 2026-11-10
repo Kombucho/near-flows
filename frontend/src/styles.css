@@ -1,39 +1,57 @@
 :root, [data-theme="light"] {
   color-scheme: light;
-  --bg: #ebe7e0;
-  --dot: #d4cfc6;
-  --card: #fffcf8;
-  --float: rgb(255 252 248 / 0.92);
-  --line: #e4ddd3;
-  --text: #1c1917;
-  --muted: #57534e;
-  --danger: #b91c1c;
-  --ok: #3f6212;
-  --warn: #9a3412;
-  --shadow: 0 16px 40px rgb(28 25 23 / 0.08);
-  --lift: 0 10px 24px rgb(28 25 23 / 0.1);
-  --near: #3d6f9a;
-  --sol: #6d5b96;
-  --evm: #2f7a62;
+  --bg: #f4f4f5;
+  --dot: #e4e4e7;
+  --card: #ffffff;
+  --card-2: #f3f3f5;
+  --float: rgb(255 255 255 / 0.92);
+  --tile: #0000000a;
+  --line: #00000014;
+  --text: #0b0b0c;
+  --muted: #5c5c66;
+  --danger: #dc2626;
+  --ok: #15803d;
+  --warn: #c2410c;
+  --green: #15803d;
+  --green-bg: #4ade8026;
+  --red: #dc2626;
+  --red-bg: #f8717126;
+  --orange: #ff9f0a;
+  --blue: #2f6fed;
+  --shadow: inset 0 0 0 1px #00000014;
+  --lift: 0 16px 40px rgb(0 0 0 / 0.06);
+  --near: #2f6fed;
+  --sol: #7c3aed;
+  --evm: #15803d;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
 }
 
 [data-theme="dark"] {
   color-scheme: dark;
-  --bg: #12110f;
-  --dot: #2c2a26;
-  --card: #1c1b19;
-  --float: rgb(28 27 25 / 0.9);
-  --line: #3a3834;
-  --text: #f5f4f1;
-  --muted: #a8a29e;
-  --danger: #fca5a5;
-  --ok: #d9f99d;
+  --bg: #000000;
+  --dot: #1c1c1c;
+  --card: #0b0b0c;
+  --card-2: #131313;
+  --float: rgb(11 11 12 / 0.92);
+  --tile: #ffffff0f;
+  --line: #1c1c1c;
+  --text: #f5f5f7;
+  --muted: #9b9ba3;
+  --danger: #f87171;
+  --ok: #4ade80;
   --warn: #fdba74;
-  --shadow: 0 18px 44px rgb(0 0 0 / 0.38);
-  --lift: 0 12px 28px rgb(0 0 0 / 0.32);
-  --near: #8eb4d4;
-  --sol: #c4b5e0;
-  --evm: #8fceB4;
+  --green: #4ade80;
+  --green-bg: #4ade801f;
+  --red: #f87171;
+  --red-bg: #f871711f;
+  --orange: #ff9f0a;
+  --blue: #2f6fed;
+  --shadow: inset 0 0 0 1px #1c1c1c;
+  --lift: 0 18px 40px rgb(0 0 0 / 0.45);
+  --near: #8eb4ff;
+  --sol: #c4b5fd;
+  --evm: #86efac;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
 }
 
 * { box-sizing: border-box; }
@@ -41,11 +59,14 @@ html, body, #root { height: 100%; margin: 0; }
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  font-size: 15px;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
 }
 button, input, select, textarea { font: inherit; color: inherit; }
-button { cursor: pointer; }
+button { cursor: pointer; transition: transform 0.1s var(--ease); }
+button:active:not(:disabled) { transform: scale(0.96); }
+h1, h2, .hero-value { font-family: Nunito, ui-rounded, "Segoe UI", sans-serif; }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
   outline: 2px solid var(--text);
@@ -283,10 +304,61 @@ dl { display: grid; grid-template-columns: 72px 1fr; gap: 6px 10px; margin: 0; f
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; }
 
+.sheet { height: 100%; overflow: auto; }
+.studio.tall .sheet { scroll-padding-top: 180px; }
+.desk { padding: 128px 20px 40px; display: grid; gap: 16px; }
+.studio.tall .desk { padding-top: 184px; }
+.desk-head, .hero, .arrange { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.desk-head { align-items: flex-end; }
+.desk h1 { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: -0.03em; }
+.desk h2, .tcard h2 { margin: 0 0 12px; font-size: 16px; font-weight: 700; }
+.eyebrow { margin: 0; color: var(--muted); font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+.hero { display: grid; justify-items: start; gap: 8px; }
+.hero-value { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.04em; }
+.masonry { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.tcard {
+  background: var(--card);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+.tcard.span-2 { grid-column: 1 / -1; }
+.chip, .chip-btn {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.chip-btn { background: var(--tile); box-shadow: var(--shadow); border: 0; }
+.chip-btn[aria-pressed="true"] { background: var(--orange); color: #1c0e00; }
+.chip.neutral { background: var(--tile); color: var(--muted); }
+.chip.ok, .chip.replay { background: var(--green-bg); color: var(--green); }
+.chip.bad { background: var(--red-bg); color: var(--red); }
+.feed { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.feed li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  background: var(--tile);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+.stage-row { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+.plain { width: 100%; text-align: left; background: transparent; border: 0; padding: 0; display: grid; gap: 6px; }
+.hidden-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.pele-host { min-height: 220px; overflow: auto; }
+.pele-host svg { max-width: 100%; height: auto; }
+.replay-flag { position: absolute; z-index: 6; left: 16px; bottom: 168px; }
 .step {
   width: 232px;
-  background: var(--card);
-  border: 1px solid var(--line);
+  background: var(--card-2);
+  border: 0;
   border-radius: 16px;
   box-shadow: var(--shadow);
   padding: 12px 12px 10px;
@@ -298,7 +370,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .step strong { font-size: 15px; font-weight: 600; }
 .step .venue { margin: 0; color: var(--muted); font-size: 13px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { font-size: 12px; color: var(--muted); background: var(--bg); border-radius: 999px; padding: 2px 8px; }
+.step .chip { font-size: 12px; color: var(--muted); background: var(--tile); border-radius: 999px; padding: 2px 8px; }
 .stage { font-size: 12px; color: var(--muted); }
 .stage.failed { color: var(--danger); }
 .stage.landed, .stage.reported { color: var(--ok); }
@@ -325,6 +397,9 @@ dd { margin: 0; overflow-wrap: anywhere; }
   .canvas-tools { left: 62px; bottom: 16px; }
   .react-flow__controls { left: 10px; bottom: 16px; }
   .flow-name { max-width: 120px; }
+  .masonry { grid-template-columns: 1fr; }
+  .tcard.span-2 { grid-column: auto; }
+  .desk, .studio.tall .desk { padding-top: 230px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

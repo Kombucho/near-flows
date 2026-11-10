@@ -11,7 +11,7 @@ export type VaultDraft = {
   loginLabel: string;
 };
 
-export type Surface = "flow" | "pnl" | "replay";
+export type Surface = "portfolio" | "chain" | "protocol" | "chart" | "strategies";
 
 type AppState = {
   loginLabel: string;
@@ -30,6 +30,13 @@ type AppState = {
 
 const STORAGE = "near-flows.draft.v1";
 
+function readSurface(value: Surface | undefined): Surface {
+  if (value === "portfolio" || value === "chain" || value === "protocol" || value === "chart" || value === "strategies") return value;
+  if (value === ("replay" as Surface)) return "chart";
+  if (value === ("pnl" as Surface)) return "portfolio";
+  return "portfolio";
+}
+
 function seed(): AppState {
   const vaults: VaultDraft[] = [
     { id: "local-named", label: "Named draft", kind: "named", loginLabel: "local session" },
@@ -43,7 +50,7 @@ function seed(): AppState {
     flows: [flow],
     selectedFlowId: flow.id,
     lens: { chain: "all", service: "all" },
-    surface: "flow",
+    surface: "portfolio",
     selectedNodeId: null,
     replay: null,
     replayCursor: 0,
@@ -58,7 +65,7 @@ function load(): AppState {
     if (!raw) return seed();
     const parsed = JSON.parse(raw) as Partial<AppState>;
     if (!parsed.vaults?.length || !parsed.flows?.length) return seed();
-    const surface: Surface = parsed.surface === "pnl" || parsed.surface === "replay" ? parsed.surface : "flow";
+    const surface = readSurface(parsed.surface);
     return {
       ...seed(),
       ...parsed,
@@ -115,7 +122,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           return { ...s, selectedVaultId: id, selectedFlowId: next?.id ?? s.selectedFlowId, selectedNodeId: null };
         }),
       addVault: (vault) => setState((s) => ({ ...s, vaults: [...s.vaults, vault], selectedVaultId: vault.id })),
-      selectFlow: (id) => setState((s) => ({ ...s, selectedFlowId: id, selectedNodeId: null, surface: "flow" })),
+      selectFlow: (id) => setState((s) => ({ ...s, selectedFlowId: id, selectedNodeId: null, surface: "strategies" })),
       createFlow: (name) =>
         setState((s) => {
           const flow: FlowDocument = {
@@ -124,9 +131,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
             name: name.trim() || "Untitled",
             nodes: [],
           };
-          return { ...s, flows: [...s.flows, flow], selectedFlowId: flow.id, selectedNodeId: null, surface: "flow" };
+          return { ...s, flows: [...s.flows, flow], selectedFlowId: flow.id, selectedNodeId: null, surface: "strategies" };
         }),
-      setLens: (lens) => setState((s) => ({ ...s, lens, ...(lens.chain === "all" ? { surface: "flow" as const } : {}) })),
+      setLens: (lens) => setState((s) => ({ ...s, lens })),
       setSurface: (surface) => setState((s) => ({ ...s, surface })),
       selectNode: (id) => setState((s) => ({ ...s, selectedNodeId: id })),
       updateVisibleNode: (node) =>
